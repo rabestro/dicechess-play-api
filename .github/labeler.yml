@@ -1,0 +1,27 @@
+# Type labels from paths (only labels that exist in this repo)
+testing:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/src/test/**'
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+ci-cd:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'mise.toml'
+          - 'lefthook.yml'
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'build.sbt'
+          - 'project/**'
+          - '.scala-steward.conf'
+
+# Type labels from the branch naming convention: (task|feat|bug)/<id>-<desc>
+enhancement:
+  - head-branch: ['^feat/']
+bug:
+  - head-branch: ['^bug/']

@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Scala/sbt dependencies are handled by Scala Steward (.scala-steward.conf).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "rabestro"
+    reviewers:
+      - "rabestro"
+    labels:
+      - "ci-cd"
+    commit-message:
+      prefix: "chore"

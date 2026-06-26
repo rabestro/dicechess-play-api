@@ -1,0 +1,63 @@
+[tools]
+# Local-development tool set. CI installs the JVM toolchain via setup-java/setup-sbt and
+# runs sbt directly (see .github/workflows/ci.yaml), so keep this lean.
+java = "temurin-25"   # Primary runtime, aligned with CI (Java 25)
+
+# Git hooks & formatting
+lefthook = "latest"   # Git hooks manager (pre-commit / pre-push)
+betterleaks = "latest" # Secret scanning in the pre-commit hook
+scalafmt = "3.11.1"   # native CLI; MUST match the version in .scalafmt.conf
+
+# Workflow CLIs
+gh = "latest"         # GitHub CLI: PRs, issues, releases
+jq = "latest"         # JSON processor
+
+[tasks.setup]
+description = "📦 Install tooling and register Git hooks locally"
+depends = ["setup:tools", "hook:install"]
+
+[tasks."setup:tools"]
+description = "🛠️  Install the SBT build tool"
+run = "brew install sbt"
+
+[tasks.compile]
+description = "🔨 Incremental compilation of main and test sources"
+run = "sbt compile Test/compile"
+
+[tasks.run]
+description = "▶️  Start the play-api server"
+run = "sbt run"
+
+[tasks.test]
+description = "🧪 Execute the MUnit test suite"
+run = "sbt test"
+
+[tasks.coverage]
+description = "📊 Run tests with scoverage and generate a local report"
+run = "sbt clean coverage test coverageReport"
+
+[tasks.check]
+description = "✅ Full validation cycle (mirrors CI)"
+# scalafmtCheckAll runs AFTER clean: a warm target/ can let sbt-scalafmt's incremental
+# cache skip an actually-misformatted file (so local passes while a fresh CI checkout fails).
+run = "sbt scalafmtCheckAll clean coverage test coverageReport"
+
+[tasks.format]
+description = "✨ Reformat the codebase"
+run = "sbt scalafmtAll"
+
+[tasks."format:check"]
+description = "🔍 Verify code formatting"
+run = "sbt scalafmtCheckAll"
+
+[tasks.clean]
+description = "🧹 Remove build artifacts"
+run = "sbt clean"
+
+[tasks."hook:install"]
+description = "🪝 Register Git hooks via lefthook"
+run = "lefthook install"
+
+[tasks."hook:run"]
+description = "🏃 Run all pre-commit hook jobs across the codebase"
+run = "lefthook run pre-commit --all-files"

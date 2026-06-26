@@ -1,0 +1,65 @@
+name: "CI: Scala"
+
+on:
+  push:
+    branches: [main]
+    # Source only — doc-only changes should not trigger the test suite.
+    paths:
+      - "src/**"
+      - "build.sbt"
+      - "project/**"
+      - ".scalafmt.conf"
+      - ".github/workflows/ci.yaml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.sbt"
+      - "project/**"
+      - ".scalafmt.conf"
+      - ".github/workflows/ci.yaml"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Exposed to the step `if:` so the Sonar scan is skipped until the project is
+      # onboarded on SonarCloud and the SONAR_TOKEN secret is set — keeps CI green.
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Full history so SonarCloud computes new-code / blame accurately
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: sbt
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      # Mirrors `mise run check`; invoked directly so the CI job only needs the JVM
+      # toolchain instead of the full local tool set from mise.toml.
+      - name: Run validation (format, coverage, tests)
+        run: sbt scalafmtCheckAll clean coverage test coverageReport
+        env:
+          # Resolves lv.id.jc:dicechess-engine-scala from GitHub Packages
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Imports the scoverage report (see sonar-project.properties) into SonarCloud.
+      # Requires Automatic Analysis to be OFF for this project (CI-based analysis instead).
+      - name: SonarQube Scan
+        if: ${{ env.SONAR_TOKEN != '' && github.actor != 'dependabot[bot]' }}
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
