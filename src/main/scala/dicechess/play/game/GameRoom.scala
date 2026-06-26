@@ -53,10 +53,13 @@ final class GameRoom private (
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
 
-  /** Publish an event with the next version and return the advanced session. */
+  /** Advance the session, write it, THEN publish — so the Ref always reflects the latest published event. A subscriber
+    * that registers just after a publish reads a current Snapshot (and acts), and one that registers just before
+    * catches the live event; publishing before the write would let a subscriber in that window miss both and hang.
+    */
   private def emit(s: Session, make: Long => GameEvent): IO[Session] =
-    val v = s.version + 1
-    topic.publish1(make(v)).void.as(s.copy(version = v))
+    val s2 = s.copy(version = s.version + 1)
+    stateRef.set(s2) *> topic.publish1(make(s2.version)).void.as(s2)
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
   private def beginTurn(s0: Session): IO[Session] =

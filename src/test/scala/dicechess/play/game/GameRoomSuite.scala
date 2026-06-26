@@ -28,7 +28,7 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       yield over
 
     game
-      .timeoutTo(60.seconds, IO.raiseError(RuntimeException("game did not finish in time")))
+      .timeoutTo(20.seconds, IO.raiseError(RuntimeException("game did not finish in time")))
       .map: over =>
         assert(
           over.termination == Termination.KingCaptured || over.termination == Termination.Draw,
