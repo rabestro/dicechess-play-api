@@ -2,7 +2,6 @@ package dicechess.play.game
 
 import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Queue
-import cats.syntax.all.*
 import dicechess.engine.domain.GameState
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
@@ -46,7 +45,11 @@ final class GameRoom private (
   private def consume: IO[Unit] =
     inbox.take.flatMap:
       case Msg.Begin =>
-        stateRef.get.flatMap(beginTurn).flatMap(stateRef.set) *> continue
+        stateRef.get.flatMap { s =>
+          // Idempotent: only the first Begin (before any roll) starts the game; a repeated
+          // or retried start must not re-roll a pending turn or double-increment the ply.
+          if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
+        } *> continue
       case Msg.Command(seat, command) =>
         stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
 
@@ -137,17 +140,20 @@ object GameRoom:
     def public: PublicGameState =
       PublicGameState(version, EngineOps.serialize(state), EngineOps.activeSeat(state), pending, status)
 
+  /** Create a room, or describe why the initial position is invalid — errors as values. */
   def create(
       players: Map[Seat, Principal],
       dice: DiceSource,
       initialDfen: String = EngineOps.InitialDfen
-  ): IO[GameRoom] =
-    for
-      state0 <- IO.fromEither(EngineOps.parse(initialDfen).leftMap(msg => RuntimeException(s"bad initial FEN: $msg")))
-      ref    <- Ref.of[IO, Session](Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active))
-      inbox  <- Queue.unbounded[IO, Msg]
-      topic  <- Topic[IO, GameEvent]
-      done   <- Deferred[IO, GameOver]
-      room = new GameRoom(ref, inbox, topic, done)
-      _ <- room.consume.start
-    yield room
+  ): IO[Either[String, GameRoom]] =
+    EngineOps.parse(initialDfen) match
+      case Left(error)   => IO.pure(Left(error))
+      case Right(state0) =>
+        for
+          ref   <- Ref.of[IO, Session](Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active))
+          inbox <- Queue.unbounded[IO, Msg]
+          topic <- Topic[IO, GameEvent]
+          done  <- Deferred[IO, GameOver]
+          room = new GameRoom(ref, inbox, topic, done)
+          _ <- room.consume.start
+        yield Right(room)

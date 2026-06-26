@@ -2,6 +2,8 @@ package dicechess.play.dice
 
 import cats.effect.IO
 
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets.UTF_8
 import java.security.{MessageDigest, SecureRandom}
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -40,7 +42,7 @@ object DiceSource:
       def commit: String             = hex(sha256(seed))
       def reveal: String             = hex(seed)
       def roll(ply: Long): List[Int] =
-        diceFrom(hmac(seed, s"$clientSeedW|$clientSeedB|$ply".getBytes("UTF-8")))
+        derive(seed, rollMessage(clientSeedW, clientSeedB, ply))
 
   /** Mint a fresh commit-reveal source with a 32-byte CSPRNG server seed. */
   def newCommitReveal(clientSeedW: String, clientSeedB: String): IO[DiceSource] =
@@ -49,20 +51,38 @@ object DiceSource:
       SecureRandom().nextBytes(seed)
       commitReveal(seed, clientSeedW, clientSeedB)
 
-  private def diceFrom(bytes: Array[Byte]): List[Int] =
-    val dice = ListBuffer.empty[Int]
-    var i    = 0
-    while dice.size < DiceCount && i < bytes.length do
-      val b = bytes(i) & 0xff
-      if b < Cutoff then dice += (b % Faces) + 1
-      i += 1
-    // 32 HMAC bytes with ~98.4% acceptance make exhaustion effectively impossible; this
-    // deterministic fallback only exists so the function is total.
-    var j = 0
+  /** Canonical, unambiguous HMAC message: length-prefixed seeds + ply, so different (clientW, clientB) splits can never
+    * collide (e.g. ("a|b","c") vs ("a","b|c")).
+    */
+  private def rollMessage(clientSeedW: String, clientSeedB: String, ply: Long): Array[Byte] =
+    val white = clientSeedW.getBytes(UTF_8)
+    val black = clientSeedB.getBytes(UTF_8)
+    ByteBuffer
+      .allocate(4 + white.length + 4 + black.length + 8)
+      .putInt(white.length)
+      .put(white)
+      .putInt(black.length)
+      .put(black)
+      .putLong(ply)
+      .array()
+
+  /** Three unbiased dice via rejection sampling. Bytes >= Cutoff are rejected (no modulo bias); if a block is exhausted
+    * we derive the next HMAC block keyed by a counter and keep sampling — so the result is always total AND unbiased.
+    */
+  private def derive(seed: Array[Byte], base: Array[Byte]): List[Int] =
+    val dice  = ListBuffer.empty[Int]
+    var block = 0
     while dice.size < DiceCount do
-      dice += ((bytes(j % bytes.length) & 0xff) % Faces) + 1
-      j += 1
+      val bytes = hmac(seed, base ++ intBytes(block))
+      var i     = 0
+      while dice.size < DiceCount && i < bytes.length do
+        val b = bytes(i) & 0xff
+        if b < Cutoff then dice += (b % Faces) + 1
+        i += 1
+      block += 1
     dice.toList
+
+  private def intBytes(n: Int): Array[Byte] = ByteBuffer.allocate(4).putInt(n).array()
 
   private def hmac(key: Array[Byte], message: Array[Byte]): Array[Byte] =
     val mac = Mac.getInstance("HmacSHA256")

@@ -30,3 +30,9 @@ class DiceSourceSuite extends munit.FunSuite:
     val a = DiceSource.commitReveal(seed, "alice", "bob")
     val c = DiceSource.commitReveal(seed, "carol", "dave")
     assertNotEquals((0L until 50L).map(a.roll).toList, (0L until 50L).map(c.roll).toList)
+
+  test("client-seed boundaries do not collide (canonical encoding)"):
+    // ("a|b","c") and ("a","b|c") must not hash to the same dice stream.
+    val a = DiceSource.commitReveal(seed, "a|b", "c")
+    val b = DiceSource.commitReveal(seed, "a", "b|c")
+    assertNotEquals((0L until 30L).map(a.roll).toList, (0L until 30L).map(b.roll).toList)
