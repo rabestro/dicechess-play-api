@@ -1,0 +1,29 @@
+# Lefthook — Git hooks configuration
+# Docs: https://github.com/evilmartians/lefthook
+# Same standard as dicechess-engine-scala / dicechess-analytics.
+# Install locally with `mise run setup` (or `lefthook install`).
+
+pre-commit:
+  parallel: true
+  jobs:
+    # Secret scanning: abort if any staged diff leaks a credential.
+    # betterleaks is the successor by the gitleaks author (gitleaks is feature-frozen).
+    # Detection only: no rule validation configured, nothing leaves the machine.
+    - name: betterleaks
+      run: betterleaks git --pre-commit --redact --staged
+
+    # Native scalafmt CLI: milliseconds per commit. The pinned mise version MUST
+    # match .scalafmt.conf (the native binary does not auto-dispatch versions).
+    - name: scalafmt
+      glob: "**.{scala,sbt}"
+      run: scalafmt --test {staged_files}
+
+# Pre-push is a hermetic safety net, not a test gate: a full-project format check via
+# the native CLI (no Docker, no network). It catches what the per-commit hook can miss
+# (--no-verify commits, rebase/merge fallout). The full gate (tests + coverage) is
+# `mise run check` before a PR — enforced by CI; heavy checks live in CI only.
+pre-push:
+  jobs:
+    - name: scalafmt-all
+      glob: "**.{scala,sbt}"
+      run: scalafmt --test .
