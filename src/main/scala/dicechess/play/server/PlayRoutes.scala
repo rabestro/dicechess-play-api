@@ -21,21 +21,29 @@ object PlayRoutes:
 
   private given QueryParamDecoder[Seat] =
     QueryParamDecoder[String].emap: raw =>
-      val name = raw.toLowerCase.capitalize
-      scala.util.Try(Seat.valueOf(name)).toEither.left.map(_ => ParseFailure(s"invalid seat: $raw", raw))
+      raw.toLowerCase match
+        case "white"     => Right(Seat.White)
+        case "black"     => Right(Seat.Black)
+        case "spectator" => Right(Seat.Spectator)
+        case _           => Left(ParseFailure(s"invalid seat: $raw", raw))
 
   private object SeatParam extends QueryParamDecoderMatcher[Seat]("seat")
 
   def apply(registry: GameRegistry, wsb: WebSocketBuilder2[IO]): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case req @ POST -> Root / "games" =>
-        for
-          body <- req.as[CreateGame]
-          made <- registry.create(Principal.Guest(body.white), Principal.Guest(body.black))
-          resp <- made match
-            case Left(error)       => BadRequest(error)
-            case Right((id, room)) => room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c)))
-        yield resp
+        // attemptAs (not as): a malformed body is the client's fault, so answer 400, not 500.
+        req
+          .attemptAs[CreateGame]
+          .value
+          .flatMap:
+            case Left(failure) => BadRequest(failure.message)
+            case Right(body)   =>
+              registry
+                .create(Principal.Guest(body.white), Principal.Guest(body.black))
+                .flatMap:
+                  case Left(error)       => BadRequest(error)
+                  case Right((id, room)) => room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c)))
 
       case GET -> Root / "games" / id =>
         registry

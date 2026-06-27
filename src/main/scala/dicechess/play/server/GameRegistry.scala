@@ -20,7 +20,13 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]]):
       made   <- GameRoom.create(Map(Seat.White -> white, Seat.Black -> black), dice)
       result <- made match
         case Left(error) => IO.pure(Left(error))
-        case Right(room) => rooms.update(_.updated(id, room)) *> room.start.as(Right((id, room)))
+        case Right(room) =>
+          for
+            _ <- rooms.update(_.updated(id, room))
+            // Evict the room once its game ends, so the map doesn't grow without bound.
+            _ <- (room.result *> rooms.update(_.removed(id))).start
+            _ <- room.start
+          yield Right((id, room))
     yield result
 
 object GameRegistry:

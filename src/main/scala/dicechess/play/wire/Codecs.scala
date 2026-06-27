@@ -4,8 +4,6 @@ import dicechess.play.core.*
 import io.circe.generic.semiauto.deriveCodec
 import io.circe.{Codec, Decoder, Encoder}
 
-import scala.util.Try
-
 /** JSON wire codecs for the transport-neutral protocol. The WebSocket edge (and later the Bot API) are codecs over
   * these types — the game core never imports JSON.
   *
@@ -14,15 +12,17 @@ import scala.util.Try
   */
 object Codecs:
 
-  private def nameCodec[A](label: String, read: String => A): Codec[A] =
+  // Total, exception-free enum codec: decode by name lookup, encode as the case name.
+  private def nameCodec[A](label: String, values: Array[A]): Codec[A] =
+    val byName = values.iterator.map(v => v.toString -> v).toMap
     Codec.from(
-      Decoder.decodeString.emap(s => Try(read(s)).toEither.left.map(_ => s"invalid $label: $s")),
+      Decoder.decodeString.emap(s => byName.get(s).toRight(s"invalid $label: $s")),
       Encoder.encodeString.contramap(_.toString)
     )
 
-  given Codec[Side]        = nameCodec("Side", Side.valueOf)
-  given Codec[Seat]        = nameCodec("Seat", Seat.valueOf)
-  given Codec[Termination] = nameCodec("Termination", Termination.valueOf)
+  given Codec[Side]        = nameCodec("Side", Side.values)
+  given Codec[Seat]        = nameCodec("Seat", Seat.values)
+  given Codec[Termination] = nameCodec("Termination", Termination.values)
 
   given Codec[GameResult]      = deriveCodec
   given Codec[GameOver]        = deriveCodec

@@ -4,7 +4,9 @@ import cats.effect.IO
 
 import java.util.UUID
 
-/** Opaque game identifier (a random UUID string). */
+/** A game's identifier — a distinct type so route and registry keys can't be confused with arbitrary strings. Backed by
+  * a random UUID.
+  */
 opaque type GameId = String
 
 object GameId:

@@ -27,3 +27,20 @@ class CodecsSuite extends munit.FunSuite:
     roundtrip[Principal](Principal.Guest("g1"))
     roundtrip[Principal](Principal.User("u1"))
     roundtrip[Principal](Principal.Bot("acme", "v3"))
+
+  // Pin the exact on-the-wire shape: the browser/bot client depends on it, so a future
+  // codec change must break these, not silently reshape the protocol.
+
+  test("wire format the server accepts (decode)"):
+    assertEquals(decode[GameCommand]("""{"Resign":{}}"""), Right(GameCommand.Resign))
+    assertEquals(
+      decode[GameCommand]("""{"SubmitTurn":{"moves":["e2e4","g1f3"]}}"""),
+      Right(GameCommand.SubmitTurn(List("e2e4", "g1f3")))
+    )
+
+  test("wire format the server emits (encode)"):
+    assertEquals((GameCommand.Resign: GameCommand).asJson.noSpaces, """{"Resign":{}}""")
+    assertEquals(
+      (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen"): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen"}}"""
+    )
