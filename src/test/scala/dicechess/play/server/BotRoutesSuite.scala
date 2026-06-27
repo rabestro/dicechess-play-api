@@ -15,7 +15,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
   private def app: IO[HttpApp[IO]] =
     for
       events     <- BotEvents.create
-      registry   <- GameRegistry.create
+      registry   <- GameRegistry.create()
       challenges <- Challenges.create(events, registry)
     yield BotRoutes(auth, challenges, events, registry).orNotFound
 

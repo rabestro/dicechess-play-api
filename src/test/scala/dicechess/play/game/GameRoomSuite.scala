@@ -83,6 +83,46 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       .map: (over, _) =>
         assertEquals(over.termination, Termination.Aborted)
 
+  test("a seat left with no connection past the grace window forfeits"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+
+    GameRoom
+      .create(
+        Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")),
+        dice,
+        disconnectGrace = 200.millis
+      )
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // White attaches then drops; nobody reconnects, so the seat forfeits once the grace elapses.
+          room.connection(Seat.White).use_ *>
+            room.result.timeoutTo(10.seconds, IO.raiseError(RuntimeException("grace forfeit did not fire")))
+      }
+      .map: over =>
+        assertEquals(over.termination, Termination.Resign)
+        assertEquals(over.result, GameResult.Win(Side.Black))
+
+  test("reconnecting within the grace window cancels the forfeit"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+
+    GameRoom
+      .create(
+        Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")),
+        dice,
+        disconnectGrace = 300.millis
+      )
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // Drop White (starts the grace), reconnect immediately, and hold the seat well past the window:
+          // the forfeit must have been cancelled, so the game is still running (result not completed).
+          room.connection(Seat.White).use_ *>
+            room.connection(Seat.White).surround(room.result.map(Option(_)).timeoutTo(900.millis, IO.none))
+      }
+      .map: ended =>
+        assertEquals(ended, None, "a reconnect within the grace must cancel the forfeit")
+
   test("an abandoned pending turn forfeits on the turn deadline"):
     val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
 

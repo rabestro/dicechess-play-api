@@ -13,7 +13,7 @@ class ChallengesSuite extends munit.CatsEffectSuite:
   private def harness: IO[(BotEvents, Challenges)] =
     for
       events     <- BotEvents.create
-      registry   <- GameRegistry.create
+      registry   <- GameRegistry.create()
       challenges <- Challenges.create(events, registry)
     yield (events, challenges)
 

@@ -5,8 +5,10 @@ import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import dicechess.play.game.GameRoom
 
+import scala.concurrent.duration.FiniteDuration
+
 /** In-memory registry of live game rooms (one authoritative node, for now). */
-final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]]):
+final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]], disconnectGrace: FiniteDuration):
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
 
@@ -17,7 +19,7 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]]):
     for
       id     <- GameId.random
       dice   <- DiceSource.newCommitReveal(white.externalId, black.externalId)
-      made   <- GameRoom.create(Map(Seat.White -> white, Seat.Black -> black), dice)
+      made   <- GameRoom.create(Map(Seat.White -> white, Seat.Black -> black), dice, disconnectGrace = disconnectGrace)
       result <- made match
         case Left(error) => IO.pure(Left(error))
         case Right(room) =>
@@ -30,5 +32,5 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]]):
     yield result
 
 object GameRegistry:
-  def create: IO[GameRegistry] =
-    Ref.of[IO, Map[GameId, GameRoom]](Map.empty).map(GameRegistry(_))
+  def create(disconnectGrace: FiniteDuration = GameRoom.DefaultDisconnectGrace): IO[GameRegistry] =
+    Ref.of[IO, Map[GameId, GameRoom]](Map.empty).map(GameRegistry(_, disconnectGrace))

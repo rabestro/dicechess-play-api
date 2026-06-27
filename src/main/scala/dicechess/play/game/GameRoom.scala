@@ -1,6 +1,6 @@
 package dicechess.play.game
 
-import cats.effect.{Deferred, IO, Outcome, Ref, Resource}
+import cats.effect.{Deferred, Fiber, IO, Outcome, Ref, Resource}
 import cats.effect.std.Queue
 import cats.syntax.all.*
 import dicechess.engine.domain.GameState
@@ -31,7 +31,10 @@ final class GameRoom private (
     fanOutBuffer: Int,
     seatTokens: Map[Seat, String],
     idleCheck: FiniteDuration,
-    done: Deferred[IO, GameOver]
+    done: Deferred[IO, GameOver],
+    presence: Ref[IO, Map[Seat, Int]],
+    graceFibers: Ref[IO, Map[Seat, Fiber[IO, Throwable, Unit]]],
+    disconnectGrace: FiniteDuration
 ):
   import GameRoom.*
 
@@ -87,6 +90,48 @@ final class GameRoom private (
 
   /** Begin the game (roll the first turn). Call after subscribers have attached. */
   def start: IO[Unit] = inbox.offer(Msg.Begin)
+
+  // ── player presence / reconnect grace ───────────────────────────────────────
+
+  /** A player's live presence on the room: acquired when a transport (a WebSocket) attaches the seat, released when it
+    * detaches. A seat may hold several connections at once (e.g. two tabs); only when the *last* one drops does the
+    * seat have `disconnectGrace` to reconnect before it forfeits — so a refresh or a brief network blip no longer ends
+    * the game. Spectators hold nothing.
+    */
+  def connection(seat: Seat): Resource[IO, Unit] =
+    seat.side match
+      case None    => Resource.unit
+      case Some(_) => Resource.make(onConnect(seat))(_ => onDisconnect(seat))
+
+  private def onConnect(seat: Seat): IO[Unit] =
+    presence.update(m => m.updated(seat, m.getOrElse(seat, 0) + 1)) *> cancelGrace(seat)
+
+  private def onDisconnect(seat: Seat): IO[Unit] =
+    presence
+      .updateAndGet(m => m.updated(seat, math.max(0, m.getOrElse(seat, 1) - 1)))
+      .flatMap(m => if m.getOrElse(seat, 0) == 0 then scheduleForfeit(seat) else IO.unit)
+
+  /** Start the grace timer for a now-unmanned seat. It forfeits only if the seat is *still* unmanned when the timer
+    * elapses — the post-sleep re-check makes a reconnect that races the scheduling safe even if `cancelGrace` missed
+    * it. Resigning an already-ended game is a no-op in `process`.
+    */
+  private def scheduleForfeit(seat: Seat): IO[Unit] =
+    val forfeit =
+      IO.sleep(disconnectGrace) *>
+        presence.get.flatMap(m => if m.getOrElse(seat, 0) == 0 then submit(seat, GameCommand.Resign) else IO.unit)
+    forfeit.start.flatMap(fib => swapGrace(seat, Some(fib)))
+
+  private def cancelGrace(seat: Seat): IO[Unit] = swapGrace(seat, None)
+
+  /** Install (or clear) a seat's pending grace fiber, cancelling whatever it displaces. */
+  private def swapGrace(seat: Seat, next: Option[Fiber[IO, Throwable, Unit]]): IO[Unit] =
+    graceFibers
+      .modify { m =>
+        val prev = m.get(seat)
+        val m2   = next.fold(m.removed(seat))(m.updated(seat, _))
+        (m2, prev)
+      }
+      .flatMap(_.traverse_(_.cancel))
 
   /** Completes when the game ends. */
   def result: IO[GameOver] = done.get
@@ -232,6 +277,12 @@ object GameRoom:
     */
   private val DefaultIdleCheck: FiniteDuration = FiniteDuration(120, "seconds")
 
+  /** How long a seat may be without any connection before it forfeits — long enough to ride out a tab refresh or a
+    * brief network blip (paired with client auto-reconnect), short enough that a truly-gone player doesn't strand the
+    * opponent for long.
+    */
+  val DefaultDisconnectGrace: FiniteDuration = FiniteDuration(30, "seconds")
+
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
 
@@ -262,7 +313,8 @@ object GameRoom:
       dice: DiceSource,
       initialDfen: String = EngineOps.InitialDfen,
       fanOutBuffer: Int = DefaultFanOutBuffer,
-      idleCheck: FiniteDuration = DefaultIdleCheck
+      idleCheck: FiniteDuration = DefaultIdleCheck,
+      disconnectGrace: FiniteDuration = DefaultDisconnectGrace
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
@@ -274,7 +326,21 @@ object GameRoom:
           nextId      <- Ref.of[IO, Long](0L)
           seatTokens  <- mintTokens(players.keys)
           done        <- Deferred[IO, GameOver]
-          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, seatTokens, idleCheck, done)
+          presence    <- Ref.of[IO, Map[Seat, Int]](Map.empty)
+          graceFibers <- Ref.of[IO, Map[Seat, Fiber[IO, Throwable, Unit]]](Map.empty)
+          room = new GameRoom(
+            ref,
+            inbox,
+            subscribers,
+            nextId,
+            fanOutBuffer,
+            seatTokens,
+            idleCheck,
+            done,
+            presence,
+            graceFibers,
+            disconnectGrace
+          )
           _ <- room.supervisedConsume.start
         yield Right(room)
 
