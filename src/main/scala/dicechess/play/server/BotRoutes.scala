@@ -12,6 +12,8 @@ import org.http4s.dsl.io.*
 import org.http4s.headers.{Authorization, `Content-Type`, `WWW-Authenticate`}
 import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request, Response}
 
+import scala.concurrent.duration.*
+
 final case class BotAccount(team: String, name: String, id: String) derives Codec.AsObject
 final case class ChallengeTarget(team: String, name: String) derives Codec.AsObject
 final case class BotGame(gameId: String) derives Codec.AsObject
@@ -24,6 +26,11 @@ object BotRoutes:
 
   private val bearerChallenge = `WWW-Authenticate`(Challenge("Bearer", "dicechess-bot"))
   private val ndjsonType      = MediaType.unsafeParse("application/x-ndjson")
+
+  /** ndjson keep-alive cadence — under the ember server's 60s read-idle so an idle stream (a bot waiting for a
+    * challenge, or the gap between turns) isn't dropped at either end. The blank line is ignored by clients.
+    */
+  private val KeepAlive: FiniteDuration = 25.seconds
 
   def apply(auth: BotAuth, challenges: Challenges, events: BotEvents, registry: GameRegistry): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
@@ -126,5 +133,10 @@ object BotRoutes:
       token
     }
 
-  private def ndjson[A: Encoder](events: Stream[IO, A]): Stream[IO, Byte] =
-    events.map(_.asJson.noSpaces + "\n").through(fs2.text.utf8.encode)
+  private[server] def ndjson[A: Encoder](
+      events: Stream[IO, A],
+      keepAlive: FiniteDuration = KeepAlive
+  ): Stream[IO, Byte] =
+    val lines      = events.map(_.asJson.noSpaces + "\n")
+    val keepAlives = Stream.awakeEvery[IO](keepAlive).as("\n") // blank line; clients drop it
+    lines.mergeHaltL(keepAlives).through(fs2.text.utf8.encode)
