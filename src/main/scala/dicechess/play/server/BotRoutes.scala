@@ -137,6 +137,6 @@ object BotRoutes:
       events: Stream[IO, A],
       keepAlive: FiniteDuration = KeepAlive
   ): Stream[IO, Byte] =
-    val lines     = events.map(_.asJson.noSpaces + "\n")
+    val lines      = events.map(_.asJson.noSpaces + "\n")
     val keepAlives = Stream.awakeEvery[IO](keepAlive).as("\n") // blank line; clients drop it
     lines.mergeHaltL(keepAlives).through(fs2.text.utf8.encode)
