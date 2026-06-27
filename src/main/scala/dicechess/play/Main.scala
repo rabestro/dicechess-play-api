@@ -25,7 +25,12 @@ object Main extends IOApp.Simple:
         .withHost(host)
         .withPort(port)
         .withHttpWebSocketApp(wsb =>
-          (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> BotRoutes(botAuth, challenges, botEvents)).orNotFound
+          (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> BotRoutes(
+            botAuth,
+            challenges,
+            botEvents,
+            registry
+          )).orNotFound
         )
         .build
         .useForever

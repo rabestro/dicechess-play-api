@@ -1,7 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.Principal
+import dicechess.play.core.{GameCommand, GameId, Principal, Seat}
+import dicechess.play.game.GameRoom
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import io.circe.{Codec, Encoder}
@@ -9,21 +10,22 @@ import io.circe.syntax.*
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
 import org.http4s.headers.{Authorization, `Content-Type`, `WWW-Authenticate`}
-import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request}
+import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request, Response}
 
 final case class BotAccount(team: String, name: String, id: String) derives Codec.AsObject
 final case class ChallengeTarget(team: String, name: String) derives Codec.AsObject
 final case class BotGame(gameId: String) derives Codec.AsObject
+final case class BotMove(moves: List[String]) derives Codec.AsObject
 
-/** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, and the challenge lifecycle. The game
-  * event stream and idempotent move/resign endpoints arrive in the next slice.
+/** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, the challenge lifecycle, and the game
+  * play surface (game event stream + move/resign).
   */
 object BotRoutes:
 
   private val bearerChallenge = `WWW-Authenticate`(Challenge("Bearer", "dicechess-bot"))
   private val ndjsonType      = MediaType.unsafeParse("application/x-ndjson")
 
-  def apply(auth: BotAuth, challenges: Challenges, events: BotEvents): HttpRoutes[IO] =
+  def apply(auth: BotAuth, challenges: Challenges, events: BotEvents, registry: GameRegistry): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case req @ GET -> Root / "bot" / "account" =>
         asBot(auth, req) match
@@ -70,6 +72,50 @@ object BotRoutes:
                 case Left(Challenges.Rejected.NotFound)    => NotFound()
                 case Left(Challenges.Rejected.NotYours)    => Forbidden()
                 case Left(Challenges.Rejected.Failed(why)) => InternalServerError(why)
+
+      case req @ GET -> Root / "bot" / "game" / "stream" / id =>
+        asBot(auth, req) match
+          case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            seated(registry, id, bot): (room, _) =>
+              Ok(ndjson(room.subscribe)).map(_.withContentType(`Content-Type`(ndjsonType)))
+
+      case req @ POST -> Root / "bot" / "game" / id / "move" =>
+        asBot(auth, req) match
+          case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            req
+              .attemptAs[BotMove]
+              .value
+              .flatMap:
+                case Left(failure) => BadRequest(failure.message)
+                case Right(move)   =>
+                  // Fire-and-forget: the outcome (TurnPlayed / Rejected / GameEnded) arrives on the event stream.
+                  seated(registry, id, bot)((room, seat) =>
+                    room.submit(seat, GameCommand.SubmitTurn(move.moves)) *> Accepted()
+                  )
+
+      case req @ POST -> Root / "bot" / "game" / id / "resign" =>
+        asBot(auth, req) match
+          case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            seated(registry, id, bot)((room, seat) => room.submit(seat, GameCommand.Resign) *> Accepted())
+
+  /** Run `action` against the room and the caller's seat in it; 404 if no such game or the bot isn't seated there. */
+  private def seated(registry: GameRegistry, id: String, bot: Principal.Bot)(
+      action: (GameRoom, Seat) => IO[Response[IO]]
+  ): IO[Response[IO]] =
+    registry
+      .get(GameId(id))
+      .flatMap:
+        case None       => NotFound()
+        case Some(room) =>
+          seatOf(room, bot).flatMap:
+            case None       => NotFound()
+            case Some(seat) => action(room, seat)
+
+  private def seatOf(room: GameRoom, bot: Principal): IO[Option[Seat]] =
+    room.seating.map(_.collectFirst { case (seat, principal) if principal == bot => seat })
 
   /** The authenticated bot for a request, if its Bearer token is valid. */
   private def asBot(auth: BotAuth, req: Request[IO]): Option[Principal.Bot] =
