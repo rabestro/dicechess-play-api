@@ -35,3 +35,28 @@ class GameRoomSuite extends munit.CatsEffectSuite:
         over.result match
           case GameResult.Win(_) => assertEquals(over.termination, Termination.KingCaptured)
           case GameResult.Draw   => assertEquals(over.termination, Termination.Draw)
+
+  test("a stalled subscriber is dropped and never freezes the room"):
+    val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)
+    val black = BotConnection(Principal.Bot("acme", "greedy"), Seat.Black, greedy)
+    val dice  = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+
+    GameRoom
+      // Small fan-out buffer so the stalled subscriber overflows well within one game; the two bots
+      // never lag (the writer waits for the side to move), so they are unaffected.
+      .create(Map(Seat.White -> white.principal, Seat.Black -> black.principal), dice, fanOutBuffer = 16)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // Reads one event, then never pulls again. With the old back-pressuring fan-out this would
+          // freeze the whole room; now it is dropped once its buffer fills.
+          val stalled = room.subscribe.evalMap(_ => IO.never).compile.drain
+          // A healthy observer must still receive the terminal event.
+          val healthy = room.subscribe.collectFirst { case e: GameEvent.GameEnded => e }.compile.lastOrError
+
+          (white.run(room).background, black.run(room).background, stalled.background).tupled
+            .use(_ => room.start *> (room.result, healthy).parTupled)
+            .timeoutTo(20.seconds, IO.raiseError(RuntimeException("room froze with a stalled subscriber")))
+      }
+      .map: (over, ended) =>
+        assertEquals(ended.over, over)
