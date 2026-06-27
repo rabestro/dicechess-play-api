@@ -8,6 +8,8 @@ import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import fs2.Stream
 
+import java.security.SecureRandom
+
 /** The authoritative game room. A single consumer fiber drains an inbox and is the only writer of game state (the
   * mailbox-serialization an actor gives, without the framework); all reads are lock-free via `Ref.get`. Events fan out
   * to every subscriber (both players plus spectators) through per-subscriber bounded queues.
@@ -26,6 +28,7 @@ final class GameRoom private (
     subscribers: Ref[IO, Map[Long, GameRoom.Subscriber]],
     nextSubscriberId: Ref[IO, Long],
     fanOutBuffer: Int,
+    seatTokens: Map[Seat, String],
     done: Deferred[IO, GameOver]
 ):
   import GameRoom.*
@@ -88,6 +91,15 @@ final class GameRoom private (
 
   /** Who is seated where. */
   def seating: IO[Map[Seat, Principal]] = stateRef.get.map(_.players)
+
+  /** Per-seat join tokens minted at creation; the creator distributes them so each player can claim its seat. */
+  def joinTokens: Map[Seat, String] = seatTokens
+
+  /** The seat a join token grants, if any — so a WebSocket upgrade is authorized by a secret, not a trusted query
+    * param. The tokens are high-entropy random, so a plain comparison is fine.
+    */
+  def seatFor(token: String): Option[Seat] =
+    seatTokens.collectFirst { case (seat, t) if t == token => seat }
 
   /** The dice commitment (SHA-256 of the server seed), published at game start. */
   def diceCommit: IO[String] = stateRef.get.map(_.dice.commit)
@@ -236,7 +248,16 @@ object GameRoom:
           inbox       <- Queue.unbounded[IO, Msg]
           subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
           nextId      <- Ref.of[IO, Long](0L)
+          seatTokens  <- mintTokens(players.keys)
           done        <- Deferred[IO, GameOver]
-          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, done)
+          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, seatTokens, done)
           _ <- room.supervisedConsume.start
         yield Right(room)
+
+  private def mintTokens(seats: Iterable[Seat]): IO[Map[Seat, String]] =
+    seats.toList.traverse(seat => randomToken.map(seat -> _)).map(_.toMap)
+
+  private def randomToken: IO[String] = IO:
+    val bytes = new Array[Byte](16)
+    SecureRandom().nextBytes(bytes)
+    bytes.map("%02x".format(_)).mkString

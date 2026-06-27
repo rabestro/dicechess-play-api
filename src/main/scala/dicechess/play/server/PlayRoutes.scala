@@ -12,22 +12,19 @@ import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
 import org.http4s.server.websocket.WebSocketBuilder2
 import org.http4s.websocket.WebSocketFrame
-import org.http4s.{HttpRoutes, ParseFailure, QueryParamDecoder}
+import org.http4s.HttpRoutes
 
 final case class CreateGame(white: String, black: String) derives Codec.AsObject
-final case class CreatedGame(gameId: String, commit: String) derives Codec.AsObject
+final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
+
+/** The created game plus a per-seat join token: the creator distributes each token to the player who should hold that
+  * seat, and the WebSocket upgrade authorizes the seat from the token (never a trusted `?seat=` param).
+  */
+final case class CreatedGame(gameId: String, commit: String, tokens: List[SeatToken]) derives Codec.AsObject
 
 object PlayRoutes:
 
-  private given QueryParamDecoder[Seat] =
-    QueryParamDecoder[String].emap: raw =>
-      raw.toLowerCase match
-        case "white"     => Right(Seat.White)
-        case "black"     => Right(Seat.Black)
-        case "spectator" => Right(Seat.Spectator)
-        case _           => Left(ParseFailure(s"invalid seat: $raw", raw))
-
-  private object SeatParam extends QueryParamDecoderMatcher[Seat]("seat")
+  private object TokenParam extends OptionalQueryParamDecoderMatcher[String]("token")
 
   def apply(registry: GameRegistry, wsb: WebSocketBuilder2[IO]): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
@@ -43,7 +40,9 @@ object PlayRoutes:
                 .create(Principal.Guest(body.white), Principal.Guest(body.black))
                 .flatMap:
                   case Left(error)       => BadRequest(error)
-                  case Right((id, room)) => room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c)))
+                  case Right((id, room)) =>
+                    val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
+                    room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
 
       case GET -> Root / "games" / id =>
         registry
@@ -52,12 +51,19 @@ object PlayRoutes:
             case None       => NotFound()
             case Some(room) => room.snapshot.flatMap(Ok(_))
 
-      case GET -> Root / "games" / id / "ws" :? SeatParam(seat) =>
+      // The seat is resolved from a verified join token; a tokenless connection is a read-only spectator.
+      case GET -> Root / "games" / id / "ws" :? TokenParam(token) =>
         registry
           .get(GameId(id))
           .flatMap:
             case None       => NotFound()
-            case Some(room) => wsb.build(toClient(room), fromClient(room, seat))
+            case Some(room) =>
+              token match
+                case None    => wsb.build(toClient(room), fromClient(room, Seat.Spectator))
+                case Some(t) =>
+                  room.seatFor(t) match
+                    case None       => Forbidden()
+                    case Some(seat) => wsb.build(toClient(room), fromClient(room, seat))
 
   private def toClient(room: GameRoom): Stream[IO, WebSocketFrame] =
     room.subscribe.map(event => WebSocketFrame.Text(event.asJson.noSpaces))
