@@ -92,6 +92,8 @@ IMAGE=dicechess-play-api scripts/smoke-test.sh   # boots the image, asserts it s
 
 CI publishes a multi-arch image to `ghcr.io/rabestro/dicechess-play-api` on every push to `main` (build → smoke → push). Deploy on the homelab with `docker-compose.yaml` — set `PLAY_BOT_TOKENS` (and pin `API_TAG=vX.Y.Z`) in `.env`; the API listens on host port `8040`.
 
+The browser play-site calls the API cross-origin, so CORS is enabled. By default any origin may read it (safe here — the API uses no cookies; tokens travel explicitly, so there are no ambient credentials to leak). Set `PLAY_CORS_ORIGINS` to a comma-separated allow-list of full origins (e.g. `https://play.jc.id.lv,http://localhost:5173`) to restrict it.
+
 **Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`/bot/account`, `/bot/stream/event`, `/bot/challenge/{team}/{name}`).
 
 > Game state is **in-memory** for now — a restart drops live games. Durability (Postgres `play` schema) lands later in 3b.
