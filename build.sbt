@@ -29,6 +29,10 @@ ThisBuild / credentials ++= (for {
 val DiceChessEngineVersion = "1.6.1"
 val CatsEffectVersion      = "3.6.3"
 val Fs2Version             = "3.12.0"
+val Http4sVersion          = "0.23.30"
+val CirceVersion           = "0.14.10"
+val LogbackVersion         = "1.5.18"
+val Http4sJdkClientVersion = "0.9.2"
 val MunitVersion           = "1.3.0"
 val MunitCatsEffectVersion = "2.1.0"
 
@@ -41,9 +45,19 @@ lazy val root = (project in file("."))
       // Effect system + streaming/concurrency primitives (Ref, Queue, Topic)
       "org.typelevel" %% "cats-effect" % CatsEffectVersion,
       "co.fs2"        %% "fs2-core"    % Fs2Version,
+      // HTTP / WebSocket server + JSON
+      "org.http4s" %% "http4s-ember-server" % Http4sVersion,
+      "org.http4s" %% "http4s-dsl"          % Http4sVersion,
+      "org.http4s" %% "http4s-circe"        % Http4sVersion,
+      "io.circe"   %% "circe-core"          % CirceVersion,
+      "io.circe"   %% "circe-generic"       % CirceVersion,
+      "io.circe"   %% "circe-parser"        % CirceVersion,
+      // Logging backend for Ember
+      "ch.qos.logback" % "logback-classic" % LogbackVersion % Runtime,
       // Testing
-      "org.scalameta" %% "munit"             % MunitVersion           % Test,
-      "org.typelevel" %% "munit-cats-effect" % MunitCatsEffectVersion % Test
+      "org.scalameta" %% "munit"                  % MunitVersion           % Test,
+      "org.typelevel" %% "munit-cats-effect"      % MunitCatsEffectVersion % Test,
+      "org.http4s"    %% "http4s-jdk-http-client" % Http4sJdkClientVersion % Test
     ),
     scalacOptions ++= Seq(
       "-Werror",

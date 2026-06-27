@@ -41,6 +41,12 @@ final class GameRoom private (
   /** Who is seated where. */
   def seating: IO[Map[Seat, Principal]] = stateRef.get.map(_.players)
 
+  /** The dice commitment (SHA-256 of the server seed), published at game start. */
+  def diceCommit: IO[String] = stateRef.get.map(_.dice.commit)
+
+  /** Current public state (for a REST snapshot or a freshly-joining client). */
+  def snapshot: IO[PublicGameState] = stateRef.get.map(_.public)
+
   // ── consumer fiber ─────────────────────────────────────────────────────────
   private def consume: IO[Unit] =
     inbox.take.flatMap:
