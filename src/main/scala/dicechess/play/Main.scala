@@ -16,7 +16,7 @@ object Main extends IOApp.Simple:
 
   def run: IO[Unit] =
     for
-      registry   <- GameRegistry.create
+      registry   <- GameRegistry.create()
       botAuth    <- BotAuth.fromEnv
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)

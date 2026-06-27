@@ -88,12 +88,12 @@ object PlayRoutes:
 
   private def fromClient(room: GameRoom, seat: Seat): Pipe[IO, WebSocketFrame, Unit] =
     in =>
-      in.evalMap {
+      val commands = in.evalMap {
         // Spectators receive events but cannot submit commands.
         case WebSocketFrame.Text(txt, _) if seat.side.isDefined =>
           decode[GameCommand](txt).fold(_ => IO.unit, room.submit(seat, _))
         case _ => IO.unit
-      }.onFinalize {
-        // A player whose socket closes mid-game resigns; a no-op once the game is already over.
-        if seat.side.isDefined then room.submit(seat, GameCommand.Resign) else IO.unit
       }
+      // Hold the seat's presence for the life of the socket. When it drops, the room starts the reconnect grace
+      // timer (a no-op for spectators) — so a refresh or a brief blip no longer resigns the game outright.
+      Stream.resource(room.connection(seat)) >> commands

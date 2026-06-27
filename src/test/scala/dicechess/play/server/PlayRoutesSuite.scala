@@ -32,10 +32,12 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
   private def greedy: SearchAlgorithm =
     BotRegistry.getAlgorithm("greedy").getOrElse(sys.error("greedy bot not registered"))
 
-  /** An Ember server on an ephemeral port; yields the bound port. */
+  /** An Ember server on an ephemeral port; yields the bound port. A short reconnect grace keeps the disconnect test
+    * fast — a dropped player forfeits shortly after the socket closes rather than after the production grace.
+    */
   private def server: Resource[IO, Int] =
     for
-      registry <- Resource.eval(GameRegistry.create)
+      registry <- Resource.eval(GameRegistry.create(disconnectGrace = 500.millis))
       srv      <- EmberServerBuilder
         .default[IO]
         .withHost(host"127.0.0.1")
@@ -106,7 +108,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         status <- http.status(GET(wsPath +? ("token" -> "not-a-real-token")))
       yield assertEquals(status, Status.Forbidden)
 
-  test("a player disconnecting resigns the game"):
+  test("a player who disconnects and does not reconnect forfeits after the grace"):
     val resources =
       for
         port <- server
