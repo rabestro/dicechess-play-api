@@ -1,8 +1,9 @@
 package dicechess.play
 
 import cats.effect.{IO, IOApp}
+import cats.syntax.all.*
 import com.comcast.ip4s.*
-import dicechess.play.server.{GameRegistry, PlayRoutes}
+import dicechess.play.server.{BotAuth, BotRoutes, GameRegistry, PlayRoutes}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 
@@ -13,11 +14,14 @@ object Main extends IOApp.Simple:
   private val port = port"8080"
 
   def run: IO[Unit] =
-    GameRegistry.create.flatMap: registry =>
-      EmberServerBuilder
+    for
+      registry <- GameRegistry.create
+      botAuth  <- BotAuth.fromEnv
+      _        <- EmberServerBuilder
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpWebSocketApp(wsb => PlayRoutes(registry, wsb).orNotFound)
+        .withHttpWebSocketApp(wsb => (PlayRoutes(registry, wsb) <+> BotRoutes(botAuth)).orNotFound)
         .build
         .useForever
+    yield ()
