@@ -12,8 +12,11 @@ services:
     environment:
       # Bot roster for the Bot API (single-author gate): comma-separated team|name|token.
       PLAY_BOT_TOKENS: ${PLAY_BOT_TOKENS:-}
+      # Browser CORS allow-list (comma-separated full origins); empty = allow any origin.
+      PLAY_CORS_ORIGINS: ${PLAY_CORS_ORIGINS:-}
       JAVA_OPTS: "-Dcats.effect.warnOnNonMainThreadDetected=false --sun-misc-unsafe-memory-access=allow"
-    # Host port 8040 (analytics owns 8020/8030 on aurora).
+    # Host port 8040 (analytics owns 8020/8030 on aurora). The tunnel reaches the api over the
+    # compose network at api:8080, so this mapping is only for local curl / debugging.
     ports:
       - "8040:8080"
     healthcheck:
@@ -21,3 +24,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Cloudflare Tunnel: publishes the api at play-api.jc.id.lv with automatic TLS + WSS and no
+  # port-forwarding. The public hostname (play-api.jc.id.lv -> HTTP -> api:8080) is configured in the
+  # Cloudflare dashboard; the token (account-scoped, keep it in .env, never commit) wires this side.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN:-}
+    depends_on:
+      - api
