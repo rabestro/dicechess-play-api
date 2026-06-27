@@ -1,0 +1,23 @@
+# Pinned project name so the stack is stable regardless of the deploy directory.
+name: dicechess-play-api
+
+services:
+  api:
+    # Tag is overridable so one compose file serves every environment: prod pins a
+    # released version (API_TAG=vX.Y.Z), unset defaults to :latest for dev/local.
+    image: ghcr.io/rabestro/dicechess-play-api:${API_TAG:-latest}
+    restart: always
+    env_file:
+      - .env
+    environment:
+      # Bot roster for the Bot API (single-author gate): comma-separated team|name|token.
+      PLAY_BOT_TOKENS: ${PLAY_BOT_TOKENS:-}
+      JAVA_OPTS: "-Dcats.effect.warnOnNonMainThreadDetected=false --sun-misc-unsafe-memory-access=allow"
+    # Host port 8040 (analytics owns 8020/8030 on aurora).
+    ports:
+      - "8040:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
