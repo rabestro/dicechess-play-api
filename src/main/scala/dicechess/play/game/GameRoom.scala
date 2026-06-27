@@ -23,12 +23,24 @@ final class GameRoom private (
 ):
   import GameRoom.*
 
-  /** Current state, then the live event feed — so a late subscriber can still act. */
+  /** Current state, then the live event feed — so a late subscriber can still act. The stream completes once the game
+    * is over (after emitting the terminal event, or immediately for someone who joins an already-finished game), so the
+    * transport can close the connection instead of holding it open forever.
+    */
   def subscribe: Stream[IO, GameEvent] =
     Stream
       .resource(topic.subscribeAwait(256))
       .flatMap: live =>
-        Stream.eval(stateRef.get.map(s => GameEvent.Snapshot(s.version, s.public))) ++ live
+        val snapshot = Stream.eval(stateRef.get.map(s => GameEvent.Snapshot(s.version, s.public)))
+        (snapshot ++ live).takeThrough(event => !isTerminal(event))
+
+  private def isTerminal(event: GameEvent): Boolean = event match
+    case GameEvent.GameEnded(_, _) => true
+    case GameEvent.Snapshot(_, ps) =>
+      ps.status match
+        case GameStatus.Ended(_) => true
+        case GameStatus.Active   => false
+    case _ => false
 
   def submit(seat: Seat, command: GameCommand): IO[Unit] = inbox.offer(Msg.Command(seat, command))
 
@@ -40,6 +52,12 @@ final class GameRoom private (
 
   /** Who is seated where. */
   def seating: IO[Map[Seat, Principal]] = stateRef.get.map(_.players)
+
+  /** The dice commitment (SHA-256 of the server seed), published at game start. */
+  def diceCommit: IO[String] = stateRef.get.map(_.dice.commit)
+
+  /** Current public state (for a REST snapshot or a freshly-joining client). */
+  def snapshot: IO[PublicGameState] = stateRef.get.map(_.public)
 
   // ── consumer fiber ─────────────────────────────────────────────────────────
   private def consume: IO[Unit] =
