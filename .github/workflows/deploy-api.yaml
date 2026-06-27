@@ -12,6 +12,10 @@ on:
       - ".dockerignore"
       - "scripts/smoke-test.sh"
       - ".github/workflows/deploy-api.yaml"
+  # Rebuild after a release so the new vX.Y.Z tag is published as an image tag.
+  workflow_run:
+    workflows: ["Ops: Release"]
+    types: [completed]
   workflow_dispatch:
 
 # Newest commit wins: cancelling a superseded build prevents an older image
@@ -27,6 +31,8 @@ env:
 jobs:
   build-and-push:
     name: Build & Push
+    # On a release (workflow_run) only proceed if the release itself succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
@@ -68,7 +74,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_run' }}
             type=raw,value=${{ steps.version.outputs.app_version }}
             type=sha,format=short
           labels: |
