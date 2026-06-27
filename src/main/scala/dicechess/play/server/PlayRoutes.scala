@@ -69,8 +69,13 @@ object PlayRoutes:
     room.subscribe.map(event => WebSocketFrame.Text(event.asJson.noSpaces))
 
   private def fromClient(room: GameRoom, seat: Seat): Pipe[IO, WebSocketFrame, Unit] =
-    _.evalMap:
-      // Spectators receive events but cannot submit commands.
-      case WebSocketFrame.Text(txt, _) if seat.side.isDefined =>
-        decode[GameCommand](txt).fold(_ => IO.unit, room.submit(seat, _))
-      case _ => IO.unit
+    in =>
+      in.evalMap {
+        // Spectators receive events but cannot submit commands.
+        case WebSocketFrame.Text(txt, _) if seat.side.isDefined =>
+          decode[GameCommand](txt).fold(_ => IO.unit, room.submit(seat, _))
+        case _ => IO.unit
+      }.onFinalize {
+        // A player whose socket closes mid-game resigns; a no-op once the game is already over.
+        if seat.side.isDefined then room.submit(seat, GameCommand.Resign) else IO.unit
+      }

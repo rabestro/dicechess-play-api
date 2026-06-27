@@ -82,3 +82,25 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       }
       .map: (over, _) =>
         assertEquals(over.termination, Termination.Aborted)
+
+  test("an abandoned pending turn forfeits on the turn deadline"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+
+    GameRoom
+      .create(
+        Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")),
+        dice,
+        idleCheck = 200.millis
+      )
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // Nobody ever submits, so the side to move runs out the deadline and forfeits.
+          (room.start *> room.result)
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("turn deadline did not fire")))
+      }
+      .map: over =>
+        assertEquals(over.termination, Termination.Timeout)
+        over.result match
+          case GameResult.Win(_) => ()
+          case other             => fail(s"a timeout is a forfeit win, got: $other")

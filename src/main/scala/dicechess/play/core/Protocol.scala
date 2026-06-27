@@ -3,10 +3,11 @@ package dicechess.play.core
 /** Why a game ended. Maps to the analytics `game_termination_enum` at ingest time.
   *
   * `Aborted` is a server-side abort (the writer fiber failed or was cancelled, e.g. on shutdown); the game has no
-  * sporting result. Its analytics mapping is finalized with the analytics handoff.
+  * sporting result. `Timeout` is the player to move failing to act within the turn deadline (a forfeit). Their
+  * analytics mappings are finalized with the analytics handoff.
   */
 enum Termination:
-  case KingCaptured, Resign, Draw, Aborted
+  case KingCaptured, Resign, Draw, Aborted, Timeout
 
 enum GameResult:
   case Win(side: Side)
