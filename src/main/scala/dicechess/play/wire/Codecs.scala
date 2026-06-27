@@ -31,3 +31,5 @@ object Codecs:
   given Codec[PublicGameState] = deriveCodec
   given Codec[GameCommand]     = deriveCodec
   given Codec[GameEvent]       = deriveCodec
+  given Codec[Challenge]       = deriveCodec
+  given Codec[BotEvent]        = deriveCodec

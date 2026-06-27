@@ -3,7 +3,7 @@ package dicechess.play
 import cats.effect.{IO, IOApp}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
-import dicechess.play.server.{BotAuth, BotRoutes, GameRegistry, PlayRoutes}
+import dicechess.play.server.{BotAuth, BotEvents, BotRoutes, Challenges, GameRegistry, PlayRoutes}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 
@@ -15,13 +15,17 @@ object Main extends IOApp.Simple:
 
   def run: IO[Unit] =
     for
-      registry <- GameRegistry.create
-      botAuth  <- BotAuth.fromEnv
-      _        <- EmberServerBuilder
+      registry   <- GameRegistry.create
+      botAuth    <- BotAuth.fromEnv
+      botEvents  <- BotEvents.create
+      challenges <- Challenges.create(botEvents)
+      _          <- EmberServerBuilder
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpWebSocketApp(wsb => (PlayRoutes(registry, wsb) <+> BotRoutes(botAuth)).orNotFound)
+        .withHttpWebSocketApp(wsb =>
+          (PlayRoutes(registry, wsb) <+> BotRoutes(botAuth, challenges, botEvents)).orNotFound
+        )
         .build
         .useForever
     yield ()
