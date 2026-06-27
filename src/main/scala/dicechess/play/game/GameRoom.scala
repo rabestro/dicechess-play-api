@@ -1,24 +1,31 @@
 package dicechess.play.game
 
-import cats.effect.{Deferred, IO, Ref}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Queue
+import cats.syntax.all.*
 import dicechess.engine.domain.GameState
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import fs2.Stream
-import fs2.concurrent.Topic
 
 /** The authoritative game room. A single consumer fiber drains an inbox and is the only writer of game state (the
   * mailbox-serialization an actor gives, without the framework); all reads are lock-free via `Ref.get`. Events fan out
-  * to every subscriber (both players plus spectators) through an fs2 `Topic`.
+  * to every subscriber (both players plus spectators) through per-subscriber bounded queues.
   *
   * The room is transport-agnostic: its only surface is `subscribe` / `submit` / `start`, so a human over WebSocket and
   * a bot over HTTP attach as adapters (see PlayerConnection).
+  *
+  * Fan-out never back-pressures the writer: each subscriber owns a bounded queue and the writer publishes with a
+  * non-blocking `tryOffer`. A subscriber that falls `fanOutBuffer` events behind (a paused, half-open, or dead client,
+  * including a 24/7 bot) is dropped — its stream is interrupted — rather than blocking the consumer fiber and freezing
+  * the game for everyone.
   */
 final class GameRoom private (
     stateRef: Ref[IO, GameRoom.Session],
     inbox: Queue[IO, GameRoom.Msg],
-    topic: Topic[IO, GameEvent],
+    subscribers: Ref[IO, Map[Long, GameRoom.Subscriber]],
+    nextSubscriberId: Ref[IO, Long],
+    fanOutBuffer: Int,
     done: Deferred[IO, GameOver]
 ):
   import GameRoom.*
@@ -26,13 +33,42 @@ final class GameRoom private (
   /** Current state, then the live event feed — so a late subscriber can still act. The stream completes once the game
     * is over (after emitting the terminal event, or immediately for someone who joins an already-finished game), so the
     * transport can close the connection instead of holding it open forever.
+    *
+    * A subscriber that registers concurrently with an `emit` may see the same version twice (once in the snapshot, once
+    * live); that overlap is intentional — it guarantees at-least-once delivery, and clients de-duplicate by `version`.
     */
   def subscribe: Stream[IO, GameEvent] =
     Stream
-      .resource(topic.subscribeAwait(256))
-      .flatMap: live =>
+      .resource(Resource.make(register)(sub => unregister(sub.id)))
+      .flatMap: sub =>
         val snapshot = Stream.eval(stateRef.get.map(s => GameEvent.Snapshot(s.version, s.public)))
-        (snapshot ++ live).takeThrough(event => !isTerminal(event))
+        val live     = Stream.fromQueueUnterminated(sub.queue)
+        (snapshot ++ live)
+          .interruptWhen(sub.dropped.get.attempt)
+          .takeThrough(event => !isTerminal(event))
+
+  private def register: IO[Subscriber] =
+    for
+      id      <- nextSubscriberId.getAndUpdate(_ + 1)
+      queue   <- Queue.bounded[IO, GameEvent](fanOutBuffer)
+      dropped <- Deferred[IO, Unit]
+      sub = Subscriber(id, queue, dropped)
+      _ <- subscribers.update(_.updated(id, sub))
+    yield sub
+
+  private def unregister(id: Long): IO[Unit] = subscribers.update(_.removed(id))
+
+  /** Fan out to every subscriber without ever parking the writer: `tryOffer` is non-blocking, and a subscriber whose
+    * queue is full has fallen too far behind, so it is dropped (its stream interrupted) instead of stalling the game.
+    */
+  private def broadcast(event: GameEvent): IO[Unit] =
+    subscribers.get.flatMap: subs =>
+      subs.values.toList.traverse_ { sub =>
+        sub.queue.tryOffer(event).flatMap {
+          case true  => IO.unit
+          case false => sub.dropped.complete(()).attempt.void
+        }
+      }
 
   private def isTerminal(event: GameEvent): Boolean = event match
     case GameEvent.GameEnded(_, _) => true
@@ -74,13 +110,14 @@ final class GameRoom private (
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
 
-  /** Advance the session, write it, THEN publish — so the Ref always reflects the latest published event. A subscriber
-    * that registers just after a publish reads a current Snapshot (and acts), and one that registers just before
-    * catches the live event; publishing before the write would let a subscriber in that window miss both and hang.
+  /** Advance the session, write it, THEN broadcast — so the Ref always reflects the latest published event. A
+    * subscriber that registers just after a broadcast reads a current Snapshot (and acts), and one that registers just
+    * before catches the live event; broadcasting before the write would let a subscriber in that window miss both and
+    * hang.
     */
   private def emit(s: Session, make: Long => GameEvent): IO[Session] =
     val s2 = s.copy(version = s.version + 1)
-    stateRef.set(s2) *> topic.publish1(make(s2.version)).void.as(s2)
+    stateRef.set(s2) *> broadcast(make(s2.version)).as(s2)
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
   private def beginTurn(s0: Session): IO[Session] =
@@ -138,6 +175,12 @@ object GameRoom:
   private val MaxPlies           = 5000L
   private val FiftyMoveHalfMoves = 100
 
+  /** Per-subscriber fan-out buffer. A subscriber this many events behind is dropped, never blocking the writer. */
+  private val DefaultFanOutBuffer = 256
+
+  /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
+  final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
+
   private enum Msg:
     case Begin
     case Command(seat: Seat, command: GameCommand)
@@ -162,16 +205,18 @@ object GameRoom:
   def create(
       players: Map[Seat, Principal],
       dice: DiceSource,
-      initialDfen: String = EngineOps.InitialDfen
+      initialDfen: String = EngineOps.InitialDfen,
+      fanOutBuffer: Int = DefaultFanOutBuffer
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
       case Right(state0) =>
         for
-          ref   <- Ref.of[IO, Session](Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active))
-          inbox <- Queue.unbounded[IO, Msg]
-          topic <- Topic[IO, GameEvent]
-          done  <- Deferred[IO, GameOver]
-          room = new GameRoom(ref, inbox, topic, done)
+          ref         <- Ref.of[IO, Session](Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active))
+          inbox       <- Queue.unbounded[IO, Msg]
+          subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
+          nextId      <- Ref.of[IO, Long](0L)
+          done        <- Deferred[IO, GameOver]
+          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, done)
           _ <- room.consume.start
         yield Right(room)
