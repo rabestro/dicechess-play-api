@@ -5,7 +5,8 @@ import cats.syntax.all.*
 import com.comcast.ip4s.*
 import dicechess.engine.search.{BotRegistry, SearchAlgorithm}
 import dicechess.play.core.*
-import dicechess.play.game.EngineOps
+import dicechess.play.dice.DiceSource
+import dicechess.play.game.{EngineOps, GameRoom}
 import dicechess.play.wire.Codecs.given
 import io.circe.parser.decode
 import io.circe.syntax.*
@@ -17,6 +18,7 @@ import org.http4s.client.websocket.{WSConnectionHighLevel, WSFrame, WSRequest}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 import org.http4s.jdkhttpclient.{JdkHttpClient, JdkWSClient}
+import org.http4s.websocket.WebSocketFrame
 
 import scala.concurrent.duration.*
 
@@ -128,6 +130,25 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           }
           .timeoutTo(20.seconds, IO.raiseError(RuntimeException("a disconnect did not end the game")))
       yield assertEquals(over.termination, Termination.Resign)
+
+  test("clientFrames interleaves keep-alive pings into a quiet game"):
+    // A room that is created but never started stays quiet after its initial Snapshot, so the only
+    // further frames are heartbeats — proving the ping stream keeps an idle-but-live socket flowing.
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+    GameRoom
+      .create(Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")), dice)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          PlayRoutes
+            .clientFrames(room, keepAlive = 40.millis)
+            .take(4)
+            .compile
+            .toList
+            .timeoutTo(5.seconds, IO.raiseError(RuntimeException("no frames within the deadline")))
+      }
+      .map: frames =>
+        assert(frames.exists(_.isInstanceOf[WebSocketFrame.Ping]), s"expected a ping among $frames")
 
   private def tokenOf(created: CreatedGame, seat: Seat): String =
     created.tokens.find(_.seat == seat).map(_.token).getOrElse(sys.error(s"no join token for $seat"))

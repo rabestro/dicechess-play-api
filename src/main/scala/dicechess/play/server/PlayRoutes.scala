@@ -14,6 +14,8 @@ import org.http4s.server.websocket.WebSocketBuilder2
 import org.http4s.websocket.WebSocketFrame
 import org.http4s.HttpRoutes
 
+import scala.concurrent.duration.*
+
 final case class CreateGame(white: String, black: String) derives Codec.AsObject
 final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
 
@@ -24,9 +26,18 @@ final case class CreatedGame(gameId: String, commit: String, tokens: List[SeatTo
 
 object PlayRoutes:
 
+  /** WebSocket heartbeat interval — comfortably under Ember's 60s read-idle timeout so the client's pong keeps the
+    * connection alive between game events.
+    */
+  val DefaultKeepAlive: FiniteDuration = 25.seconds
+
   private object TokenParam extends OptionalQueryParamDecoderMatcher[String]("token")
 
-  def apply(registry: GameRegistry, wsb: WebSocketBuilder2[IO]): HttpRoutes[IO] =
+  def apply(
+      registry: GameRegistry,
+      wsb: WebSocketBuilder2[IO],
+      keepAlive: FiniteDuration = DefaultKeepAlive
+  ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case req @ POST -> Root / "games" =>
         // attemptAs (not as): a malformed body is the client's fault, so answer 400, not 500.
@@ -59,14 +70,21 @@ object PlayRoutes:
             case None       => NotFound()
             case Some(room) =>
               token match
-                case None    => wsb.build(toClient(room), fromClient(room, Seat.Spectator))
+                case None    => wsb.build(clientFrames(room, keepAlive), fromClient(room, Seat.Spectator))
                 case Some(t) =>
                   room.seatFor(t) match
                     case None       => Forbidden()
-                    case Some(seat) => wsb.build(toClient(room), fromClient(room, seat))
+                    case Some(seat) => wsb.build(clientFrames(room, keepAlive), fromClient(room, seat))
 
-  private def toClient(room: GameRoom): Stream[IO, WebSocketFrame] =
-    room.subscribe.map(event => WebSocketFrame.Text(event.asJson.noSpaces))
+  /** Frames pushed to a client: the room's event feed merged with periodic WebSocket pings. The browser auto-replies
+    * with a pong, and that inbound frame resets the server's read-idle timeout — so a quiet but live game (a player
+    * thinking, or the opening dice auto-passing) is not dropped at the 60s idle deadline. Halts with the event feed
+    * (which completes on the terminal event), so the socket still closes when the game ends.
+    */
+  private[server] def clientFrames(room: GameRoom, keepAlive: FiniteDuration): Stream[IO, WebSocketFrame] =
+    val events     = room.subscribe.map(event => WebSocketFrame.Text(event.asJson.noSpaces))
+    val keepAlives = Stream.awakeEvery[IO](keepAlive).as(WebSocketFrame.Ping())
+    events.mergeHaltL(keepAlives)
 
   private def fromClient(room: GameRoom, seat: Seat): Pipe[IO, WebSocketFrame, Unit] =
     in =>
