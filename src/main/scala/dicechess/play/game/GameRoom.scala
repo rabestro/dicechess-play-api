@@ -1,6 +1,6 @@
 package dicechess.play.game
 
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred, IO, Outcome, Ref, Resource}
 import cats.effect.std.Queue
 import cats.syntax.all.*
 import dicechess.engine.domain.GameState
@@ -96,6 +96,26 @@ final class GameRoom private (
   def snapshot: IO[PublicGameState] = stateRef.get.map(_.public)
 
   // ── consumer fiber ─────────────────────────────────────────────────────────
+
+  /** The writer fiber, supervised: if `consume` ever fails (an engine invariant throws) or is cancelled (shutdown), the
+    * game would otherwise be wedged forever — `done` never completes, the registry never evicts the room, and every
+    * subscriber stream hangs. So on any non-success outcome we abort the game: publish a terminal `GameEnded` (to close
+    * subscriber streams) and complete `done`, exactly once.
+    */
+  private def supervisedConsume: IO[Unit] =
+    consume.guaranteeCase:
+      case Outcome.Succeeded(_) => IO.unit // normal end already completed `done` in endGame
+      case _                    => abortIfActive
+
+  private def abortIfActive: IO[Unit] =
+    stateRef.get.flatMap: s =>
+      if s.ended then IO.unit
+      else
+        val over = GameOver(GameResult.Draw, Termination.Aborted)
+        emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over))
+          .flatTap(_ => done.complete(over).attempt.void)
+          .void
+
   private def consume: IO[Unit] =
     inbox.take.flatMap:
       case Msg.Begin =>
@@ -218,5 +238,5 @@ object GameRoom:
           nextId      <- Ref.of[IO, Long](0L)
           done        <- Deferred[IO, GameOver]
           room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, done)
-          _ <- room.consume.start
+          _ <- room.supervisedConsume.start
         yield Right(room)
