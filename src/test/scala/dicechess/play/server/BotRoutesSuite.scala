@@ -10,14 +10,14 @@ import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Status, Ur
 
 class BotRoutesSuite extends munit.CatsEffectSuite:
 
-  private val auth = BotAuth.parse("acme|alice|tok-alice,acme|bob|tok-bob")
+  private val auth = BotAuth.parse("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
 
   private def app: IO[HttpApp[IO]] =
     for
       events     <- BotEvents.create
       registry   <- GameRegistry.create
       challenges <- Challenges.create(events, registry)
-    yield BotRoutes(auth, challenges, events).orNotFound
+    yield BotRoutes(auth, challenges, events, registry).orNotFound
 
   private def request(method: Method, uri: Uri, token: Option[String]): Request[IO] =
     val base = Request[IO](method, uri)
@@ -27,6 +27,14 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     service
       .run(request(Method.POST, uri"/bot/challenge", Some("tok-alice")).withEntity(ChallengeTarget("acme", "bob")))
       .flatMap(_.as[Challenge])
+
+  /** Alice challenges Bob and Bob accepts; yields the seated game's id. */
+  private def seatedGame(service: HttpApp[IO]): IO[String] =
+    for
+      challenge <- challengeBobAsAlice(service)
+      accepted  <- service.run(request(Method.POST, uri"/bot/challenge" / challenge.id / "accept", Some("tok-bob")))
+      game      <- accepted.as[BotGame]
+    yield game.gameId
 
   test("GET /bot/account returns the bot identity for a valid token"):
     app
@@ -83,4 +91,53 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
   test("accepting without a token is 401"):
     app
       .flatMap(_.run(request(Method.POST, uri"/bot/challenge" / "x" / "accept", None)))
+      .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  test("a seated bot can open its game event stream"):
+    app.flatMap: service =>
+      seatedGame(service).flatMap: gameId =>
+        service
+          .run(request(Method.GET, uri"/bot/game/stream" / gameId, Some("tok-alice")))
+          .map(r => assertEquals(r.status, Status.Ok))
+
+  test("a bot not seated in the game cannot stream it"):
+    app.flatMap: service =>
+      seatedGame(service).flatMap: gameId =>
+        service
+          .run(request(Method.GET, uri"/bot/game/stream" / gameId, Some("tok-carol")))
+          .map(r => assertEquals(r.status, Status.NotFound))
+
+  test("streaming an unknown game is 404"):
+    app
+      .flatMap(_.run(request(Method.GET, uri"/bot/game/stream" / "nope", Some("tok-alice"))))
+      .map(r => assertEquals(r.status, Status.NotFound))
+
+  test("a seated bot can submit a move (accepted; outcome arrives on the stream)"):
+    app.flatMap: service =>
+      seatedGame(service).flatMap: gameId =>
+        service
+          .run(
+            request(Method.POST, uri"/bot/game" / gameId / "move", Some("tok-alice")).withEntity(BotMove(List("e2e4")))
+          )
+          .map(r => assertEquals(r.status, Status.Accepted))
+
+  test("a seated bot can resign"):
+    app.flatMap: service =>
+      seatedGame(service).flatMap: gameId =>
+        service
+          .run(request(Method.POST, uri"/bot/game" / gameId / "resign", Some("tok-bob")))
+          .map(r => assertEquals(r.status, Status.Accepted))
+
+  test("move on an unknown game is 404"):
+    app
+      .flatMap(
+        _.run(
+          request(Method.POST, uri"/bot/game" / "nope" / "move", Some("tok-alice")).withEntity(BotMove(List("e2e4")))
+        )
+      )
+      .map(r => assertEquals(r.status, Status.NotFound))
+
+  test("resign without a token is 401"):
+    app
+      .flatMap(_.run(request(Method.POST, uri"/bot/game" / "x" / "resign", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
