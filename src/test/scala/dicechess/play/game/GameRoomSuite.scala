@@ -60,3 +60,25 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       }
       .map: (over, ended) =>
         assertEquals(ended.over, over)
+
+  test("a writer-fiber failure aborts the game instead of bricking the room"):
+    // A dice source that throws the moment the writer rolls: the consumer fiber dies before any
+    // terminal. Without supervision `done` would never complete and every subscriber would hang.
+    val boom = new DiceSource:
+      def roll(ply: Long): List[Int] = throw RuntimeException("boom")
+      def commit: String             = "00"
+      def reveal: String             = "seed"
+
+    GameRoom
+      .create(Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")), boom)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // Await BOTH: the game's result and a subscriber's stream. If supervision were missing,
+          // either would hang and the timeout would fail the test.
+          val drained = room.subscribe.compile.drain
+          (room.start *> (room.result, drained).parTupled)
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("abort did not complete the game")))
+      }
+      .map: (over, _) =>
+        assertEquals(over.termination, Termination.Aborted)
