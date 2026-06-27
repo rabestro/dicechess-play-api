@@ -1,12 +1,15 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{Challenge, Principal}
+import dicechess.play.core.{BotEvent, Challenge, Principal}
 import dicechess.play.wire.Codecs.given
+import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.headers.Authorization
 import org.http4s.implicits.*
 import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Status, Uri}
+
+import scala.concurrent.duration.*
 
 class BotRoutesSuite extends munit.CatsEffectSuite:
 
@@ -22,6 +25,17 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
   private def request(method: Method, uri: Uri, token: Option[String]): Request[IO] =
     val base = Request[IO](method, uri)
     token.fold(base)(t => base.putHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, t))))
+
+  test("ndjson interleaves keep-alive newlines into an idle stream"):
+    // An idle event stream (a bot waiting for challenges) must still produce periodic bytes so neither
+    // the ember server's read-idle nor the client's timeout drops the long-lived stream.
+    BotRoutes
+      .ndjson[BotEvent](Stream.never[IO], keepAlive = 50.millis)
+      .take(2)
+      .compile
+      .toList
+      .timeoutTo(5.seconds, IO.raiseError(RuntimeException("no keep-alive within the deadline")))
+      .map(bytes => assertEquals(new String(bytes.toArray, "UTF-8"), "\n\n"))
 
   private def challengeBobAsAlice(service: HttpApp[IO]): IO[Challenge] =
     service
