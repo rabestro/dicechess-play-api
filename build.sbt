@@ -37,8 +37,11 @@ val MunitVersion           = "1.3.0"
 val MunitCatsEffectVersion = "2.1.0"
 
 lazy val root = (project in file("."))
+  .enablePlugins(JavaAppPackaging)
   .settings(
     name := "dicechess-play-api",
+    // The packaged launcher (the Docker ENTRYPOINT) must be told the entrypoint explicitly.
+    Compile / mainClass := Some("dicechess.play.Main"),
     libraryDependencies ++= Seq(
       // Game rules: the engine is the single source of truth (resolved from GitHub Packages)
       "lv.id.jc" %% "dicechess-engine-scala" % DiceChessEngineVersion,

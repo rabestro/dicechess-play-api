@@ -5,9 +5,10 @@ cube, and a third-party **Bot API**. This is **phase 3** of the play platform: t
 from client-authoritative (vs-bot, phases 1–2 in [`dicechess-play`](https://github.com/rabestro/dicechess-play))
 to a server that owns the truth.
 
-> **Status: design complete, implementation starting.** The design is documented as
-> ADR-0007 (server authority), ADR-0008 (dice fairness), ADR-0009 (Bot API & tournaments)
-> in the `dicechess-docs` vault (Play Site). First milestone: `3a-core`.
+> **Status: 3a complete** (authoritative game core + human WebSocket transport); **3b in
+> progress** — transport hardening done (fan-out, fiber supervision, seat auth, turn
+> deadline); Bot API and durability under way. Design: ADR-0007 (server authority),
+> ADR-0008 (dice fairness), ADR-0009 (Bot API & tournaments) in the `dicechess-docs` vault.
 
 ## Why a server now
 
@@ -70,6 +71,30 @@ See ADR-0009.
 
 Scala 3 · cats-effect · fs2 · http4s · doobie · Circe · PostgreSQL · the dice-chess engine
 (JVM). Same toolchain as [`dicechess-analytics`](https://github.com/rabestro/dicechess-analytics).
+
+## Running
+
+Local (JVM) — reads `GITHUB_TOKEN` via the `gh` CLI for the engine artifact:
+
+```bash
+sbt run                      # serves on :8080
+curl localhost:8080/health   # {"status":"ok","version":"dev"}
+```
+
+Container — the engine artifact needs a `read:packages` token, passed as a BuildKit secret so it never lands in a layer:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) DOCKER_BUILDKIT=1 docker build \
+  --secret id=github_token,env=GITHUB_TOKEN --build-arg GITHUB_ACTOR="$USER" \
+  -t dicechess-play-api .
+IMAGE=dicechess-play-api scripts/smoke-test.sh   # boots the image, asserts it serves (no DB)
+```
+
+CI publishes a multi-arch image to `ghcr.io/rabestro/dicechess-play-api` on every push to `main` (build → smoke → push). Deploy on the homelab with `docker-compose.yaml` — set `PLAY_BOT_TOKENS` (and pin `API_TAG=vX.Y.Z`) in `.env`; the API listens on host port `8040`.
+
+**Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`/bot/account`, `/bot/stream/event`, `/bot/challenge/{team}/{name}`).
+
+> Game state is **in-memory** for now — a restart drops live games. Durability (Postgres `play` schema) lands later in 3b.
 
 ## License
 

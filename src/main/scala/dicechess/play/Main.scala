@@ -3,15 +3,16 @@ package dicechess.play
 import cats.effect.{IO, IOApp}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
-import dicechess.play.server.{BotAuth, BotEvents, BotRoutes, Challenges, GameRegistry, PlayRoutes}
+import dicechess.play.server.{BotAuth, BotEvents, BotRoutes, Challenges, GameRegistry, HealthRoutes, PlayRoutes}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 
 /** Boots the authoritative HTTP/WebSocket server. */
 object Main extends IOApp.Simple:
 
-  private val host = host"0.0.0.0"
-  private val port = port"8080"
+  private val host    = host"0.0.0.0"
+  private val port    = port"8080"
+  private val version = sys.env.getOrElse("APP_VERSION", "dev")
 
   def run: IO[Unit] =
     for
@@ -24,7 +25,7 @@ object Main extends IOApp.Simple:
         .withHost(host)
         .withPort(port)
         .withHttpWebSocketApp(wsb =>
-          (PlayRoutes(registry, wsb) <+> BotRoutes(botAuth, challenges, botEvents)).orNotFound
+          (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> BotRoutes(botAuth, challenges, botEvents)).orNotFound
         )
         .build
         .useForever
