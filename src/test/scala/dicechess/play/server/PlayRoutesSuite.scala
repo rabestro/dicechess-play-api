@@ -63,8 +63,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         // Don't assert the active seat: the opening roll may have no legal move and auto-pass to Black.
         _        = assertEquals(snapshot.status, GameStatus.Active)
         _        = assert(created.commit.nonEmpty, "the dice commitment must be published at creation")
-        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("seat" -> "white")
-        blackUri = wsBase / "games" / created.gameId / "ws" +? ("seat" -> "black")
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        blackUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.Black))
         ended <- (
           ws.connectHighLevel(WSRequest(whiteUri)).use(playSeat(_, Seat.White)),
           ws.connectHighLevel(WSRequest(blackUri)).use(playSeat(_, Seat.Black))
@@ -87,6 +87,25 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       yield
         assertEquals(missingFields, Status.BadRequest)
         assertEquals(notJson, Status.BadRequest)
+
+  test("a WebSocket upgrade with an invalid join token is forbidden"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+      yield (port, http)
+
+    resources.use: (port, http) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        // A plain GET (no upgrade) with a bogus token still exercises the auth gate before the upgrade.
+        wsPath = httpBase / "games" / created.gameId / "ws"
+        status <- http.status(GET(wsPath +? ("token" -> "not-a-real-token")))
+      yield assertEquals(status, Status.Forbidden)
+
+  private def tokenOf(created: CreatedGame, seat: Seat): String =
+    created.tokens.find(_.seat == seat).map(_.token).getOrElse(sys.error(s"no join token for $seat"))
 
   /** Drive one seat over the wire with the greedy bot; complete when GameEnded arrives. */
   private def playSeat(conn: WSConnectionHighLevel[IO], seat: Seat): IO[Boolean] =
