@@ -12,9 +12,11 @@ import org.http4s.headers.{Authorization, `Content-Type`, `WWW-Authenticate`}
 import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request}
 
 final case class BotAccount(team: String, name: String, id: String) derives Codec.AsObject
+final case class ChallengeTarget(team: String, name: String) derives Codec.AsObject
+final case class BotGame(gameId: String) derives Codec.AsObject
 
-/** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, and challenge creation. Accepting a
-  * challenge (which seats a game) and the game play endpoints arrive in later slices.
+/** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, and the challenge lifecycle. The game
+  * event stream and idempotent move/resign endpoints arrive in the next slice.
   */
 object BotRoutes:
 
@@ -33,10 +35,41 @@ object BotRoutes:
           case Some(bot) => Ok(ndjson(events.stream(bot))).map(_.withContentType(`Content-Type`(ndjsonType)))
           case None      => Unauthorized(bearerChallenge)
 
-      case req @ POST -> Root / "bot" / "challenge" / team / name =>
+      case req @ POST -> Root / "bot" / "challenge" =>
         asBot(auth, req) match
-          case Some(bot) => challenges.create(bot, Principal.Bot(team, name)).flatMap(Created(_))
           case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            req
+              .attemptAs[ChallengeTarget]
+              .value
+              .flatMap:
+                case Left(failure) => BadRequest(failure.message)
+                case Right(target) =>
+                  challenges.create(bot, Principal.Bot(target.team, target.name)).flatMap(Created(_))
+
+      case req @ POST -> Root / "bot" / "challenge" / id / "accept" =>
+        asBot(auth, req) match
+          case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            challenges
+              .accept(bot, id)
+              .flatMap:
+                case Right(gameId)                         => Created(BotGame(gameId))
+                case Left(Challenges.Rejected.NotFound)    => NotFound()
+                case Left(Challenges.Rejected.NotYours)    => Forbidden()
+                case Left(Challenges.Rejected.Failed(why)) => InternalServerError(why)
+
+      case req @ POST -> Root / "bot" / "challenge" / id / "decline" =>
+        asBot(auth, req) match
+          case None      => Unauthorized(bearerChallenge)
+          case Some(bot) =>
+            challenges
+              .decline(bot, id)
+              .flatMap:
+                case Right(())                             => Ok()
+                case Left(Challenges.Rejected.NotFound)    => NotFound()
+                case Left(Challenges.Rejected.NotYours)    => Forbidden()
+                case Left(Challenges.Rejected.Failed(why)) => InternalServerError(why)
 
   /** The authenticated bot for a request, if its Bearer token is valid. */
   private def asBot(auth: BotAuth, req: Request[IO]): Option[Principal.Bot] =
