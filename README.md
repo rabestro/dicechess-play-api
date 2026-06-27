@@ -94,6 +94,22 @@ CI publishes a multi-arch image to `ghcr.io/rabestro/dicechess-play-api` on ever
 
 The browser play-site calls the API cross-origin, so CORS is enabled. By default any origin may read it (safe here — the API uses no cookies; tokens travel explicitly, so there are no ambient credentials to leak). Set `PLAY_CORS_ORIGINS` to a comma-separated allow-list of full origins (e.g. `https://play.jc.id.lv,http://localhost:5173`) to restrict it.
 
+### Public deploy via Cloudflare Tunnel
+
+The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automatic TLS + WebSocket, no port-forwarding, origin IP hidden. The `tunnel` service in `docker-compose.yaml` runs `cloudflared`; the public hostname is configured once in the Cloudflare dashboard.
+
+1. **Create the tunnel** (Cloudflare → Zero Trust → Networks → Tunnels → Create → Cloudflared, env *Docker*). Copy the **tunnel token**.
+2. **Add a public hostname** to the tunnel: `play-api` . `jc.id.lv` → type **HTTP** → URL **`api:8080`** (the `api` compose service, internal port). Cloudflare creates the proxied DNS record.
+3. **`.env`** on the host:
+   ```
+   API_TAG=latest                 # or a pinned vX.Y.Z
+   PLAY_CORS_ORIGINS=https://play.jc.id.lv,https://dicechess-play.pages.dev
+   CF_TUNNEL_TOKEN=eyJ...         # account-scoped — never commit
+   # PLAY_BOT_TOKENS=team|name|token
+   ```
+4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
+5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.
+
 **Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`/bot/account`, `/bot/stream/event`, `/bot/challenge/{team}/{name}`).
 
 > Game state is **in-memory** for now — a restart drops live games. Durability (Postgres `play` schema) lands later in 3b.
