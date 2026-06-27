@@ -104,8 +104,50 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         status <- http.status(GET(wsPath +? ("token" -> "not-a-real-token")))
       yield assertEquals(status, Status.Forbidden)
 
+  test("a player disconnecting resigns the game"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+        ws   <- Resource.eval(JdkWSClient.simple[IO])
+      yield (port, http, ws)
+
+    resources.use: (port, http, ws) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        specUri  = wsBase / "games" / created.gameId / "ws" // tokenless spectator watches
+        over <- ws
+          .connectHighLevel(WSRequest(specUri))
+          .use { spectator =>
+            // The spectator is attached before White joins, so it observes the terminal either way.
+            val whiteDisconnects = ws.connectHighLevel(WSRequest(whiteUri)).use(_ => IO.unit)
+            (terminalOver(spectator), whiteDisconnects).parTupled.map(_._1)
+          }
+          .timeoutTo(20.seconds, IO.raiseError(RuntimeException("a disconnect did not end the game")))
+      yield assertEquals(over.termination, Termination.Resign)
+
   private def tokenOf(created: CreatedGame, seat: Seat): String =
     created.tokens.find(_.seat == seat).map(_.token).getOrElse(sys.error(s"no join token for $seat"))
+
+  /** Read a connection until the game reaches a terminal state, from either the live event or a late snapshot. */
+  private def terminalOver(conn: WSConnectionHighLevel[IO]): IO[GameOver] =
+    conn.receiveStream
+      .collect { case WSFrame.Text(txt, _) => txt }
+      .map(txt => decode[GameEvent](txt).toOption.flatMap(terminalOf))
+      .unNone
+      .compile
+      .lastOrError
+
+  private def terminalOf(event: GameEvent): Option[GameOver] = event match
+    case GameEvent.GameEnded(_, over) => Some(over)
+    case GameEvent.Snapshot(_, ps)    =>
+      ps.status match
+        case GameStatus.Ended(over) => Some(over)
+        case GameStatus.Active      => None
+    case _ => None
 
   /** Drive one seat over the wire with the greedy bot; complete when GameEnded arrives. */
   private def playSeat(conn: WSConnectionHighLevel[IO], seat: Seat): IO[Boolean] =

@@ -9,6 +9,7 @@ import dicechess.play.dice.DiceSource
 import fs2.Stream
 
 import java.security.SecureRandom
+import scala.concurrent.duration.FiniteDuration
 
 /** The authoritative game room. A single consumer fiber drains an inbox and is the only writer of game state (the
   * mailbox-serialization an actor gives, without the framework); all reads are lock-free via `Ref.get`. Events fan out
@@ -29,6 +30,7 @@ final class GameRoom private (
     nextSubscriberId: Ref[IO, Long],
     fanOutBuffer: Int,
     seatTokens: Map[Seat, String],
+    idleCheck: FiniteDuration,
     done: Deferred[IO, GameOver]
 ):
   import GameRoom.*
@@ -129,15 +131,30 @@ final class GameRoom private (
           .void
 
   private def consume: IO[Unit] =
-    inbox.take.flatMap:
-      case Msg.Begin =>
-        stateRef.get.flatMap { s =>
-          // Idempotent: only the first Begin (before any roll) starts the game; a repeated
-          // or retried start must not re-roll a pending turn or double-increment the ply.
-          if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
-        } *> continue
-      case Msg.Command(seat, command) =>
-        stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
+    // No command within the deadline while a turn is pending => the player to move forfeits. The timeout is part of the
+    // single-writer loop (not a separate fiber), so it can't race the state it acts on.
+    inbox.take
+      .timeoutTo(idleCheck, IO.pure(Msg.Timeout))
+      .flatMap:
+        case Msg.Begin =>
+          stateRef.get.flatMap { s =>
+            // Idempotent: only the first Begin (before any roll) starts the game; a repeated
+            // or retried start must not re-roll a pending turn or double-increment the ply.
+            if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
+          } *> continue
+        case Msg.Command(seat, command) =>
+          stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
+        case Msg.Timeout =>
+          stateRef.get.flatMap(onTimeout).flatMap(stateRef.set) *> continue
+
+  /** A turn deadline elapsed: if a turn is genuinely pending, the side to move forfeits; otherwise (idle between turns,
+    * or already over) it is a no-op.
+    */
+  private def onTimeout(s: Session): IO[Session] =
+    if s.ended || !s.pending then IO.pure(s)
+    else
+      val toMove = EngineOps.activeSide(s.state)
+      endGame(s, GameOver(GameResult.Win(toMove.opponent), Termination.Timeout))
 
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
@@ -210,12 +227,18 @@ object GameRoom:
   /** Per-subscriber fan-out buffer. A subscriber this many events behind is dropped, never blocking the writer. */
   private val DefaultFanOutBuffer = 256
 
+  /** Interim turn deadline: if the side to move doesn't act within this, it forfeits. Real per-side chess clocks land
+    * with the TimeManager in a later milestone; this just keeps abandoned games from leaking.
+    */
+  private val DefaultIdleCheck: FiniteDuration = FiniteDuration(120, "seconds")
+
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
 
   private enum Msg:
     case Begin
     case Command(seat: Seat, command: GameCommand)
+    case Timeout
 
   final private case class Session(
       state: GameState,
@@ -238,7 +261,8 @@ object GameRoom:
       players: Map[Seat, Principal],
       dice: DiceSource,
       initialDfen: String = EngineOps.InitialDfen,
-      fanOutBuffer: Int = DefaultFanOutBuffer
+      fanOutBuffer: Int = DefaultFanOutBuffer,
+      idleCheck: FiniteDuration = DefaultIdleCheck
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
@@ -250,7 +274,7 @@ object GameRoom:
           nextId      <- Ref.of[IO, Long](0L)
           seatTokens  <- mintTokens(players.keys)
           done        <- Deferred[IO, GameOver]
-          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, seatTokens, done)
+          room = new GameRoom(ref, inbox, subscribers, nextId, fanOutBuffer, seatTokens, idleCheck, done)
           _ <- room.supervisedConsume.start
         yield Right(room)
 

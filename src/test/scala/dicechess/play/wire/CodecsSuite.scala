@@ -22,6 +22,7 @@ class CodecsSuite extends munit.FunSuite:
       GameEvent.GameEnded(9L, GameOver(GameResult.Win(Side.Black), Termination.KingCaptured))
     )
     roundtrip[GameEvent](GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted)))
+    roundtrip[GameEvent](GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout)))
     roundtrip[GameEvent](GameEvent.Rejected(2L, Seat.Black, "nope"))
 
   test("Principal round-trips"):
