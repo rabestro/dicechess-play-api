@@ -86,7 +86,11 @@ final class GameRoom private (
         case GameStatus.Active   => false
     case _ => false
 
-  def submit(seat: Seat, command: GameCommand): IO[Unit] = inbox.offer(Msg.Command(seat, command))
+  /** Hand a command to the writer, stamping it with the receive time so a timed game charges only the player's thinking
+    * time — not the queue-wait or the engine validation that follows.
+    */
+  def submit(seat: Seat, command: GameCommand): IO[Unit] =
+    IO.monotonic.flatMap(receivedAt => inbox.offer(Msg.Command(seat, command, receivedAt)))
 
   /** Begin the game (roll the first turn). Call after subscribers have attached. */
   def start: IO[Unit] = inbox.offer(Msg.Begin)
@@ -191,8 +195,8 @@ final class GameRoom private (
                 // or retried start must not re-roll a pending turn or double-increment the ply.
                 if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
               } *> continue
-            case Msg.Command(seat, command) =>
-              stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
+            case Msg.Command(seat, command, receivedAt) =>
+              stateRef.get.flatMap(s => process(s, seat, command, receivedAt)).flatMap(stateRef.set) *> continue
             case Msg.Timeout =>
               stateRef.get.flatMap(onTimeout).flatMap(stateRef.set) *> continue
 
@@ -246,19 +250,20 @@ final class GameRoom private (
   /** Debit the time `mover` spent on the turn just completed, then apply the control's bonus: Fischer adds its
     * increment; SuddenDeath only debits; PerMove keeps no bank (each turn is independent). Clears the turn timer.
     */
-  private def debit(s: Session, mover: Seat): IO[Session] =
+  /** Charge `mover` for the turn just completed, stopping the clock at `stoppedAt` — the moment the move was *received*
+    * (sampled in `submit`), so neither queue-wait nor engine validation is billed to the player. Fischer then adds its
+    * increment; SuddenDeath only debits; PerMove keeps no bank.
+    */
+  private def debit(s: Session, mover: Seat, stoppedAt: FiniteDuration): Session =
+    val elapsed = s.turnStartedAt.fold(Duration.Zero: FiniteDuration)(stoppedAt - _)
     s.timeControl match
-      case TimeControl.Unlimited | TimeControl.PerMove(_) => IO.pure(s.copy(turnStartedAt = None))
+      case TimeControl.Unlimited | TimeControl.PerMove(_) => s.copy(turnStartedAt = None)
       case TimeControl.SuddenDeath(_)                     =>
-        IO.monotonic.map: now =>
-          val elapsed = s.turnStartedAt.fold(Duration.Zero)(now - _)
-          val left    = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed)
-          s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
+        val left = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed)
+        s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
       case TimeControl.Fischer(_, inc) =>
-        IO.monotonic.map: now =>
-          val elapsed = s.turnStartedAt.fold(Duration.Zero)(now - _)
-          val left    = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed) + inc.seconds
-          s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
+        val left = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed) + inc.seconds
+        s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
 
   private def floorZero(d: FiniteDuration): FiniteDuration = if d > Duration.Zero then d else Duration.Zero
 
@@ -298,7 +303,7 @@ final class GameRoom private (
     emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over))
       .flatTap(_ => done.complete(over).attempt.void)
 
-  private def process(s: Session, seat: Seat, command: GameCommand): IO[Session] =
+  private def process(s: Session, seat: Seat, command: GameCommand, receivedAt: FiniteDuration): IO[Session] =
     s.status match
       case GameStatus.Ended(_) => IO.pure(s)
       case GameStatus.Active   =>
@@ -316,17 +321,17 @@ final class GameRoom private (
                 case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
-                  // Charge the mover for the time spent and apply the control's bonus before the next turn rolls (which
-                  // resets the clock for the other side).
-                  debit(s, seat).flatMap: sd =>
-                    emit(
-                      sd.copy(state = next, pending = false),
-                      v => GameEvent.TurnPlayed(v, seat, uci, EngineOps.serialize(next))
-                    )
-                      .flatMap: s1 =>
-                        winner match
-                          case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
-                          case None    => advanceOrEnd(s1)
+                  // Stop the mover's clock at the receive time (not now, after validation) and apply the control's bonus
+                  // before the next turn rolls and resets the clock for the other side.
+                  val sd = debit(s, seat, receivedAt)
+                  emit(
+                    sd.copy(state = next, pending = false),
+                    v => GameEvent.TurnPlayed(v, seat, uci, EngineOps.serialize(next))
+                  )
+                    .flatMap: s1 =>
+                      winner match
+                        case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
+                        case None    => advanceOrEnd(s1)
 
 object GameRoom:
 
@@ -353,7 +358,7 @@ object GameRoom:
 
   private enum Msg:
     case Begin
-    case Command(seat: Seat, command: GameCommand)
+    case Command(seat: Seat, command: GameCommand, receivedAt: FiniteDuration)
     case Timeout
 
   final private case class Session(

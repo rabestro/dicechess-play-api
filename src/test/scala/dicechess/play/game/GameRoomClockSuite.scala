@@ -8,16 +8,19 @@ import dicechess.play.dice.DiceSource
 
 import scala.concurrent.duration.*
 
-/** Enforcement of the real per-side clocks (#46). Flag-fall tests use a tiny clock against the default 120s `idleCheck`:
-  * completing in a second or two proves the chess clock — not the anti-abandonment cap — ended the game.
+/** Enforcement of the real per-side clocks (#46). Flag-fall tests use a tiny clock against the default 120s
+  * `idleCheck`: completing in a second or two proves the chess clock — not the anti-abandonment cap — ended the game.
   */
 class GameRoomClockSuite extends munit.CatsEffectSuite:
 
   private def greedy = BotRegistry.getAlgorithm("greedy").get
   private def dice   = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
-  private def seats  = Map[Seat, Principal](Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black"))
+  private def seats  =
+    Map[Seat, Principal](Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black"))
 
-  /** Create a timed room (default `idleCheck`), run it with nobody ever submitting, and return how it ended. */
+  /** Proves the chess clock — not the 120s anti-abandonment `idleCheck` — is what ends a timed game: with nobody ever
+    * submitting, the deadline that fires must be the (tiny) per-side clock, well inside the 5s guard.
+    */
   private def flagFall(timeControl: TimeControl): IO[GameOver] =
     GameRoom
       .create(seats, dice, timeControl = timeControl)
@@ -43,8 +46,8 @@ class GameRoomClockSuite extends munit.CatsEffectSuite:
       assertEquals(over.termination, Termination.Timeout)
       assert(over.result.isInstanceOf[GameResult.Win], s"a flag-fall is a win on time, got: ${over.result}")
 
-  /** Two bots that always move in time must finish normally — never on the clock. A generous control exercises the
-    * debit + increment path on every completed turn without any side running out.
+  /** Proves an active game is decided on the board, never by the clock: when both sides move in time, no one flags. The
+    * generous control also exercises the per-turn debit + increment path that the idle tests never reach.
     */
   private def botsFinishUnderClock(timeControl: TimeControl): IO[GameOver] =
     val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)
