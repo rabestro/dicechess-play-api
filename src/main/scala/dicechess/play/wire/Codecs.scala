@@ -28,6 +28,7 @@ object Codecs:
   given Codec[GameOver]        = deriveCodec
   given Codec[GameStatus]      = deriveCodec
   given Codec[TimeControl]     = deriveCodec
+  given Codec[Seek]            = deriveCodec
   given Codec[Clocks]          = deriveCodec
   given Codec[Principal]       = deriveCodec
   given Codec[PublicGameState] = deriveCodec

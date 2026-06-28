@@ -12,6 +12,8 @@ import dicechess.play.server.{
   Cors,
   GameRegistry,
   HealthRoutes,
+  Lobby,
+  LobbyRoutes,
   PlayRoutes
 }
 import org.http4s.ember.server.EmberServerBuilder
@@ -31,22 +33,29 @@ object Main extends IOApp.Simple:
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
       mintLimit  <- AnonMintLimiter.create()
+      lobby      <- Lobby.create(registry)
       cors       <- Cors.fromEnv
-      _          <- EmberServerBuilder
-        .default[IO]
-        .withHost(host)
-        .withPort(port)
-        .withHttpWebSocketApp(wsb =>
-          cors(
-            (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> BotRoutes(
-              botAuth,
-              challenges,
-              botEvents,
-              registry,
-              mintLimit
-            )).orNotFound
-          )
-        )
-        .build
-        .useForever
+      // The seek-sweeper is scoped to the server: it runs while the server runs and is cancelled with it, so a failure
+      // surfaces instead of being silently dropped by a detached fiber.
+      _ <- lobby
+        .sweeper()
+        .background
+        .surround:
+          EmberServerBuilder
+            .default[IO]
+            .withHost(host)
+            .withPort(port)
+            .withHttpWebSocketApp(wsb =>
+              cors(
+                (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> BotRoutes(
+                  botAuth,
+                  challenges,
+                  botEvents,
+                  registry,
+                  mintLimit
+                )).orNotFound
+              )
+            )
+            .build
+            .useForever
     yield ()
