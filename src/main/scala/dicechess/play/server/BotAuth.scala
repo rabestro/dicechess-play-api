@@ -32,14 +32,15 @@ final class BotAuth private (
       case (configured, bot) if MessageDigest.isEqual(configured.getBytes(UTF_8), presented) => bot
     }
 
-  /** Full authentication: a static token, else a live ephemeral anon token. Expired anon tokens are evicted lazily on
-    * lookup. Anon tokens are high-entropy random keys, so a direct map lookup leaks nothing useful.
+  /** Full authentication: a static token, else a live ephemeral anon token. Expiry uses monotonic time (immune to
+    * wall-clock / NTP shifts); an expired anon token is evicted on lookup. Anon tokens are high-entropy random keys, so
+    * a direct map lookup leaks nothing useful.
     */
   def authenticate(token: String): IO[Option[Principal]] =
     authenticateStatic(token) match
       case found @ Some(_) => IO.pure(found)
       case None            =>
-        IO.realTime.flatMap: now =>
+        IO.monotonic.flatMap: now =>
           anon.modify: live =>
             live.get(token) match
               case Some(a) if a.expiresAt > now => (live, Some(a.principal))
@@ -48,19 +49,24 @@ final class BotAuth private (
 
   /** Mint an ephemeral, unranked anonymous bot — `bot:team:anon:<uuid>`. An optional display label becomes a readable,
     * collision-proof prefix (the uuid suffix guarantees uniqueness and the slug keeps the externalId colon-free).
+    * Pruning expired entries on mint keeps the registry from accumulating tokens that are never presented again.
     */
   def mintAnon(label: Option[String]): IO[(String, Principal.Bot)] =
     for
-      now  <- IO.realTime
+      now  <- IO.monotonic
       uuid <- IO(UUID.randomUUID().toString)
       token              = randomToken()
       name               = label.map(slug).filter(_.nonEmpty).fold(uuid)(s => s"$s-${uuid.take(8)}")
       bot: Principal.Bot = Principal.Bot(AnonTeam, name)
-      _ <- anon.update(_.updated(token, Anon(bot, now + anonTtl)))
+      _ <- anon.update(_.filter(_._2.expiresAt > now).updated(token, Anon(bot, now + anonTtl)))
     yield (token, bot)
 
-  /** Number of live (un-expired) anon tokens — for tests / future metrics. */
-  def anonCount: IO[Int] = IO.realTime.flatMap(now => anon.get.map(_.count(_._2.expiresAt > now)))
+  /** Number of live anon tokens; also prunes any that have expired — for tests / future metrics. */
+  def anonCount: IO[Int] =
+    IO.monotonic.flatMap: now =>
+      anon.modify: live =>
+        val pruned = live.filter(_._2.expiresAt > now)
+        (pruned, pruned.size)
 
 object BotAuth:
 
@@ -88,7 +94,8 @@ object BotAuth:
       .toList
       .flatMap { entry =>
         entry.split('|').toList match
-          case team :: name :: token :: Nil if team.nonEmpty && name.nonEmpty && token.nonEmpty =>
+          // The `anon` team is reserved for self-service tokens, so a static entry can never occupy it.
+          case team :: name :: token :: Nil if team.nonEmpty && name.nonEmpty && token.nonEmpty && team != AnonTeam =>
             Some(token -> Principal.Bot(team, name))
           case _ => None
       }

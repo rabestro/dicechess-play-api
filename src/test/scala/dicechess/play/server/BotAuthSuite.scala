@@ -34,6 +34,9 @@ class BotAuthSuite extends munit.CatsEffectSuite:
   test("an empty roster authenticates nothing"):
     BotAuth.fromSpec("").flatMap(_.authenticate("anything")).map(assertEquals(_, None))
 
+  test("a static entry in the reserved anon team is rejected"):
+    BotAuth.fromSpec("anon|evil|tok").flatMap(_.authenticate("tok")).map(assertEquals(_, None))
+
   test("a minted anonymous token authenticates as bot:team:anon:*, then expires"):
     BotAuth
       .fromSpec("", anonTtl = 120.millis)
