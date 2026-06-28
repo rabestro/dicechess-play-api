@@ -34,12 +34,12 @@ Time controls are accepted at challenge creation but are **not enforced yet** (f
 Dice Chess uses DFEN to represent positions with rolled dice. It extends standard FEN by adding a **7th space-separated field** at the end.
 - The 7th field represents the active player's pending dice pool as piece letters.
 - The piece mapping for dice values is:
-  - `1` $\rightarrow$ Pawn (`p` / `P`)
-  - `2` $\rightarrow$ Knight (`n` / `N`)
-  - `3` $\rightarrow$ Bishop (`b` / `B`)
-  - `4` $\rightarrow$ Rook (`r` / `R`)
-  - `5` $\rightarrow$ Queen (`q` / `Q`)
-  - `6` $\rightarrow$ King (`k` / `K`)
+  - `1` → Pawn (`p` / `P`)
+  - `2` → Knight (`n` / `N`)
+  - `3` → Bishop (`b` / `B`)
+  - `4` → Rook (`r` / `R`)
+  - `5` → Queen (`q` / `Q`)
+  - `6` → King (`k` / `K`)
 - The letters are sorted numerically by their die value and capitalized for White, lowercase for Black.
 - *Example:* If it is White's turn and the rolled dice are `[2, 3, 6]`, the 7th field is `NBK`.
 - Compute legal moves using the engine for these dice and submit them.
