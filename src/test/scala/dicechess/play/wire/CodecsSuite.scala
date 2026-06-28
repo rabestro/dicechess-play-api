@@ -15,7 +15,7 @@ class CodecsSuite extends munit.FunSuite:
     roundtrip[GameCommand](GameCommand.Resign)
 
   test("GameEvent round-trips"):
-    val ps = PublicGameState(3L, "fen", Seat.White, dicePending = true, GameStatus.Active)
+    val ps = PublicGameState(3L, "fen", Seat.White, dicePending = true, GameStatus.Active, TimeControl.Fischer(300, 3))
     roundtrip[GameEvent](GameEvent.Snapshot(3L, ps))
     roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen"))
     roundtrip[GameEvent](
@@ -29,6 +29,12 @@ class CodecsSuite extends munit.FunSuite:
     roundtrip[Principal](Principal.Guest("g1"))
     roundtrip[Principal](Principal.User("u1"))
     roundtrip[Principal](Principal.Bot("acme", "v3"))
+
+  test("TimeControl round-trips"):
+    roundtrip[TimeControl](TimeControl.Unlimited)
+    roundtrip[TimeControl](TimeControl.SuddenDeath(60))
+    roundtrip[TimeControl](TimeControl.Fischer(300, 3))
+    roundtrip[TimeControl](TimeControl.PerMove(10))
 
   // Pin the exact on-the-wire shape: the browser/bot client depends on it, so a future
   // codec change must break these, not silently reshape the protocol.

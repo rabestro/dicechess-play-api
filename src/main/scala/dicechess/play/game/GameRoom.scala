@@ -298,14 +298,15 @@ object GameRoom:
       dice: DiceSource,
       ply: Long,
       pending: Boolean,
-      status: GameStatus
+      status: GameStatus,
+      timeControl: TimeControl
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
       case GameStatus.Active   => false
 
     def public: PublicGameState =
-      PublicGameState(version, EngineOps.serialize(state), EngineOps.activeSeat(state), pending, status)
+      PublicGameState(version, EngineOps.serialize(state), EngineOps.activeSeat(state), pending, status, timeControl)
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
   def create(
@@ -314,13 +315,16 @@ object GameRoom:
       initialDfen: String = EngineOps.InitialDfen,
       fanOutBuffer: Int = DefaultFanOutBuffer,
       idleCheck: FiniteDuration = DefaultIdleCheck,
-      disconnectGrace: FiniteDuration = DefaultDisconnectGrace
+      disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
+      timeControl: TimeControl = TimeControl.Unlimited
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
       case Right(state0) =>
         for
-          ref         <- Ref.of[IO, Session](Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active))
+          ref <- Ref.of[IO, Session](
+            Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active, timeControl)
+          )
           inbox       <- Queue.unbounded[IO, Msg]
           subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
           nextId      <- Ref.of[IO, Long](0L)

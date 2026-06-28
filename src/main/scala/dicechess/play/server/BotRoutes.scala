@@ -1,7 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{GameCommand, GameId, Principal, Seat}
+import dicechess.play.core.{GameCommand, GameId, Principal, Seat, TimeControl}
 import dicechess.play.game.GameRoom
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
@@ -16,7 +16,8 @@ import org.typelevel.ci.*
 import scala.concurrent.duration.*
 
 final case class BotAccount(team: String, name: String, id: String) derives Codec.AsObject
-final case class ChallengeTarget(team: String, name: String) derives Codec.AsObject
+final case class ChallengeTarget(team: String, name: String, timeControl: Option[TimeControl] = None)
+    derives Codec.AsObject
 final case class BotGame(gameId: String) derives Codec.AsObject
 final case class BotMove(moves: List[String]) derives Codec.AsObject
 
@@ -72,7 +73,14 @@ object BotRoutes:
             .value
             .flatMap:
               case Left(failure) => BadRequest(failure.message)
-              case Right(target) => challenges.create(bot, Principal.Bot(target.team, target.name)).flatMap(Created(_))
+              case Right(target) =>
+                challenges
+                  .create(
+                    bot,
+                    Principal.Bot(target.team, target.name),
+                    target.timeControl.getOrElse(TimeControl.Unlimited)
+                  )
+                  .flatMap(Created(_))
 
       case req @ POST -> Root / "bot" / "challenge" / id / "accept" =>
         withBot(auth, req): bot =>

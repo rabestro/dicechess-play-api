@@ -16,7 +16,8 @@ import org.http4s.HttpRoutes
 
 import scala.concurrent.duration.*
 
-final case class CreateGame(white: String, black: String) derives Codec.AsObject
+final case class CreateGame(white: String, black: String, timeControl: Option[TimeControl] = None)
+    derives Codec.AsObject
 final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
 
 /** The created game plus a per-seat join token: the creator distributes each token to the player who should hold that
@@ -48,7 +49,11 @@ object PlayRoutes:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
               registry
-                .create(Principal.Guest(body.white), Principal.Guest(body.black))
+                .create(
+                  Principal.Guest(body.white),
+                  Principal.Guest(body.black),
+                  body.timeControl.getOrElse(TimeControl.Unlimited)
+                )
                 .flatMap:
                   case Left(error)       => BadRequest(error)
                   case Right((id, room)) =>
