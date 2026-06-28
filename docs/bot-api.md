@@ -62,8 +62,8 @@ Mints an ephemeral, unranked token.
   {
     "token": "bearer-token-string",
     "team": "anon",
-    "name": "bot-name",
-    "id": "bot:team:anon:<uuid>"
+    "name": "mybot-8b7a6c5d",
+    "id": "bot:team:anon:mybot-8b7a6c5d"
   }
   ```
 
@@ -74,8 +74,8 @@ Mints an ephemeral, unranked token.
   ```json
   {
     "team": "anon",
-    "name": "bot-name",
-    "id": "bot:team:anon:<uuid>"
+    "name": "mybot-8b7a6c5d",
+    "id": "bot:team:anon:mybot-8b7a6c5d"
   }
   ```
 
@@ -102,7 +102,7 @@ Mints an ephemeral, unranked token.
     "challenger": {
       "Bot": {
         "team": "anon",
-        "name": "my-bot"
+        "name": "mybot-8b7a6c5d"
       }
     },
     "target": {
