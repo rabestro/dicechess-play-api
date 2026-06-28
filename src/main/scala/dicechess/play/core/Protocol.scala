@@ -61,5 +61,7 @@ enum GameEvent:
   case Snapshot(v: Long, state: PublicGameState)
   case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String, clocks: Option[Clocks])
   case TurnPlayed(v: Long, seat: Seat, moves: List[String], fenAfter: String)
-  case GameEnded(v: Long, over: GameOver)
+  // `seed` is the revealed server seed (hex): SHA-256(seed) equals the `commit` published at creation, so anyone can
+  // open the dice commitment after the game.
+  case GameEnded(v: Long, over: GameOver, seed: String)
   case Rejected(v: Long, seat: Seat, reason: String)

@@ -183,8 +183,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       .lastOrError
 
   private def terminalOf(event: GameEvent): Option[GameOver] = event match
-    case GameEvent.GameEnded(_, over) => Some(over)
-    case GameEvent.Snapshot(_, ps)    =>
+    case GameEvent.GameEnded(_, over, _) => Some(over)
+    case GameEvent.Snapshot(_, ps)       =>
       ps.status match
         case GameStatus.Ended(over) => Some(over)
         case GameStatus.Active      => None
@@ -209,9 +209,9 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     frame match
       case WSFrame.Text(txt, _) =>
         decode[GameEvent](txt) match
-          case Right(GameEvent.GameEnded(_, _)) => IO.pure(true)
-          case Right(event)                     => maybeAct(conn, seat, handled, turns, event).as(false)
-          case Left(_)                          => IO.pure(false)
+          case Right(GameEvent.GameEnded(_, _, _)) => IO.pure(true)
+          case Right(event)                        => maybeAct(conn, seat, handled, turns, event).as(false)
+          case Left(_)                             => IO.pure(false)
       case _ => IO.pure(false)
 
   private def maybeAct(
