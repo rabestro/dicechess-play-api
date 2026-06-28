@@ -21,9 +21,11 @@ Other tasks: `mise run compile`, `mise run test`, `mise run format`, `mise run c
 
 ## Workflow
 
-- **Branch naming** (enforced by CI): `(task|feat|bug)/<issue-id>-<short-desc>`,
-  e.g. `feat/12-game-room`.
-- **Link an issue**: the PR description must contain `Closes #<id>` (or `Fixes` / `Resolves`).
+- **Branch naming** (enforced by CI): `<type>/<short-desc>`, optionally `<type>/<id>-<short-desc>` to
+  link an issue. Types: `task` / `feat` / `bug` (issue-driven), `refactor` / `chore` / `docs` / `ci` /
+  `test` / `perf` (issueless). E.g. `feat/12-game-room` or `refactor/extract-clock-policy`.
+- **Link an issue**: required only when the branch carries an issue number — then the PR description
+  must contain `Closes #<id>` (or `Fixes` / `Resolves`).
 - **Formatting**: `scalafmt` runs in the pre-commit hook; CI fails on unformatted code.
 - **Secrets**: the pre-commit hook scans staged diffs (betterleaks) — never commit tokens.
 - **English** for code, commits, PR descriptions, and review comments.
