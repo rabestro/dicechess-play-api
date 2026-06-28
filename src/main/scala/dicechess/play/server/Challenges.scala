@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import dicechess.play.core.{BotEvent, Challenge, Principal}
+import dicechess.play.core.{BotEvent, Challenge, Principal, TimeControl}
 
 /** Pending bot-to-bot challenges. Creating one notifies the target; accepting it seats a game and emits `gameStart` to
   * both bots; declining notifies the challenger. Only the challenged bot may accept or decline.
@@ -15,10 +15,14 @@ final class Challenges private (
 ):
   import Challenges.*
 
-  def create(challenger: Principal, target: Principal): IO[Challenge] =
+  def create(
+      challenger: Principal,
+      target: Principal,
+      timeControl: TimeControl = TimeControl.Unlimited
+  ): IO[Challenge] =
     for
       n <- nextId.getAndUpdate(_ + 1)
-      challenge = Challenge(s"challenge-$n", challenger, target)
+      challenge = Challenge(s"challenge-$n", challenger, target, timeControl)
       _ <- pending.update(_.updated(challenge.id, challenge))
       _ <- events.publish(target, BotEvent.ChallengeReceived(challenge.id, challenger))
     yield challenge
@@ -28,7 +32,7 @@ final class Challenges private (
     claim(by, id).flatMap {
       case Left(rejected)   => IO.pure(Left(rejected))
       case Right(challenge) =>
-        registry.create(challenge.challenger, challenge.target).flatMap {
+        registry.create(challenge.challenger, challenge.target, challenge.timeControl).flatMap {
           case Left(error)        => IO.pure(Left(Rejected.Failed(error)))
           case Right((gameId, _)) =>
             val started = BotEvent.GameStart(gameId.value)

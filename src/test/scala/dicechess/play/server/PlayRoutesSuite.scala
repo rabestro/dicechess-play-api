@@ -76,6 +76,24 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           .timeoutTo(20.seconds, IO.raiseError(RuntimeException("no terminal over the wire")))
       yield assert(ended._1 && ended._2, "both clients should observe GameEnded")
 
+  test("POST /games records the optional time control (default unlimited), echoed in the snapshot"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+      yield (port, http)
+
+    resources.use: (port, http) =>
+      val base = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      for
+        dflt   <- http.expect[CreatedGame](POST(CreateGame("w", "b"), base / "games"))
+        dState <- http.expect[PublicGameState](base / "games" / dflt.gameId)
+        timed <- http.expect[CreatedGame](POST(CreateGame("w", "b", Some(TimeControl.Fischer(300, 3))), base / "games"))
+        tState <- http.expect[PublicGameState](base / "games" / timed.gameId)
+      yield
+        assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
+        assertEquals(tState.timeControl, TimeControl.Fischer(300, 3)) // forward-compat: recorded, not yet enforced
+
   test("POST /games rejects a malformed body with 400, not 500"):
     val resources =
       for

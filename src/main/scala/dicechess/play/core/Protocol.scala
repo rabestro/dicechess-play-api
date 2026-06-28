@@ -19,13 +19,25 @@ enum GameStatus:
   case Active
   case Ended(over: GameOver)
 
+/** A game's time control, chosen at creation. `Unlimited` is today's behavior (only the anti-abandonment turn deadline
+  * applies). The timed variants are **not enforced yet** — recorded forward-compat so the creation API and wire are
+  * stable before clocks land (see the "Time control / clocks" milestone). Distinct from the engine's move-search
+  * TimeManager, which budgets a bot's own thinking rather than the authoritative game clock.
+  */
+enum TimeControl:
+  case Unlimited
+  case SuddenDeath(initialSeconds: Int)
+  case Fischer(initialSeconds: Int, incrementSeconds: Int)
+  case PerMove(secondsPerMove: Int)
+
 /** A wire-safe snapshot of a game, sufficient for a (re)joining client or bot to act. */
 final case class PublicGameState(
     version: Long,
     dfen: String,
     activeSeat: Seat,
     dicePending: Boolean,
-    status: GameStatus
+    status: GameStatus,
+    timeControl: TimeControl
 )
 
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
