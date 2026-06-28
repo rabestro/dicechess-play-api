@@ -13,10 +13,9 @@ import scala.concurrent.duration.*
 
 class BotRoutesSuite extends munit.CatsEffectSuite:
 
-  private val auth = BotAuth.parse("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
-
   private def app: IO[HttpApp[IO]] =
     for
+      auth       <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
       events     <- BotEvents.create
       registry   <- GameRegistry.create()
       challenges <- Challenges.create(events, registry)
@@ -36,6 +35,25 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
       .toList
       .timeoutTo(5.seconds, IO.raiseError(RuntimeException("no keep-alive within the deadline")))
       .map(bytes => assertEquals(new String(bytes.toArray, "UTF-8"), "\n\n"))
+
+  test("POST /bot/anon mints a token that then authenticates"):
+    app.flatMap: service =>
+      for
+        created <- service.run(Request[IO](Method.POST, uri"/bot/anon?name=Tester")).flatMap(_.as[AnonBot])
+        account <- service.run(request(Method.GET, uri"/bot/account", Some(created.token))).flatMap(_.as[BotAccount])
+      yield
+        assertEquals(created.team, "anon")
+        assert(created.id.startsWith("bot:team:anon:tester-"), created.id)
+        assertEquals(account.id, created.id) // the minted token authenticates as the same identity
+
+  test("an unknown / no Bearer token is unauthorized"):
+    app.flatMap: service =>
+      for
+        noAuth   <- service.run(Request[IO](Method.GET, uri"/bot/account")).map(_.status)
+        badToken <- service.run(request(Method.GET, uri"/bot/account", Some("nope"))).map(_.status)
+      yield
+        assertEquals(noAuth, Status.Unauthorized)
+        assertEquals(badToken, Status.Unauthorized)
 
   private def challengeBobAsAlice(service: HttpApp[IO]): IO[Challenge] =
     service
