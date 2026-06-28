@@ -112,7 +112,7 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
 
 **Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`POST /bot/anon`, `/bot/account`, `/bot/stream/event`, `/bot/challenge/{team}/{name}`).
 
-**Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL; rate-limiting follows. Static/official bots stay on `PLAY_BOT_TOKENS`.
+**Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Static/official bots stay on `PLAY_BOT_TOKENS`.
 
 > Game state is **in-memory** for now — a restart drops live games. Durability (Postgres `play` schema) lands later in 3b.
 

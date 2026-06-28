@@ -3,7 +3,17 @@ package dicechess.play
 import cats.effect.{IO, IOApp}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
-import dicechess.play.server.{BotAuth, BotEvents, BotRoutes, Challenges, Cors, GameRegistry, HealthRoutes, PlayRoutes}
+import dicechess.play.server.{
+  AnonMintLimiter,
+  BotAuth,
+  BotEvents,
+  BotRoutes,
+  Challenges,
+  Cors,
+  GameRegistry,
+  HealthRoutes,
+  PlayRoutes
+}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 
@@ -20,6 +30,7 @@ object Main extends IOApp.Simple:
       botAuth    <- BotAuth.fromEnv
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
+      mintLimit  <- AnonMintLimiter.create()
       cors       <- Cors.fromEnv
       _          <- EmberServerBuilder
         .default[IO]
@@ -31,7 +42,8 @@ object Main extends IOApp.Simple:
               botAuth,
               challenges,
               botEvents,
-              registry
+              registry,
+              mintLimit
             )).orNotFound
           )
         )

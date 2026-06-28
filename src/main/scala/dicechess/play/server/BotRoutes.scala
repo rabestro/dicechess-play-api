@@ -9,8 +9,9 @@ import io.circe.{Codec, Encoder}
 import io.circe.syntax.*
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
-import org.http4s.headers.{Authorization, `Content-Type`, `WWW-Authenticate`}
+import org.http4s.headers.{Authorization, `Content-Type`, `Retry-After`, `WWW-Authenticate`}
 import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request, Response}
+import org.typelevel.ci.*
 
 import scala.concurrent.duration.*
 
@@ -37,11 +38,25 @@ object BotRoutes:
 
   private object NameParam extends OptionalQueryParamDecoderMatcher[String]("name")
 
-  def apply(auth: BotAuth, challenges: Challenges, events: BotEvents, registry: GameRegistry): HttpRoutes[IO] =
+  def apply(
+      auth: BotAuth,
+      challenges: Challenges,
+      events: BotEvents,
+      registry: GameRegistry,
+      limiter: AnonMintLimiter
+  ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       // Zero-registration self-service: mint an ephemeral, unranked anonymous bot token for testing.
-      case POST -> Root / "bot" / "anon" :? NameParam(name) =>
-        auth.mintAnon(name).flatMap((token, bot) => Created(AnonBot(token, bot.team, bot.name, bot.externalId)))
+      // The only un-gated route, so it carries its own per-IP rate limit.
+      case req @ POST -> Root / "bot" / "anon" :? NameParam(name) =>
+        limiter
+          .attempt(clientIp(req))
+          .flatMap:
+            case Left(retryAfter) =>
+              TooManyRequests("anonymous mint rate limit exceeded — retry later")
+                .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
+            case Right(()) =>
+              auth.mintAnon(name).flatMap((token, bot) => Created(AnonBot(token, bot.team, bot.name, bot.externalId)))
 
       case req @ GET -> Root / "bot" / "account" =>
         withBot(auth, req)(bot => Ok(BotAccount(bot.team, bot.name, bot.externalId)))
@@ -133,6 +148,17 @@ object BotRoutes:
     req.headers.get[Authorization].collect { case Authorization(Credentials.Token(AuthScheme.Bearer, token)) =>
       token
     }
+
+  /** Client IP for rate-limiting. Behind the Cloudflare tunnel the socket peer is the tunnel, so the real client is in
+    * `CF-Connecting-IP` (then `X-Forwarded-For`, then the direct peer for local/dev).
+    */
+  private def clientIp(req: Request[IO]): String =
+    req.headers
+      .get(ci"CF-Connecting-IP")
+      .map(_.head.value)
+      .orElse(req.headers.get(ci"X-Forwarded-For").map(_.head.value.split(',').head.trim))
+      .orElse(req.remoteAddr.map(_.toString))
+      .getOrElse("unknown")
 
   private[server] def ndjson[A: Encoder](
       events: Stream[IO, A],
