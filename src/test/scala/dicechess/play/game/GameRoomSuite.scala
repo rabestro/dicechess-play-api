@@ -30,13 +30,15 @@ class GameRoomSuite extends munit.CatsEffectSuite:
           val resignSoon = IO.sleep(100.millis) *> room.submit(Seat.White, GameCommand.Resign)
           (ended, resignSoon)
             .parMapN((event, _) => event)
-            .flatMap(event => room.diceCommit.map(commit => (event, commit)))
+            .flatMap(event => (room.diceCommit, room.snapshot).mapN((commit, snap) => (event, commit, snap)))
             .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no game-end event")))
       }
-      .map: (event, commit) =>
+      .map: (event, commit, snap) =>
         assert(event.seed.nonEmpty, "the game-end event must reveal the seed")
         // The whole point of commit-reveal: the revealed seed hashes to the commitment published at creation.
         assertEquals(sha256Hex(event.seed), commit)
+        // And the terminal snapshot carries the same reveal, so a client that joins after the end can still verify.
+        assertEquals(snap.seed, Some(event.seed))
 
   test("two bots play a full game through the room to a terminal state"):
     val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)

@@ -384,6 +384,10 @@ object GameRoom:
 
     /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). */
     def publicAt(now: FiniteDuration): PublicGameState =
+      // Reveal the seed only once the game is over (so a late (re)joiner can still verify); secret while active.
+      val revealed = status match
+        case GameStatus.Ended(_) => Some(dice.reveal)
+        case GameStatus.Active   => None
       PublicGameState(
         version,
         EngineOps.serialize(state),
@@ -391,7 +395,8 @@ object GameRoom:
         pending,
         status,
         timeControl,
-        liveClocks(this, now)
+        liveClocks(this, now),
+        revealed
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */

@@ -44,7 +44,10 @@ final case class PublicGameState(
     dicePending: Boolean,
     status: GameStatus,
     timeControl: TimeControl,
-    clocks: Option[Clocks]
+    clocks: Option[Clocks],
+    // The revealed server seed (hex), present only once the game has ended — so a client that (re)joins after the end
+    // can still open the dice commitment. `None` while the game is active (the seed stays secret mid-game).
+    seed: Option[String]
 )
 
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
@@ -61,7 +64,7 @@ enum GameEvent:
   case Snapshot(v: Long, state: PublicGameState)
   case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String, clocks: Option[Clocks])
   case TurnPlayed(v: Long, seat: Seat, moves: List[String], fenAfter: String)
-  // `seed` is the revealed server seed (hex): SHA-256(seed) equals the `commit` published at creation, so anyone can
-  // open the dice commitment after the game.
+  // `seed` is the revealed server seed encoded as hex. Hex-decode it, then SHA-256 the raw bytes to reproduce the
+  // `commit` published at creation and open the dice commitment after the game.
   case GameEnded(v: Long, over: GameOver, seed: String)
   case Rejected(v: Long, seat: Seat, reason: String)
