@@ -27,7 +27,14 @@ A bot does not need to determine its seat color (White or Black) to submit moves
 
 ### Time Controls
 
-Time controls are accepted at challenge creation but are **not enforced yet** (forward-compatibility; clocks are coming in a future milestone). Set them now to be ready.
+Time controls are **enforced**: the server is the only timekeeper. The side to move runs down a real per-side clock and **loses on time** (a `Timeout` termination) if it does not complete its turn in time.
+
+- `SuddenDeath` — one bank per side, no bonus.
+- `Fischer` — the increment is credited when a turn is completed.
+- `PerMove` — a fresh budget each turn (no carry-over).
+- `Unlimited` — no clock (only a 120s anti-abandonment cap per turn).
+
+The clock runs **per turn** (a turn = several micro-moves, one per die). A forced pass (no legal move) is instant and costs nothing. Remaining time is surfaced on the wire (see `clocks` on `Snapshot` and `DiceRolled` below) in **milliseconds**, so a bot can budget; the side to move is still ticking, so subtract your own elapsed time since the event.
 
 ### DFEN (Dice Forsyth-Edwards Notation)
 
@@ -202,7 +209,8 @@ Long-lived stream for a specific game's state transitions.
           },
           "timeControl": {
             "Unlimited": {}
-          }
+          },
+          "clocks": null
         }
       }
     }
@@ -214,10 +222,12 @@ Long-lived stream for a specific game's state transitions.
         "v": 1,
         "seat": "White",
         "dice": [2, 3, 6],
-        "dfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 NBK"
+        "dfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 NBK",
+        "clocks": {"white": 180000, "black": 175000}
       }
     }
     ```
+    `clocks` is remaining milliseconds per side, or `null` for an `Unlimited` game. It rides on every `Snapshot` and `DiceRolled`; the side to move keeps ticking, so count down locally between events. On a flag-fall the game ends with `termination: "Timeout"` and the loser's clock at `0`.
   - **TurnPlayed** (Turn moves applied):
     ```json
     {
@@ -272,6 +282,9 @@ JSON representations of a participant's identity:
 - SuddenDeath: `{"SuddenDeath":{"initialSeconds":180}}`
 - Fischer: `{"Fischer":{"initialSeconds":180,"incrementSeconds":2}}`
 - PerMove: `{"PerMove":{"secondsPerMove":10}}`
+
+### Clocks
+Remaining time per side, in **milliseconds**, as of the carrying event: `{"white":180000,"black":175000}`. `null` on `Unlimited` games. Appears on `Snapshot.state` and `DiceRolled`.
 
 ---
 

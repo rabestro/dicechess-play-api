@@ -69,3 +69,27 @@ class GameRoomClockSuite extends munit.CatsEffectSuite:
   test("SuddenDeath: bots with ample time finish on the board, never on the clock"):
     botsFinishUnderClock(TimeControl.SuddenDeath(600)).map: over =>
       assertNotEquals(over.termination, Termination.Timeout)
+
+  test("Unlimited games carry no clocks on the wire"):
+    GameRoom
+      .create(seats, dice)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) => room.start *> room.snapshot
+      }
+      .map(ps => assertEquals(ps.clocks, None))
+
+  test("a timed game's snapshot shows live clocks — the mover's ticks down, the other side's stays full"):
+    GameRoom
+      .create(seats, dice, timeControl = TimeControl.SuddenDeath(60))
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) => room.start *> IO.sleep(400.millis) *> room.snapshot
+      }
+      .map: ps =>
+        val clocks         = ps.clocks.getOrElse(fail("a timed game must carry clocks"))
+        val (mover, other) =
+          if ps.activeSeat == Seat.White then (clocks.white, clocks.black) else (clocks.black, clocks.white)
+        assert(mover < 60000L, s"the mover's clock should have ticked down from 60s, got ${mover}ms")
+        assert(mover > 0L, s"the mover should not have flagged yet, got ${mover}ms")
+        assertEquals(other, 60000L, "the side not to move keeps its full bank")

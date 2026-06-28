@@ -15,9 +15,19 @@ class CodecsSuite extends munit.FunSuite:
     roundtrip[GameCommand](GameCommand.Resign)
 
   test("GameEvent round-trips"):
-    val ps = PublicGameState(3L, "fen", Seat.White, dicePending = true, GameStatus.Active, TimeControl.Fischer(300, 3))
+    val ps =
+      PublicGameState(
+        3L,
+        "fen",
+        Seat.White,
+        dicePending = true,
+        GameStatus.Active,
+        TimeControl.Fischer(300, 3),
+        Some(Clocks(300000, 297000))
+      )
     roundtrip[GameEvent](GameEvent.Snapshot(3L, ps))
-    roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen"))
+    roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000))))
+    roundtrip[GameEvent](GameEvent.DiceRolled(5L, Seat.Black, List(4), "dfen2", None))
     roundtrip[GameEvent](
       GameEvent.GameEnded(9L, GameOver(GameResult.Win(Side.Black), Termination.KingCaptured))
     )
@@ -36,6 +46,9 @@ class CodecsSuite extends munit.FunSuite:
     roundtrip[TimeControl](TimeControl.Fischer(300, 3))
     roundtrip[TimeControl](TimeControl.PerMove(10))
 
+  test("Clocks round-trips"):
+    roundtrip[Clocks](Clocks(60000, 58500))
+
   // Pin the exact on-the-wire shape: the browser/bot client depends on it, so a future
   // codec change must break these, not silently reshape the protocol.
 
@@ -49,6 +62,12 @@ class CodecsSuite extends munit.FunSuite:
   test("wire format the server emits (encode)"):
     assertEquals((GameCommand.Resign: GameCommand).asJson.noSpaces, """{"Resign":{}}""")
     assertEquals(
-      (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen"): GameEvent).asJson.noSpaces,
-      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen"}}"""
+      (GameEvent
+        .DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", Some(Clocks(180000, 175000))): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":{"white":180000,"black":175000}}}"""
+    )
+    // Unlimited games carry no clocks: the field is present and null (Circe's default for None).
+    assertEquals(
+      (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", None): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":null}}"""
     )
