@@ -34,23 +34,28 @@ object Main extends IOApp.Simple:
       challenges <- Challenges.create(botEvents, registry)
       mintLimit  <- AnonMintLimiter.create()
       lobby      <- Lobby.create(registry)
-      _          <- lobby.sweeper().start // background: drop seeks whose creator has gone quiet
       cors       <- Cors.fromEnv
-      _          <- EmberServerBuilder
-        .default[IO]
-        .withHost(host)
-        .withPort(port)
-        .withHttpWebSocketApp(wsb =>
-          cors(
-            (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> BotRoutes(
-              botAuth,
-              challenges,
-              botEvents,
-              registry,
-              mintLimit
-            )).orNotFound
-          )
-        )
-        .build
-        .useForever
+      // The seek-sweeper is scoped to the server: it runs while the server runs and is cancelled with it, so a failure
+      // surfaces instead of being silently dropped by a detached fiber.
+      _ <- lobby
+        .sweeper()
+        .background
+        .surround:
+          EmberServerBuilder
+            .default[IO]
+            .withHost(host)
+            .withPort(port)
+            .withHttpWebSocketApp(wsb =>
+              cors(
+                (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> BotRoutes(
+                  botAuth,
+                  challenges,
+                  botEvents,
+                  registry,
+                  mintLimit
+                )).orNotFound
+              )
+            )
+            .build
+            .useForever
     yield ()

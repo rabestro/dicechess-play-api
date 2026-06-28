@@ -75,6 +75,20 @@ class LobbySuite extends munit.CatsEffectSuite:
       assertEquals(goodCancel, true)
       assertEquals(gone, Nil)
 
+  test("a matched seek can't be cancelled (its game already exists); the creator can still read its token"):
+    for
+      l              <- lobby
+      (seek, secret) <- l.create(alice, TimeControl.Unlimited)
+      _              <- l.accept(seek.id, bob)
+      cancelled      <- l.cancel(seek.id, secret)
+      status         <- l.status(seek.id, secret)
+    yield
+      assertEquals(cancelled, false)
+      assert(status.exists {
+        case Lobby.SeekStatus.Matched(_, _) => true
+        case _                              => false
+      })
+
   test("the sweep drops a seek whose creator has gone quiet past the TTL"):
     for
       reg  <- GameRegistry.create()

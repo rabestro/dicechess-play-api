@@ -34,7 +34,7 @@ final class Lobby private (
       _ <- seeks.update(_.updated(seek.id, Entry(seek, creator, secret, EntryState.Open, now)))
     yield (seek, secret)
 
-  /** The open (unclaimed) seeks, for the public lobby list. */
+  /** Only seeks still `Open` — claimed/matched ones are hidden from the public list. */
   def list: IO[List[Seek]] =
     seeks.get.map(_.values.collect { case e if e.state == EntryState.Open => e.seek }.toList.sortBy(_.id))
 
@@ -59,21 +59,28 @@ final class Lobby private (
         registry.create(creator, accepter, tc).flatMap {
           case Left(error)           => seeks.update(_.removed(id)).as(Left(Rejected.Failed(error)))
           case Right((gameId, room)) =>
-            val tokens        = room.joinTokens
-            val creatorToken  = tokens.getOrElse(Seat.White, "")
-            val accepterToken = tokens.getOrElse(Seat.Black, "")
-            seeks
-              .update(_.updatedWith(id)(_.map(_.copy(state = EntryState.Matched(Match(gameId.value, creatorToken))))))
-              .as(Right(Match(gameId.value, accepterToken)))
+            val tokens = room.joinTokens
+            // Both seat tokens must exist; never deliver an empty (invalid) capability token.
+            (tokens.get(Seat.White), tokens.get(Seat.Black)) match
+              case (Some(creatorToken), Some(accepterToken)) =>
+                seeks
+                  .update(
+                    _.updatedWith(id)(_.map(_.copy(state = EntryState.Matched(Match(gameId.value, creatorToken)))))
+                  )
+                  .as(Right(Match(gameId.value, accepterToken)))
+              case _ =>
+                seeks.update(_.removed(id)).as(Left(Rejected.Failed("missing seat token")))
         }
     }
 
-  /** The creator cancels its seek (capability secret required). Returns whether a seek was removed. */
+  /** Cancel only a still-`Open` seek (secret-gated): a claimed/matched seek has a game in flight, so removing it would
+    * strand the creator's seat token. Returns whether a seek was removed.
+    */
   def cancel(id: String, secret: String): IO[Boolean] =
     seeks.modify: current =>
       current.get(id) match
-        case Some(e) if e.secret == secret => (current.removed(id), true)
-        case _                             => (current, false)
+        case Some(e) if e.secret == secret && e.state == EntryState.Open => (current.removed(id), true)
+        case _                                                           => (current, false)
 
   /** Drop seeks whose creator hasn't polled within the TTL (gone). */
   def sweep: IO[Unit] =
