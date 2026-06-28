@@ -110,7 +110,7 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
 4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
 5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.
 
-**Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`POST /bot/anon`, `/bot/account`, `/bot/stream/event`, `/bot/challenge/{team}/{name}`).
+**Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`POST /bot/anon`, `/bot/account`, `/bot/stream/event`, `POST /bot/challenge`). See [Bot API Reference](docs/bot-api.md) for the complete integration guide and payload schemas.
 
 **Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Static/official bots stay on `PLAY_BOT_TOKENS`.
 
