@@ -30,6 +30,12 @@ enum TimeControl:
   case Fischer(initialSeconds: Int, incrementSeconds: Int)
   case PerMove(secondsPerMove: Int)
 
+/** Remaining time per side, in **milliseconds**, as of the event that carries it. The side to move is still ticking, so
+  * a client counts its clock down locally between server updates; the other side's value is exact until its next turn.
+  * `Unlimited` games carry no clocks (the field is absent), so it appears only on timed games.
+  */
+final case class Clocks(white: Long, black: Long)
+
 /** A wire-safe snapshot of a game, sufficient for a (re)joining client or bot to act. */
 final case class PublicGameState(
     version: Long,
@@ -37,7 +43,8 @@ final case class PublicGameState(
     activeSeat: Seat,
     dicePending: Boolean,
     status: GameStatus,
-    timeControl: TimeControl
+    timeControl: TimeControl,
+    clocks: Option[Clocks]
 )
 
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
@@ -52,7 +59,7 @@ enum GameCommand:
   */
 enum GameEvent:
   case Snapshot(v: Long, state: PublicGameState)
-  case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String)
+  case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String, clocks: Option[Clocks])
   case TurnPlayed(v: Long, seat: Seat, moves: List[String], fenAfter: String)
   case GameEnded(v: Long, over: GameOver)
   case Rejected(v: Long, seat: Seat, reason: String)

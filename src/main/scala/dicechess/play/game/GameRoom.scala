@@ -49,8 +49,9 @@ final class GameRoom private (
     Stream
       .resource(Resource.make(register)(sub => unregister(sub.id)))
       .flatMap: sub =>
-        val snapshot = Stream.eval(stateRef.get.map(s => GameEvent.Snapshot(s.version, s.public)))
-        val live     = Stream.fromQueueUnterminated(sub.queue)
+        val snapshot =
+          Stream.eval((stateRef.get, IO.monotonic).mapN((s, now) => GameEvent.Snapshot(s.version, s.publicAt(now))))
+        val live = Stream.fromQueueUnterminated(sub.queue)
         (snapshot ++ live)
           .interruptWhen(sub.dropped.get.attempt)
           .takeThrough(event => !isTerminal(event))
@@ -156,7 +157,7 @@ final class GameRoom private (
   def diceCommit: IO[String] = stateRef.get.map(_.dice.commit)
 
   /** Current public state (for a REST snapshot or a freshly-joining client). */
-  def snapshot: IO[PublicGameState] = stateRef.get.map(_.public)
+  def snapshot: IO[PublicGameState] = (stateRef.get, IO.monotonic).mapN((s, now) => s.publicAt(now))
 
   // ── consumer fiber ─────────────────────────────────────────────────────────
 
@@ -265,8 +266,6 @@ final class GameRoom private (
         val left = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed) + inc.seconds
         s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
 
-  private def floorZero(d: FiniteDuration): FiniteDuration = if d > Duration.Zero then d else Duration.Zero
-
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
 
@@ -285,7 +284,13 @@ final class GameRoom private (
     val rolled = EngineOps.withDice(s0.state, dice)
     val seat   = EngineOps.activeSeat(rolled)
     val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true)
-    emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled))).flatMap: s2 =>
+    // The new mover's clock has not started ticking yet (startClock runs below), so these are the banks at turn start —
+    // including the increment just credited to the side that completed the previous turn.
+    val emitRoll =
+      IO.monotonic.flatMap: now =>
+        val clocks = liveClocks(s1, now)
+        emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled), clocks))
+    emitRoll.flatMap: s2 =>
       if EngineOps.legalMovePaths(rolled).nonEmpty then startClock(s2)
       else
         val passed = rolled.endTurn()
@@ -377,8 +382,17 @@ object GameRoom:
       case GameStatus.Ended(_) => true
       case GameStatus.Active   => false
 
-    def public: PublicGameState =
-      PublicGameState(version, EngineOps.serialize(state), EngineOps.activeSeat(state), pending, status, timeControl)
+    /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). */
+    def publicAt(now: FiniteDuration): PublicGameState =
+      PublicGameState(
+        version,
+        EngineOps.serialize(state),
+        EngineOps.activeSeat(state),
+        pending,
+        status,
+        timeControl,
+        liveClocks(this, now)
+      )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
   def create(
@@ -438,6 +452,25 @@ object GameRoom:
       case TimeControl.SuddenDeath(init) => seats.map(_ -> init.seconds).toMap
       case TimeControl.Fischer(init, _)  => seats.map(_ -> init.seconds).toMap
       case _                             => Map.empty
+
+  private def floorZero(d: FiniteDuration): FiniteDuration = if d > Duration.Zero then d else Duration.Zero
+
+  /** Remaining time per side as of `now`, in millis — the mover's in-progress turn already subtracted so a snapshot is
+    * live, not frozen at the last completed turn. `None` for Unlimited (no clock).
+    */
+  private def liveClocks(s: Session, now: FiniteDuration): Option[Clocks] =
+    s.timeControl match
+      case TimeControl.Unlimited => None
+      case timeControl           =>
+        val mover                          = Option.when(s.pending)(EngineOps.activeSeat(s.state))
+        def remainingFor(seat: Seat): Long =
+          val bank = timeControl match
+            case TimeControl.PerMove(spm) => spm.seconds
+            case _                        => s.remaining.getOrElse(seat, Duration.Zero)
+          val elapsed =
+            if mover.contains(seat) then s.turnStartedAt.fold(Duration.Zero: FiniteDuration)(now - _) else Duration.Zero
+          floorZero(bank - elapsed).toMillis
+        Some(Clocks(remainingFor(Seat.White), remainingFor(Seat.Black)))
 
   private def mintTokens(seats: Iterable[Seat]): IO[Map[Seat, String]] =
     seats.toList.traverse(seat => randomToken.map(seat -> _)).map(_.toMap)
