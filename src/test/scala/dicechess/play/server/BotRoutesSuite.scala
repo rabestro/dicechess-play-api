@@ -5,7 +5,7 @@ import dicechess.play.core.{BotEvent, Challenge, Principal}
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
-import org.http4s.headers.Authorization
+import org.http4s.headers.{Authorization, `Retry-After`}
 import org.http4s.implicits.*
 import org.http4s.{AuthScheme, Credentials, HttpApp, Method, Request, Status, Uri}
 
@@ -13,13 +13,15 @@ import scala.concurrent.duration.*
 
 class BotRoutesSuite extends munit.CatsEffectSuite:
 
-  private def app: IO[HttpApp[IO]] =
+  private def appWith(limiter: AnonMintLimiter): IO[HttpApp[IO]] =
     for
       auth       <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
       events     <- BotEvents.create
       registry   <- GameRegistry.create()
       challenges <- Challenges.create(events, registry)
-    yield BotRoutes(auth, challenges, events, registry).orNotFound
+    yield BotRoutes(auth, challenges, events, registry, limiter).orNotFound
+
+  private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith)
 
   private def request(method: Method, uri: Uri, token: Option[String]): Request[IO] =
     val base = Request[IO](method, uri)
@@ -45,6 +47,22 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(created.team, "anon")
         assert(created.id.startsWith("bot:team:anon:tester-"), created.id)
         assertEquals(account.id, created.id) // the minted token authenticates as the same identity
+
+  test("POST /bot/anon is rate-limited per client (429 + Retry-After)"):
+    AnonMintLimiter
+      .create(limit = 2)
+      .flatMap(appWith)
+      .flatMap: service =>
+        val mint = Request[IO](Method.POST, uri"/bot/anon")
+        for
+          s1 <- service.run(mint).map(_.status)
+          s2 <- service.run(mint).map(_.status)
+          r3 <- service.run(mint)
+        yield
+          assertEquals(s1, Status.Created)
+          assertEquals(s2, Status.Created)
+          assertEquals(r3.status, Status.TooManyRequests)
+          assert(r3.headers.get[`Retry-After`].isDefined, "a 429 must carry Retry-After")
 
   test("an unknown / no Bearer token is unauthorized"):
     app.flatMap: service =>
