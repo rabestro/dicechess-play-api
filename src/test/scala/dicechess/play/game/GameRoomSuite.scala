@@ -6,11 +6,39 @@ import dicechess.engine.search.BotRegistry
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 
+import java.security.MessageDigest
 import scala.concurrent.duration.*
 
 class GameRoomSuite extends munit.CatsEffectSuite:
 
   private def greedy = BotRegistry.getAlgorithm("greedy").get
+
+  /** SHA-256 of a hex-encoded seed, hex-encoded — to check a reveal against its commitment. */
+  private def sha256Hex(hexSeed: String): String =
+    val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
+    MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString
+
+  test("the game-end event reveals the server seed, opening the dice commitment"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+    GameRoom
+      .create(Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")), dice)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          // Subscribe first, then resign shortly after so the terminal event is the live GameEnded (not a snapshot).
+          val ended      = room.subscribe.collectFirst { case e: GameEvent.GameEnded => e }.compile.lastOrError
+          val resignSoon = IO.sleep(100.millis) *> room.submit(Seat.White, GameCommand.Resign)
+          (ended, resignSoon)
+            .parMapN((event, _) => event)
+            .flatMap(event => (room.diceCommit, room.snapshot).mapN((commit, snap) => (event, commit, snap)))
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no game-end event")))
+      }
+      .map: (event, commit, snap) =>
+        assert(event.seed.nonEmpty, "the game-end event must reveal the seed")
+        // The whole point of commit-reveal: the revealed seed hashes to the commitment published at creation.
+        assertEquals(sha256Hex(event.seed), commit)
+        // And the terminal snapshot carries the same reveal, so a client that joins after the end can still verify.
+        assertEquals(snap.seed, Some(event.seed))
 
   test("two bots play a full game through the room to a terminal state"):
     val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)

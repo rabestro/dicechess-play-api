@@ -80,8 +80,8 @@ final class GameRoom private (
       }
 
   private def isTerminal(event: GameEvent): Boolean = event match
-    case GameEvent.GameEnded(_, _) => true
-    case GameEvent.Snapshot(_, ps) =>
+    case GameEvent.GameEnded(_, _, _) => true
+    case GameEvent.Snapshot(_, ps)    =>
       ps.status match
         case GameStatus.Ended(_) => true
         case GameStatus.Active   => false
@@ -176,7 +176,7 @@ final class GameRoom private (
       if s.ended then IO.unit
       else
         val over = GameOver(GameResult.Draw, Termination.Aborted)
-        emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over))
+        emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over, s.dice.reveal))
           .flatTap(_ => done.complete(over).attempt.void)
           .void
 
@@ -305,7 +305,7 @@ final class GameRoom private (
     else beginTurn(s)
 
   private def endGame(s: Session, over: GameOver): IO[Session] =
-    emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over))
+    emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over, s.dice.reveal))
       .flatTap(_ => done.complete(over).attempt.void)
 
   private def process(s: Session, seat: Seat, command: GameCommand, receivedAt: FiniteDuration): IO[Session] =
@@ -384,6 +384,10 @@ object GameRoom:
 
     /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). */
     def publicAt(now: FiniteDuration): PublicGameState =
+      // Reveal the seed only once the game is over (so a late (re)joiner can still verify); secret while active.
+      val revealed = status match
+        case GameStatus.Ended(_) => Some(dice.reveal)
+        case GameStatus.Active   => None
       PublicGameState(
         version,
         EngineOps.serialize(state),
@@ -391,7 +395,8 @@ object GameRoom:
         pending,
         status,
         timeControl,
-        liveClocks(this, now)
+        liveClocks(this, now),
+        revealed
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */

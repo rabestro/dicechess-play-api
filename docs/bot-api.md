@@ -251,11 +251,13 @@ Long-lived stream for a specific game's state transitions.
             }
           },
           "termination": "KingCaptured"
-        }
+        },
+        "seed": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
       }
     }
     ```
     *(Result can also be `{"Draw":{}}` and termination can be one of `"KingCaptured"`, `"Resign"`, `"Draw"`, `"Aborted"`, `"Timeout"`.)*
+    `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` published in the create response, so anyone can open the dice commitment after the game.
   - **Rejected** (Moves rejected by the engine):
     ```json
     {

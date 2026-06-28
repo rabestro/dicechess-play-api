@@ -23,16 +23,29 @@ class CodecsSuite extends munit.FunSuite:
         dicePending = true,
         GameStatus.Active,
         TimeControl.Fischer(300, 3),
-        Some(Clocks(300000, 297000))
+        Some(Clocks(300000, 297000)),
+        seed = None // active game: seed not yet revealed
       )
     roundtrip[GameEvent](GameEvent.Snapshot(3L, ps))
+    // An ended snapshot reveals the seed so a late (re)joiner can still open the commitment.
+    val endedPs = PublicGameState(
+      9L,
+      "fen",
+      Seat.White,
+      dicePending = false,
+      GameStatus.Ended(GameOver(GameResult.Win(Side.White), Termination.KingCaptured)),
+      TimeControl.Unlimited,
+      clocks = None,
+      seed = Some("ab12")
+    )
+    roundtrip[GameEvent](GameEvent.Snapshot(9L, endedPs))
     roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000))))
     roundtrip[GameEvent](GameEvent.DiceRolled(5L, Seat.Black, List(4), "dfen2", None))
     roundtrip[GameEvent](
-      GameEvent.GameEnded(9L, GameOver(GameResult.Win(Side.Black), Termination.KingCaptured))
+      GameEvent.GameEnded(9L, GameOver(GameResult.Win(Side.Black), Termination.KingCaptured), "ab12")
     )
-    roundtrip[GameEvent](GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted)))
-    roundtrip[GameEvent](GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout)))
+    roundtrip[GameEvent](GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted), "cd34"))
+    roundtrip[GameEvent](GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout), "ef56"))
     roundtrip[GameEvent](GameEvent.Rejected(2L, Seat.Black, "nope"))
 
   test("Principal round-trips"):

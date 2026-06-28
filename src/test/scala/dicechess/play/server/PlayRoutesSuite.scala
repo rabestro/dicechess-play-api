@@ -151,6 +151,33 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           .timeoutTo(20.seconds, IO.raiseError(RuntimeException("a disconnect did not end the game")))
       yield assertEquals(over.termination, Termination.Resign)
 
+  test("the GameEnded frame carries the revealed seed that opens the commitment"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+        ws   <- Resource.eval(JdkWSClient.simple[IO])
+      yield (port, http, ws)
+
+    resources.use: (port, http, ws) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        specUri  = wsBase / "games" / created.gameId / "ws" // tokenless spectator watches for the terminal
+        ended <- ws
+          .connectHighLevel(WSRequest(specUri))
+          .use { spectator =>
+            // White joins then drops; the forfeit ends the game, so the spectator sees a live GameEnded.
+            val whiteDisconnects = ws.connectHighLevel(WSRequest(whiteUri)).use(_ => IO.unit)
+            (terminalGameEnded(spectator), whiteDisconnects).parTupled.map(_._1)
+          }
+          .timeoutTo(20.seconds, IO.raiseError(RuntimeException("no GameEnded over the wire")))
+      yield
+        assert(ended.seed.nonEmpty, "the GameEnded frame must carry the revealed seed")
+        assertEquals(sha256Hex(ended.seed), created.commit)
+
   test("clientFrames interleaves keep-alive pings into a quiet game"):
     // A room that is created but never started stays quiet after its initial Snapshot, so the only
     // further frames are heartbeats — proving the ping stream keeps an idle-but-live socket flowing.
@@ -183,12 +210,27 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       .lastOrError
 
   private def terminalOf(event: GameEvent): Option[GameOver] = event match
-    case GameEvent.GameEnded(_, over) => Some(over)
-    case GameEvent.Snapshot(_, ps)    =>
+    case GameEvent.GameEnded(_, over, _) => Some(over)
+    case GameEvent.Snapshot(_, ps)       =>
       ps.status match
         case GameStatus.Ended(over) => Some(over)
         case GameStatus.Active      => None
     case _ => None
+
+  /** Read a connection until the live `GameEnded` event arrives, returning it (with its revealed seed). */
+  private def terminalGameEnded(conn: WSConnectionHighLevel[IO]): IO[GameEvent.GameEnded] =
+    conn.receiveStream
+      .collect { case WSFrame.Text(txt, _) => txt }
+      .map(txt => decode[GameEvent](txt).toOption)
+      .unNone
+      .collect { case e: GameEvent.GameEnded => e }
+      .compile
+      .lastOrError
+
+  /** SHA-256 of a hex-encoded seed, hex-encoded — to check a reveal against its commitment. */
+  private def sha256Hex(hexSeed: String): String =
+    val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString
 
   /** Drive one seat over the wire with the greedy bot; complete when GameEnded arrives. */
   private def playSeat(conn: WSConnectionHighLevel[IO], seat: Seat): IO[Boolean] =
@@ -209,9 +251,9 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     frame match
       case WSFrame.Text(txt, _) =>
         decode[GameEvent](txt) match
-          case Right(GameEvent.GameEnded(_, _)) => IO.pure(true)
-          case Right(event)                     => maybeAct(conn, seat, handled, turns, event).as(false)
-          case Left(_)                          => IO.pure(false)
+          case Right(GameEvent.GameEnded(_, _, _)) => IO.pure(true)
+          case Right(event)                        => maybeAct(conn, seat, handled, turns, event).as(false)
+          case Left(_)                             => IO.pure(false)
       case _ => IO.pure(false)
 
   private def maybeAct(
