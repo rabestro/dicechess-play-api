@@ -9,7 +9,7 @@ import dicechess.play.dice.DiceSource
 import fs2.Stream
 
 import java.security.SecureRandom
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
 
 /** The authoritative game room. A single consumer fiber drains an inbox and is the only writer of game state (the
   * mailbox-serialization an actor gives, without the framework); all reads are lock-free via `Ref.get`. Events fan out
@@ -176,21 +176,25 @@ final class GameRoom private (
           .void
 
   private def consume: IO[Unit] =
-    // No command within the deadline while a turn is pending => the player to move forfeits. The timeout is part of the
-    // single-writer loop (not a separate fiber), so it can't race the state it acts on.
-    inbox.take
-      .timeoutTo(idleCheck, IO.pure(Msg.Timeout))
-      .flatMap:
-        case Msg.Begin =>
-          stateRef.get.flatMap { s =>
-            // Idempotent: only the first Begin (before any roll) starts the game; a repeated
-            // or retried start must not re-roll a pending turn or double-increment the ply.
-            if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
-          } *> continue
-        case Msg.Command(seat, command) =>
-          stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
-        case Msg.Timeout =>
-          stateRef.get.flatMap(onTimeout).flatMap(stateRef.set) *> continue
+    // No command within the deadline while a turn is pending => the player to move forfeits. The deadline is the mover's
+    // remaining clock for a timed game, or the fixed anti-abandonment `idleCheck` for an unlimited one. The timeout is
+    // part of the single-writer loop (not a separate fiber), so it can't race the state it acts on.
+    stateRef.get
+      .flatMap(deadlineFor)
+      .flatMap: deadline =>
+        inbox.take
+          .timeoutTo(deadline, IO.pure(Msg.Timeout))
+          .flatMap:
+            case Msg.Begin =>
+              stateRef.get.flatMap { s =>
+                // Idempotent: only the first Begin (before any roll) starts the game; a repeated
+                // or retried start must not re-roll a pending turn or double-increment the ply.
+                if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
+              } *> continue
+            case Msg.Command(seat, command) =>
+              stateRef.get.flatMap(s => process(s, seat, command)).flatMap(stateRef.set) *> continue
+            case Msg.Timeout =>
+              stateRef.get.flatMap(onTimeout).flatMap(stateRef.set) *> continue
 
   /** A turn deadline elapsed: if a turn is genuinely pending, the side to move forfeits; otherwise (idle between turns,
     * or already over) it is a no-op.
@@ -198,8 +202,65 @@ final class GameRoom private (
   private def onTimeout(s: Session): IO[Session] =
     if s.ended || !s.pending then IO.pure(s)
     else
+      val seat   = EngineOps.activeSeat(s.state)
       val toMove = EngineOps.activeSide(s.state)
-      endGame(s, GameOver(GameResult.Win(toMove.opponent), Termination.Timeout))
+      // Flag-fall (timed) or anti-abandonment forfeit (unlimited): both are a loss on time. Zero the flagged seat's
+      // clock so a later snapshot reads accurately.
+      val flagged = s.copy(remaining = s.remaining.updated(seat, Duration.Zero), turnStartedAt = None)
+      endGame(flagged, GameOver(GameResult.Win(toMove.opponent), Termination.Timeout))
+
+  // ── clocks ───────────────────────────────────────────────────────────────────
+
+  /** How long to wait for the mover before forfeiting: the mover's remaining clock for a timed game (minus the time
+    * already spent on this turn — so repeated illegal submits can't refill it), or the fixed `idleCheck` cap otherwise.
+    * Unlimited games, and the brief windows when no turn is pending, always use `idleCheck`.
+    */
+  private def deadlineFor(s: Session): IO[FiniteDuration] =
+    if s.ended || !s.pending then IO.pure(idleCheck)
+    else
+      turnBudget(s, EngineOps.activeSeat(s.state)) match
+        case None         => IO.pure(idleCheck)
+        case Some(budget) =>
+          IO.monotonic.map: now =>
+            val elapsed = s.turnStartedAt.fold(Duration.Zero)(now - _)
+            floorZero(budget - elapsed)
+
+  /** The time available to `mover` for the current turn: their bank (SuddenDeath/Fischer), a fresh per-move budget
+    * (PerMove), or `None` for Unlimited (no chess clock — the `idleCheck` cap applies instead).
+    */
+  private def turnBudget(s: Session, mover: Seat): Option[FiniteDuration] =
+    s.timeControl match
+      case TimeControl.Unlimited      => None
+      case TimeControl.PerMove(spm)   => Some(spm.seconds)
+      case TimeControl.SuddenDeath(_) => Some(s.remaining.getOrElse(mover, Duration.Zero))
+      case TimeControl.Fischer(_, _)  => Some(s.remaining.getOrElse(mover, Duration.Zero))
+
+  /** Start the mover's clock for a turn that has a real decision (a legal move). Forced passes never reach here, so
+    * they cost nothing. No-op for Unlimited.
+    */
+  private def startClock(s: Session): IO[Session] =
+    s.timeControl match
+      case TimeControl.Unlimited => IO.pure(s)
+      case _                     => IO.monotonic.map(now => s.copy(turnStartedAt = Some(now)))
+
+  /** Debit the time `mover` spent on the turn just completed, then apply the control's bonus: Fischer adds its
+    * increment; SuddenDeath only debits; PerMove keeps no bank (each turn is independent). Clears the turn timer.
+    */
+  private def debit(s: Session, mover: Seat): IO[Session] =
+    s.timeControl match
+      case TimeControl.Unlimited | TimeControl.PerMove(_) => IO.pure(s.copy(turnStartedAt = None))
+      case TimeControl.SuddenDeath(_)                     =>
+        IO.monotonic.map: now =>
+          val elapsed = s.turnStartedAt.fold(Duration.Zero)(now - _)
+          val left    = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed)
+          s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
+      case TimeControl.Fischer(_, inc) =>
+        IO.monotonic.map: now =>
+          val elapsed = s.turnStartedAt.fold(Duration.Zero)(now - _)
+          val left    = floorZero(s.remaining.getOrElse(mover, Duration.Zero) - elapsed) + inc.seconds
+          s.copy(remaining = s.remaining.updated(mover, left), turnStartedAt = None)
+
+  private def floorZero(d: FiniteDuration): FiniteDuration = if d > Duration.Zero then d else Duration.Zero
 
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
@@ -220,7 +281,7 @@ final class GameRoom private (
     val seat   = EngineOps.activeSeat(rolled)
     val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true)
     emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled))).flatMap: s2 =>
-      if EngineOps.legalMovePaths(rolled).nonEmpty then IO.pure(s2)
+      if EngineOps.legalMovePaths(rolled).nonEmpty then startClock(s2)
       else
         val passed = rolled.endTurn()
         val s3     = s2.copy(state = passed, pending = false)
@@ -255,14 +316,17 @@ final class GameRoom private (
                 case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
-                  emit(
-                    s.copy(state = next, pending = false),
-                    v => GameEvent.TurnPlayed(v, seat, uci, EngineOps.serialize(next))
-                  )
-                    .flatMap: s1 =>
-                      winner match
-                        case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
-                        case None    => advanceOrEnd(s1)
+                  // Charge the mover for the time spent and apply the control's bonus before the next turn rolls (which
+                  // resets the clock for the other side).
+                  debit(s, seat).flatMap: sd =>
+                    emit(
+                      sd.copy(state = next, pending = false),
+                      v => GameEvent.TurnPlayed(v, seat, uci, EngineOps.serialize(next))
+                    )
+                      .flatMap: s1 =>
+                        winner match
+                          case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
+                          case None    => advanceOrEnd(s1)
 
 object GameRoom:
 
@@ -272,8 +336,9 @@ object GameRoom:
   /** Per-subscriber fan-out buffer. A subscriber this many events behind is dropped, never blocking the writer. */
   private val DefaultFanOutBuffer = 256
 
-  /** Interim turn deadline: if the side to move doesn't act within this, it forfeits. Real per-side chess clocks land
-    * with the TimeManager in a later milestone; this just keeps abandoned games from leaking.
+  /** Anti-abandonment turn cap for **Unlimited** games (and the brief between-turn windows in any game): if the side to
+    * move doesn't act within this, it forfeits. Timed controls (SuddenDeath/Fischer/PerMove) instead enforce the real
+    * per-side clock; see `deadlineFor`.
     */
   private val DefaultIdleCheck: FiniteDuration = FiniteDuration(120, "seconds")
 
@@ -299,7 +364,9 @@ object GameRoom:
       ply: Long,
       pending: Boolean,
       status: GameStatus,
-      timeControl: TimeControl
+      timeControl: TimeControl,
+      remaining: Map[Seat, FiniteDuration] = Map.empty,
+      turnStartedAt: Option[FiniteDuration] = None
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
@@ -323,7 +390,17 @@ object GameRoom:
       case Right(state0) =>
         for
           ref <- Ref.of[IO, Session](
-            Session(state0, 0L, players, dice, 0L, pending = false, GameStatus.Active, timeControl)
+            Session(
+              state0,
+              0L,
+              players,
+              dice,
+              0L,
+              pending = false,
+              GameStatus.Active,
+              timeControl,
+              remaining = initialRemaining(timeControl, players.keys)
+            )
           )
           inbox       <- Queue.unbounded[IO, Msg]
           subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
@@ -347,6 +424,15 @@ object GameRoom:
           )
           _ <- room.supervisedConsume.start
         yield Right(room)
+
+  /** Starting clocks for a timed control: both seats get the initial bank (SuddenDeath/Fischer). PerMove keeps no bank
+    * (each turn gets a fresh budget) and Unlimited has no clock, so both start empty.
+    */
+  private def initialRemaining(timeControl: TimeControl, seats: Iterable[Seat]): Map[Seat, FiniteDuration] =
+    timeControl match
+      case TimeControl.SuddenDeath(init) => seats.map(_ -> init.seconds).toMap
+      case TimeControl.Fischer(init, _)  => seats.map(_ -> init.seconds).toMap
+      case _                             => Map.empty
 
   private def mintTokens(seats: Iterable[Seat]): IO[Map[Seat, String]] =
     seats.toList.traverse(seat => randomToken.map(seat -> _)).map(_.toMap)
