@@ -12,6 +12,8 @@ import dicechess.play.server.{
   Cors,
   GameRegistry,
   HealthRoutes,
+  Lobby,
+  LobbyRoutes,
   PlayRoutes
 }
 import org.http4s.ember.server.EmberServerBuilder
@@ -31,6 +33,8 @@ object Main extends IOApp.Simple:
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
       mintLimit  <- AnonMintLimiter.create()
+      lobby      <- Lobby.create(registry)
+      _          <- lobby.sweeper().start // background: drop seeks whose creator has gone quiet
       cors       <- Cors.fromEnv
       _          <- EmberServerBuilder
         .default[IO]
@@ -38,7 +42,7 @@ object Main extends IOApp.Simple:
         .withPort(port)
         .withHttpWebSocketApp(wsb =>
           cors(
-            (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> BotRoutes(
+            (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> BotRoutes(
               botAuth,
               challenges,
               botEvents,
