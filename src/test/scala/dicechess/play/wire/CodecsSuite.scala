@@ -12,6 +12,7 @@ class CodecsSuite extends munit.FunSuite:
 
   test("GameCommand round-trips"):
     roundtrip[GameCommand](GameCommand.SubmitTurn(List("e2e4", "g1f3")))
+    roundtrip[GameCommand](GameCommand.SubmitSeed("a1b2c3d4e5f60718"))
     roundtrip[GameCommand](GameCommand.Resign)
 
   test("GameEvent round-trips"):
@@ -24,10 +25,11 @@ class CodecsSuite extends munit.FunSuite:
         GameStatus.Active,
         TimeControl.Fischer(300, 3),
         Some(Clocks(300000, 297000)),
-        seed = None // active game: seed not yet revealed
+        seed = None,       // active game: seed not yet revealed
+        clientSeeds = None // ditto for the client seeds
       )
     roundtrip[GameEvent](GameEvent.Snapshot(3L, ps))
-    // An ended snapshot reveals the seed so a late (re)joiner can still open the commitment.
+    // An ended snapshot reveals the seeds so a late (re)joiner can still open the commitment.
     val endedPs = PublicGameState(
       9L,
       "fen",
@@ -36,16 +38,26 @@ class CodecsSuite extends munit.FunSuite:
       GameStatus.Ended(GameOver(GameResult.Win(Side.White), Termination.KingCaptured)),
       TimeControl.Unlimited,
       clocks = None,
-      seed = Some("ab12")
+      seed = Some("ab12"),
+      clientSeeds = Some(ClientSeeds("w-seed", "b-seed"))
     )
     roundtrip[GameEvent](GameEvent.Snapshot(9L, endedPs))
     roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000))))
     roundtrip[GameEvent](GameEvent.DiceRolled(5L, Seat.Black, List(4), "dfen2", None))
     roundtrip[GameEvent](
-      GameEvent.GameEnded(9L, GameOver(GameResult.Win(Side.Black), Termination.KingCaptured), "ab12")
+      GameEvent.GameEnded(
+        9L,
+        GameOver(GameResult.Win(Side.Black), Termination.KingCaptured),
+        "ab12",
+        ClientSeeds("w", "b")
+      )
     )
-    roundtrip[GameEvent](GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted), "cd34"))
-    roundtrip[GameEvent](GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout), "ef56"))
+    roundtrip[GameEvent](
+      GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted), "cd34", ClientSeeds("w", "b"))
+    )
+    roundtrip[GameEvent](
+      GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout), "ef56", ClientSeeds("w", "b"))
+    )
     roundtrip[GameEvent](GameEvent.Rejected(2L, Seat.Black, "nope"))
 
   test("Principal round-trips"):
@@ -71,6 +83,10 @@ class CodecsSuite extends munit.FunSuite:
       decode[GameCommand]("""{"SubmitTurn":{"moves":["e2e4","g1f3"]}}"""),
       Right(GameCommand.SubmitTurn(List("e2e4", "g1f3")))
     )
+    assertEquals(
+      decode[GameCommand]("""{"SubmitSeed":{"seed":"deadbeefdeadbeef"}}"""),
+      Right(GameCommand.SubmitSeed("deadbeefdeadbeef"))
+    )
 
   test("wire format the server emits (encode)"):
     assertEquals((GameCommand.Resign: GameCommand).asJson.noSpaces, """{"Resign":{}}""")
@@ -83,4 +99,14 @@ class CodecsSuite extends munit.FunSuite:
     assertEquals(
       (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", None): GameEvent).asJson.noSpaces,
       """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":null}}"""
+    )
+    // GameEnded reveals the server seed plus the two client seeds, so the whole roll transcript is verifiable.
+    assertEquals(
+      (GameEvent.GameEnded(
+        3L,
+        GameOver(GameResult.Win(Side.White), Termination.KingCaptured),
+        "ab12",
+        ClientSeeds("w", "b")
+      ): GameEvent).asJson.noSpaces,
+      """{"GameEnded":{"v":3,"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"},"seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}"""
     )

@@ -34,7 +34,8 @@ final class GameRoom private (
     done: Deferred[IO, GameOver],
     presence: Ref[IO, Map[Seat, Int]],
     graceFibers: Ref[IO, Map[Seat, Fiber[IO, Throwable, Unit]]],
-    disconnectGrace: FiniteDuration
+    disconnectGrace: FiniteDuration,
+    seedGrace: FiniteDuration
 ):
   import GameRoom.*
 
@@ -80,8 +81,8 @@ final class GameRoom private (
       }
 
   private def isTerminal(event: GameEvent): Boolean = event match
-    case GameEvent.GameEnded(_, _, _) => true
-    case GameEvent.Snapshot(_, ps)    =>
+    case GameEvent.GameEnded(_, _, _, _) => true
+    case GameEvent.Snapshot(_, ps)       =>
       ps.status match
         case GameStatus.Ended(_) => true
         case GameStatus.Active   => false
@@ -176,9 +177,10 @@ final class GameRoom private (
       if s.ended then IO.unit
       else
         val over = GameOver(GameResult.Draw, Termination.Aborted)
-        emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over, s.dice.reveal))
-          .flatTap(_ => done.complete(over).attempt.void)
-          .void
+        emit(
+          s.copy(pending = false, status = GameStatus.Ended(over)),
+          v => GameEvent.GameEnded(v, over, s.dice.reveal, s.clientSeedsRevealed)
+        ).flatTap(_ => done.complete(over).attempt.void).void
 
   private def consume: IO[Unit] =
     // No command within the deadline while a turn is pending => the player to move forfeits. The deadline is the mover's
@@ -192,9 +194,15 @@ final class GameRoom private (
           .flatMap:
             case Msg.Begin =>
               stateRef.get.flatMap { s =>
-                // Idempotent: only the first Begin (before any roll) starts the game; a repeated
-                // or retried start must not re-roll a pending turn or double-increment the ply.
-                if s.ply == 0L && !s.ended then beginTurn(s).flatMap(stateRef.set) else IO.unit
+                // Idempotent: only the first Begin starts the game. The opening roll is gated on post-commit client
+                // entropy — if both seats have already seeded, roll now; otherwise just mark the game started and let
+                // `deadlineFor`/`onTimeout` force-start once the seed grace elapses (so a game never stalls).
+                if s.started || s.ply > 0L || s.ended then IO.unit
+                else
+                  IO.monotonic.flatMap { now =>
+                    val started = s.copy(started = true, startedAt = Some(now))
+                    if started.hasAllSeeds then beginTurn(started).flatMap(stateRef.set) else stateRef.set(started)
+                  }
               } *> continue
             case Msg.Command(seat, command, receivedAt) =>
               stateRef.get.flatMap(s => process(s, seat, command, receivedAt)).flatMap(stateRef.set) *> continue
@@ -205,7 +213,11 @@ final class GameRoom private (
     * or already over) it is a no-op.
     */
   private def onTimeout(s: Session): IO[Session] =
-    if s.ended || !s.pending then IO.pure(s)
+    if s.ended then IO.pure(s)
+    // The opening seed grace elapsed before both seats seeded: force-start so a game never stalls. Any seat that did
+    // not submit falls back to its external id (see `seedFor`).
+    else if s.awaitingSeeds then beginTurn(s)
+    else if !s.pending then IO.pure(s)
     else
       val seat   = EngineOps.activeSeat(s.state)
       val toMove = EngineOps.activeSide(s.state)
@@ -221,7 +233,11 @@ final class GameRoom private (
     * Unlimited games, and the brief windows when no turn is pending, always use `idleCheck`.
     */
   private def deadlineFor(s: Session): IO[FiniteDuration] =
-    if s.ended || !s.pending then IO.pure(idleCheck)
+    if s.ended then IO.pure(idleCheck)
+    else if s.awaitingSeeds then
+      // Time left in the opening seed grace before we force-start with whatever seeds have arrived.
+      IO.monotonic.map(now => floorZero(seedGrace - s.startedAt.fold(Duration.Zero: FiniteDuration)(now - _)))
+    else if !s.pending then IO.pure(idleCheck)
     else
       turnBudget(s, EngineOps.activeSeat(s.state)) match
         case None         => IO.pure(idleCheck)
@@ -280,7 +296,7 @@ final class GameRoom private (
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
   private def beginTurn(s0: Session): IO[Session] =
-    val dice   = s0.dice.roll(s0.ply)
+    val dice   = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
     val rolled = EngineOps.withDice(s0.state, dice)
     val seat   = EngineOps.activeSeat(rolled)
     val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true)
@@ -305,8 +321,10 @@ final class GameRoom private (
     else beginTurn(s)
 
   private def endGame(s: Session, over: GameOver): IO[Session] =
-    emit(s.copy(pending = false, status = GameStatus.Ended(over)), v => GameEvent.GameEnded(v, over, s.dice.reveal))
-      .flatTap(_ => done.complete(over).attempt.void)
+    emit(
+      s.copy(pending = false, status = GameStatus.Ended(over)),
+      v => GameEvent.GameEnded(v, over, s.dice.reveal, s.clientSeedsRevealed)
+    ).flatTap(_ => done.complete(over).attempt.void)
 
   private def process(s: Session, seat: Seat, command: GameCommand, receivedAt: FiniteDuration): IO[Session] =
     s.status match
@@ -317,6 +335,19 @@ final class GameRoom private (
             seat.side match
               case Some(loser) => endGame(s, GameOver(GameResult.Win(loser.opponent), Termination.Resign))
               case None        => emit(s, v => GameEvent.Rejected(v, seat, "spectator cannot resign"))
+
+          case GameCommand.SubmitSeed(seed) =>
+            seat.side match
+              case None    => emit(s, v => GameEvent.Rejected(v, seat, "spectator cannot submit a seed"))
+              case Some(_) =>
+                // Accept exactly one seed per seat, and only before the opening roll — afterwards the dice are locked.
+                if s.ply > 0L || s.clientSeeds.contains(seat) then IO.pure(s)
+                else if seed.length < MinSeedChars || seed.length > MaxSeedChars then
+                  emit(s, v => GameEvent.Rejected(v, seat, s"seed must be $MinSeedChars..$MaxSeedChars characters"))
+                else
+                  val seeded = s.copy(clientSeeds = s.clientSeeds.updated(seat, seed))
+                  // Both seats in and the game already started: open the gate and roll the opening turn now.
+                  if seeded.started && seeded.hasAllSeeds then beginTurn(seeded) else IO.pure(seeded)
 
           case GameCommand.SubmitTurn(uci) =>
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
@@ -358,6 +389,19 @@ object GameRoom:
     */
   val DefaultDisconnectGrace: FiniteDuration = FiniteDuration(30, "seconds")
 
+  /** How long the opening roll is held for both seats to submit their post-commit dice seed (provably-fair, #13). A
+    * real client/bot seeds within milliseconds of connecting, so this only bites a client that never seeds — after it,
+    * the game force-starts and any missing seat falls back to its (already-public) external id, so a game never stalls.
+    */
+  val DefaultSeedGrace: FiniteDuration = FiniteDuration(5, "seconds")
+
+  /** Accepted bounds for a client dice seed (characters). The lower bound asks for real entropy (≥16 chars, e.g. the
+    * hex of 8+ random bytes); the upper bound caps abuse. A weak or absent seed only weakens that seat's own
+    * contribution — the committed server seed still makes the dice ungrindable.
+    */
+  private val MinSeedChars = 16
+  private val MaxSeedChars = 256
+
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
 
@@ -376,18 +420,37 @@ object GameRoom:
       status: GameStatus,
       timeControl: TimeControl,
       remaining: Map[Seat, FiniteDuration] = Map.empty,
-      turnStartedAt: Option[FiniteDuration] = None
+      turnStartedAt: Option[FiniteDuration] = None,
+      // Provably-fair dice gate: `started` flips on the first Begin; `startedAt` stamps it (to measure the seed grace);
+      // `clientSeeds` collects each seat's post-commit entropy before the opening roll.
+      started: Boolean = false,
+      startedAt: Option[FiniteDuration] = None,
+      clientSeeds: Map[Seat, String] = Map.empty
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
       case GameStatus.Active   => false
 
+    /** Every seated player has submitted a client seed. */
+    def hasAllSeeds: Boolean = players.keySet.forall(clientSeeds.contains)
+
+    /** The game has begun but is still holding the opening roll, waiting for the seats' client seeds. */
+    def awaitingSeeds: Boolean = started && ply == 0L && !ended && !hasAllSeeds
+
+    /** The seed folded in for `seat`: the one it submitted, or — if it never did before the grace elapsed — its
+      * external id as a deterministic, already-public fallback (so a missing seed never stalls the game).
+      */
+    def seedFor(seat: Seat): String = clientSeeds.getOrElse(seat, players.get(seat).fold("")(_.externalId))
+
+    /** The pair of client seeds actually folded into the dice, for the end-of-game reveal. */
+    def clientSeedsRevealed: ClientSeeds = ClientSeeds(seedFor(Seat.White), seedFor(Seat.Black))
+
     /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). */
     def publicAt(now: FiniteDuration): PublicGameState =
-      // Reveal the seed only once the game is over (so a late (re)joiner can still verify); secret while active.
-      val revealed = status match
-        case GameStatus.Ended(_) => Some(dice.reveal)
-        case GameStatus.Active   => None
+      // Reveal the seeds only once the game is over (so a late (re)joiner can still verify); secret while active.
+      val (revealed, seeds) = status match
+        case GameStatus.Ended(_) => (Some(dice.reveal), Some(clientSeedsRevealed))
+        case GameStatus.Active   => (None, None)
       PublicGameState(
         version,
         EngineOps.serialize(state),
@@ -396,7 +459,8 @@ object GameRoom:
         status,
         timeControl,
         liveClocks(this, now),
-        revealed
+        revealed,
+        seeds
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
@@ -407,7 +471,8 @@ object GameRoom:
       fanOutBuffer: Int = DefaultFanOutBuffer,
       idleCheck: FiniteDuration = DefaultIdleCheck,
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
-      timeControl: TimeControl = TimeControl.Unlimited
+      timeControl: TimeControl = TimeControl.Unlimited,
+      seedGrace: FiniteDuration = DefaultSeedGrace
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
@@ -444,7 +509,8 @@ object GameRoom:
             done,
             presence,
             graceFibers,
-            disconnectGrace
+            disconnectGrace,
+            seedGrace
           )
           _ <- room.supervisedConsume.start
         yield Right(room)

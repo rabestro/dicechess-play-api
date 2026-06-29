@@ -14,7 +14,7 @@ import scala.concurrent.duration.*
 class GameRoomClockSuite extends munit.CatsEffectSuite:
 
   private def greedy = BotRegistry.getAlgorithm("greedy").get
-  private def dice   = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+  private def dice   = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
   private def seats  =
     Map[Seat, Principal](Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black"))
 
@@ -23,7 +23,8 @@ class GameRoomClockSuite extends munit.CatsEffectSuite:
     */
   private def flagFall(timeControl: TimeControl): IO[GameOver] =
     GameRoom
-      .create(seats, dice, timeControl = timeControl)
+      // No one seeds here, so force-start almost immediately; the (tiny) chess clock is what must flag.
+      .create(seats, dice, timeControl = timeControl, seedGrace = 50.millis)
       .flatMap {
         case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
         case Right(room) =>
@@ -81,7 +82,8 @@ class GameRoomClockSuite extends munit.CatsEffectSuite:
 
   test("a timed game's snapshot shows live clocks — the mover's ticks down, the other side's stays full"):
     GameRoom
-      .create(seats, dice, timeControl = TimeControl.SuddenDeath(60))
+      // Force-start quickly (no one seeds), so the clock is already ticking when we snapshot at 400ms.
+      .create(seats, dice, timeControl = TimeControl.SuddenDeath(60), seedGrace = 50.millis)
       .flatMap {
         case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
         case Right(room) => room.start *> IO.sleep(400.millis) *> room.snapshot

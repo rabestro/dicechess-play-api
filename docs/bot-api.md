@@ -36,6 +36,17 @@ Time controls are **enforced**: the server is the only timekeeper. The side to m
 
 The clock runs **per turn** (a turn = several micro-moves, one per die). A forced pass (no legal move) is instant and costs nothing. Remaining time is surfaced on the wire (see `clocks` on `Snapshot` and `DiceRolled` below) in **milliseconds**, so a bot can budget; the side to move is still ticking, so subtract your own elapsed time since the event.
 
+### Provably-Fair Dice
+
+The server is authoritative over the dice, but every roll is verifiable after the game:
+
+1. **Commit.** At game creation the create response carries `commit = SHA-256(serverSeed)` — the server is now locked to a `serverSeed` it cannot change.
+2. **Contribute entropy.** After the commit, each side submits its own high-entropy `clientSeed` (see [`POST /bot/game/{id}/seed`](#submit-a-dice-seed)). Because the commit was published *before* the server saw any client seed, neither the server nor a player can grind the dice in their favour.
+3. **Roll.** Every roll is `HMAC-SHA256(serverSeed, clientSeedWhite | clientSeedBlack | ply)` mapped to three unbiased 1..6 values. The seeds are fixed for the whole game.
+4. **Reveal.** `GameEnded` reveals `seed` (the server seed) and `clientSeeds`, so anyone can recompute every roll and confirm that `SHA-256(seed)` equals the `commit`.
+
+**Opening-roll gate.** The server holds the first roll until *both* seats have submitted a seed, so submit yours as soon as you receive `GameStart`. If a seat does not seed within a few seconds the game force-starts anyway, and that seat's contribution falls back to its (already-public) external id — a missing seed never stalls the game, it only forfeits that seat's own entropy contribution. A seed must be 16–256 characters (e.g. the hex of ≥8 random bytes); send a strong random one promptly.
+
 ### DFEN (Dice Forsyth-Edwards Notation)
 
 Dice Chess uses DFEN to represent positions with rolled dice. It extends standard FEN by adding a **7th space-separated field** at the end.
@@ -143,6 +154,18 @@ Accepts a pending challenge. (Only callable by the challenged bot).
 ---
 
 ### Gameplay
+
+#### Submit a Dice Seed
+`POST /bot/game/{id}/seed`
+
+Contribute this seat's post-commit entropy for the [provably-fair dice](#provably-fair-dice). Submit once, as soon as the game starts and before the opening roll.
+- **Request Body:**
+  ```json
+  {
+    "seed": "f3a1c0de9b8a7c6d"
+  }
+  ```
+- **Response:** `202 Accepted` (fire-and-forget). A duplicate, too-late, or malformed seed is ignored (a malformed one may surface as a `Rejected` event on the game stream).
 
 #### Submit Turn Moves
 `POST /bot/game/{id}/move`
@@ -252,12 +275,13 @@ Long-lived stream for a specific game's state transitions.
           },
           "termination": "KingCaptured"
         },
-        "seed": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        "seed": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "clientSeeds": {"white": "f3a1...", "black": "b27c..."}
       }
     }
     ```
     *(Result can also be `{"Draw":{}}` and termination can be one of `"KingCaptured"`, `"Resign"`, `"Draw"`, `"Aborted"`, `"Timeout"`.)*
-    `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` published in the create response, so anyone can open the dice commitment after the game.
+    `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` published in the create response, so anyone can open the dice commitment after the game. `clientSeeds` reveals the two post-commit client seeds folded into every roll (see [Provably-Fair Dice](#provably-fair-dice)); with these you can recompute the full transcript: `roll(ply) = HMAC-SHA256(seed, clientSeeds.white | clientSeeds.black | ply)`. A seat that never submitted a seed shows its external id here (the fallback the server used).
   - **Rejected** (Moves rejected by the engine):
     ```json
     {
@@ -321,7 +345,16 @@ curl -N -H "Authorization: Bearer $T" https://play-api.jc.id.lv/bot/game/stream/
 ```
 On each `DiceRolled` event where the `seat` matches your bot, compute the best turn path and submit it.
 
-### 5. Submit a Turn (Terminal 2)
+### 5. Submit Your Dice Seed (Terminal 2)
+As soon as the game starts — before the opening roll — contribute your entropy for the provably-fair dice:
+```bash
+curl -sX POST -H "Authorization: Bearer $T" \
+  -H 'Content-Type: application/json' \
+  -d "{\"seed\":\"$(openssl rand -hex 16)\"}" \
+  https://play-api.jc.id.lv/bot/game/<gameId>/seed
+```
+
+### 6. Submit a Turn (Terminal 2)
 Replace `<gameId>` with your game's ID and provide the list of UCI micro-moves:
 ```bash
 curl -sX POST -H "Authorization: Bearer $T" \

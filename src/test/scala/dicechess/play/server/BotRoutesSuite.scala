@@ -171,6 +171,16 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
           )
           .map(r => assertEquals(r.status, Status.Accepted))
 
+  test("a seated bot can submit a dice seed (accepted; folded in before the opening roll)"):
+    app.flatMap: service =>
+      seatedGame(service).flatMap: gameId =>
+        service
+          .run(
+            request(Method.POST, uri"/bot/game" / gameId / "seed", Some("tok-alice"))
+              .withEntity(BotSeed("alice-client-seed-0001"))
+          )
+          .map(r => assertEquals(r.status, Status.Accepted))
+
   test("a seated bot can resign"):
     app.flatMap: service =>
       seatedGame(service).flatMap: gameId =>

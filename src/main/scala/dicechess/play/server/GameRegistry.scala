@@ -12,7 +12,8 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]], disconn
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
 
-  /** Create and start a room for two players. Dice come from a fresh commit-reveal source seeded with the players' ids.
+  /** Create and start a room for two players. Dice come from a fresh commit-reveal source whose server seed is
+    * committed before any client connects; each player then folds in its own post-commit seed (see GameRoom's gate).
     * Errors (e.g. a bad initial position) are returned as a Left, never thrown.
     */
   def create(
@@ -22,7 +23,7 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]], disconn
   ): IO[Either[String, (GameId, GameRoom)]] =
     for
       id   <- GameId.random
-      dice <- DiceSource.newCommitReveal(white.externalId, black.externalId)
+      dice <- DiceSource.newCommitReveal()
       made <- GameRoom.create(
         Map(Seat.White -> white, Seat.Black -> black),
         dice,
