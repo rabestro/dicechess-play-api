@@ -177,11 +177,9 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       yield
         assert(ended.seed.nonEmpty, "the GameEnded frame must carry the revealed seed")
         assertEquals(sha256Hex(ended.seed), created.commit)
-        // The client seeds are revealed too (here the seats never seeded, so each is the id fallback).
-        assert(
-          ended.clientSeeds.white.nonEmpty && ended.clientSeeds.black.nonEmpty,
-          "the GameEnded frame must reveal both client seeds"
-        )
+        // Neither seat seeded (white only connected then dropped), so each client seed is the seat's external-id
+        // fallback — assert the exact pair, which also catches a white/black swap.
+        assertEquals(ended.clientSeeds, ClientSeeds("guest:white", "guest:black"))
 
   test("clientFrames interleaves keep-alive pings into a quiet game"):
     // A room that is created but never started stays quiet after its initial Snapshot, so the only

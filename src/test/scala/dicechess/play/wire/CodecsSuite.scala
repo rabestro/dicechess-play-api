@@ -25,6 +25,7 @@ class CodecsSuite extends munit.FunSuite:
         GameStatus.Active,
         TimeControl.Fischer(300, 3),
         Some(Clocks(300000, 297000)),
+        commit = "00ff",
         seed = None,       // active game: seed not yet revealed
         clientSeeds = None // ditto for the client seeds
       )
@@ -38,6 +39,7 @@ class CodecsSuite extends munit.FunSuite:
       GameStatus.Ended(GameOver(GameResult.Win(Side.White), Termination.KingCaptured)),
       TimeControl.Unlimited,
       clocks = None,
+      commit = "00ff",
       seed = Some("ab12"),
       clientSeeds = Some(ClientSeeds("w-seed", "b-seed"))
     )
@@ -109,4 +111,22 @@ class CodecsSuite extends munit.FunSuite:
         ClientSeeds("w", "b")
       ): GameEvent).asJson.noSpaces,
       """{"GameEnded":{"v":3,"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"},"seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}"""
+    )
+    // A terminal Snapshot is a public surface too: pin its exact shape so a rename/omission of commit/seed/clientSeeds
+    // (the dice-fairness trio revealed at game end) breaks the suite rather than silently reshaping the protocol.
+    val terminal = PublicGameState(
+      9L,
+      "fen",
+      Seat.White,
+      dicePending = false,
+      GameStatus.Ended(GameOver(GameResult.Win(Side.White), Termination.KingCaptured)),
+      TimeControl.Unlimited,
+      clocks = None,
+      commit = "c0ffee",
+      seed = Some("ab12"),
+      clientSeeds = Some(ClientSeeds("w", "b"))
+    )
+    assertEquals(
+      (GameEvent.Snapshot(9L, terminal): GameEvent).asJson.noSpaces,
+      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}}"""
     )

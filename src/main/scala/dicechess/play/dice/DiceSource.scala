@@ -37,10 +37,11 @@ object DiceSource:
   // Largest multiple of 6 below 256; reject bytes >= this to avoid modulo bias.
   private val Cutoff = 252
 
-  /** Commit-reveal dice: `roll(ply, clientW, clientB) = HMAC-SHA256(serverSeed, clientW|clientB|ply)` mapped to three
-    * unbiased values in 1..6. Commit the SHA-256 of `serverSeed` before the game, reveal `serverSeed` (and the client
-    * seeds) after — anyone can then re-derive every roll. The client seeds arrive at roll time, *after* the commit, so
-    * the server cannot have chosen its seed to bias them.
+  /** Commit-reveal dice: `roll(ply, clientW, clientB) = HMAC-SHA256(serverSeed, msg)`, where `msg` is the canonical
+    * length-prefixed message `uint32be(len(clientW)) ++ clientW ++ uint32be(len(clientB)) ++ clientB ++ int64be(ply)`
+    * (see `rollMessage`), mapped to three unbiased values in 1..6. Commit the SHA-256 of `serverSeed` before the game,
+    * reveal `serverSeed` (and the client seeds) after — anyone can then re-derive every roll. The client seeds arrive
+    * at roll time, *after* the commit, so the server cannot have chosen its seed to bias them.
     */
   def commitReveal(serverSeed: Array[Byte]): DiceSource =
     val seed = serverSeed.clone()

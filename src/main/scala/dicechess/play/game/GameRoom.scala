@@ -201,7 +201,10 @@ final class GameRoom private (
                 else
                   IO.monotonic.flatMap { now =>
                     val started = s.copy(started = true, startedAt = Some(now))
-                    if started.hasAllSeeds then beginTurn(started).flatMap(stateRef.set) else stateRef.set(started)
+                    // Persist `started` (and any seeds already in) before the opening roll, so a roll failure aborts
+                    // from current state rather than from stale state (dropping seeds / re-starting).
+                    stateRef.set(started) *>
+                      (if started.hasAllSeeds then beginTurn(started).flatMap(stateRef.set) else IO.unit)
                   }
               } *> continue
             case Msg.Command(seat, command, receivedAt) =>
@@ -346,8 +349,10 @@ final class GameRoom private (
                   emit(s, v => GameEvent.Rejected(v, seat, s"seed must be $MinSeedChars..$MaxSeedChars characters"))
                 else
                   val seeded = s.copy(clientSeeds = s.clientSeeds.updated(seat, seed))
-                  // Both seats in and the game already started: open the gate and roll the opening turn now.
-                  if seeded.started && seeded.hasAllSeeds then beginTurn(seeded) else IO.pure(seeded)
+                  // Both seats in and the game already started: persist the seed first (so a roll failure can't drop
+                  // it from the reveal), then open the gate and roll the opening turn.
+                  if seeded.started && seeded.hasAllSeeds then stateRef.set(seeded) *> beginTurn(seeded)
+                  else IO.pure(seeded)
 
           case GameCommand.SubmitTurn(uci) =>
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
@@ -459,6 +464,7 @@ object GameRoom:
         status,
         timeControl,
         liveClocks(this, now),
+        dice.commit,
         revealed,
         seeds
       )

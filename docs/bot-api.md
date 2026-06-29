@@ -40,9 +40,9 @@ The clock runs **per turn** (a turn = several micro-moves, one per die). A force
 
 The server is authoritative over the dice, but every roll is verifiable after the game:
 
-1. **Commit.** At game creation the create response carries `commit = SHA-256(serverSeed)` — the server is now locked to a `serverSeed` it cannot change.
+1. **Commit.** At game creation the create response carries `commit = SHA-256(serverSeed)` — the server is now locked to a `serverSeed` it cannot change. The same `commit` also rides on every `Snapshot`, so a bot that only opens the game stream (and never saw the create response) still sees it before any roll.
 2. **Contribute entropy.** After the commit, each side submits its own high-entropy `clientSeed` (see [`POST /bot/game/{id}/seed`](#submit-a-dice-seed)). Because the commit was published *before* the server saw any client seed, neither the server nor a player can grind the dice in their favour.
-3. **Roll.** Every roll is `HMAC-SHA256(serverSeed, clientSeedWhite | clientSeedBlack | ply)` mapped to three unbiased 1..6 values. The seeds are fixed for the whole game.
+3. **Roll.** Every roll is `HMAC-SHA256(serverSeed, message)` mapped to three unbiased 1..6 values, where `message` is the canonical, length-prefixed concatenation `uint32be(len(clientSeedWhite)) ++ clientSeedWhite ++ uint32be(len(clientSeedBlack)) ++ clientSeedBlack ++ int64be(ply)` (seed lengths are UTF-8 byte counts; all integers big-endian). The seeds are fixed for the whole game.
 4. **Reveal.** `GameEnded` reveals `seed` (the server seed) and `clientSeeds`, so anyone can recompute every roll and confirm that `SHA-256(seed)` equals the `commit`.
 
 **Opening-roll gate.** The server holds the first roll until *both* seats have submitted a seed, so submit yours as soon as you receive `GameStart`. If a seat does not seed within a few seconds the game force-starts anyway, and that seat's contribution falls back to its (already-public) external id — a missing seed never stalls the game, it only forfeits that seat's own entropy contribution. A seed must be 16–256 characters (e.g. the hex of ≥8 random bytes); send a strong random one promptly.
@@ -233,11 +233,15 @@ Long-lived stream for a specific game's state transitions.
           "timeControl": {
             "Unlimited": {}
           },
-          "clocks": null
+          "clocks": null,
+          "commit": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          "seed": null,
+          "clientSeeds": null
         }
       }
     }
     ```
+    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`).
   - **DiceRolled** (Server rolled dice for a player's turn):
     ```json
     {
@@ -281,7 +285,7 @@ Long-lived stream for a specific game's state transitions.
     }
     ```
     *(Result can also be `{"Draw":{}}` and termination can be one of `"KingCaptured"`, `"Resign"`, `"Draw"`, `"Aborted"`, `"Timeout"`.)*
-    `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` published in the create response, so anyone can open the dice commitment after the game. `clientSeeds` reveals the two post-commit client seeds folded into every roll (see [Provably-Fair Dice](#provably-fair-dice)); with these you can recompute the full transcript: `roll(ply) = HMAC-SHA256(seed, clientSeeds.white | clientSeeds.black | ply)`. A seat that never submitted a seed shows its external id here (the fallback the server used).
+    `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` (in the create response and on every `Snapshot`), so anyone can open the dice commitment after the game. `clientSeeds` reveals the two post-commit client seeds folded into every roll (see [Provably-Fair Dice](#provably-fair-dice)); with these you can recompute the full transcript: `roll(ply) = HMAC-SHA256(seed, uint32be(len(white)) ++ white ++ uint32be(len(black)) ++ black ++ int64be(ply))`. A seat that never submitted a seed shows its external id here (the fallback the server used).
   - **Rejected** (Moves rejected by the engine):
     ```json
     {
