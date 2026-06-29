@@ -177,11 +177,14 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       yield
         assert(ended.seed.nonEmpty, "the GameEnded frame must carry the revealed seed")
         assertEquals(sha256Hex(ended.seed), created.commit)
+        // Neither seat seeded (white only connected then dropped), so each client seed is the seat's external-id
+        // fallback — assert the exact pair, which also catches a white/black swap.
+        assertEquals(ended.clientSeeds, ClientSeeds("guest:white", "guest:black"))
 
   test("clientFrames interleaves keep-alive pings into a quiet game"):
     // A room that is created but never started stays quiet after its initial Snapshot, so the only
     // further frames are heartbeats — proving the ping stream keeps an idle-but-live socket flowing.
-    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"), "white", "black")
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
     GameRoom
       .create(Map(Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black")), dice)
       .flatMap {
@@ -210,8 +213,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       .lastOrError
 
   private def terminalOf(event: GameEvent): Option[GameOver] = event match
-    case GameEvent.GameEnded(_, over, _) => Some(over)
-    case GameEvent.Snapshot(_, ps)       =>
+    case GameEvent.GameEnded(_, over, _, _) => Some(over)
+    case GameEvent.Snapshot(_, ps)          =>
       ps.status match
         case GameStatus.Ended(over) => Some(over)
         case GameStatus.Active      => None
@@ -232,14 +235,17 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
     java.security.MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString
 
-  /** Drive one seat over the wire with the greedy bot; complete when GameEnded arrives. */
+  /** Drive one seat over the wire with the greedy bot; complete when GameEnded arrives. Submits a client dice seed
+    * first (post-commit entropy), which is also what opens the room's opening-roll gate.
+    */
   private def playSeat(conn: WSConnectionHighLevel[IO], seat: Seat): IO[Boolean] =
     (Ref.of[IO, Long](-1L), Ref.of[IO, Int](0)).flatMapN: (handled, turns) =>
-      conn.receiveStream
-        .evalMap(frame => handle(conn, seat, handled, turns, frame))
-        .takeThrough(ended => !ended)
-        .compile
-        .lastOrError
+      send(conn, GameCommand.SubmitSeed(s"client-seed-$seat-0123456789")) *>
+        conn.receiveStream
+          .evalMap(frame => handle(conn, seat, handled, turns, frame))
+          .takeThrough(ended => !ended)
+          .compile
+          .lastOrError
 
   private def handle(
       conn: WSConnectionHighLevel[IO],
@@ -251,9 +257,9 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     frame match
       case WSFrame.Text(txt, _) =>
         decode[GameEvent](txt) match
-          case Right(GameEvent.GameEnded(_, _, _)) => IO.pure(true)
-          case Right(event)                        => maybeAct(conn, seat, handled, turns, event).as(false)
-          case Left(_)                             => IO.pure(false)
+          case Right(GameEvent.GameEnded(_, _, _, _)) => IO.pure(true)
+          case Right(event)                           => maybeAct(conn, seat, handled, turns, event).as(false)
+          case Left(_)                                => IO.pure(false)
       case _ => IO.pure(false)
 
   private def maybeAct(

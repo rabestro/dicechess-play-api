@@ -36,6 +36,13 @@ enum TimeControl:
   */
 final case class Clocks(white: Long, black: Long)
 
+/** The two clients' post-commit dice seeds, revealed at game end alongside the server seed so anyone can re-derive
+  * every roll. The HMAC message is canonical (length-prefixed), not a delimited string:
+  * `HMAC-SHA256(serverSeed, uint32be(len(white)) ++ white ++ uint32be(len(black)) ++ black ++ int64be(ply))` (see
+  * `DiceSource.rollMessage`). A seat that never submitted a seed falls back to its external id, shown here.
+  */
+final case class ClientSeeds(white: String, black: String)
+
 /** A wire-safe snapshot of a game, sufficient for a (re)joining client or bot to act. */
 final case class PublicGameState(
     version: Long,
@@ -45,9 +52,14 @@ final case class PublicGameState(
     status: GameStatus,
     timeControl: TimeControl,
     clocks: Option[Clocks],
+    // The dice commitment (SHA-256 of the server seed, hex). Published from creation and constant for the game, so a
+    // bot that only joins the game stream (and never saw the create response) can still verify the end-of-game reveal.
+    commit: String,
     // The revealed server seed (hex), present only once the game has ended — so a client that (re)joins after the end
     // can still open the dice commitment. `None` while the game is active (the seed stays secret mid-game).
-    seed: Option[String]
+    seed: Option[String],
+    // The client seeds folded into the dice, revealed together with `seed` (so both are `None` while active).
+    clientSeeds: Option[ClientSeeds]
 )
 
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
@@ -55,6 +67,11 @@ final case class PublicGameState(
   */
 enum GameCommand:
   case SubmitTurn(moves: List[String]) // the turn's micro-moves, in UCI
+  // Post-commit dice entropy: a client submits a high-entropy seed after the server has locked its commitment. The
+  // server folds both seats' seeds into every roll, so neither the server nor a player can grind the dice. Accepted
+  // once per seat, before the first roll; ignored afterwards. The room withholds the opening roll until both seats
+  // submit (or a short grace elapses, after which a missing seat falls back to its external id).
+  case SubmitSeed(seed: String)
   case Resign
 
 /** Transport-neutral events the room broadcasts. Each carries a monotonic version `v` so clients can order,
@@ -65,6 +82,8 @@ enum GameEvent:
   case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String, clocks: Option[Clocks])
   case TurnPlayed(v: Long, seat: Seat, moves: List[String], fenAfter: String)
   // `seed` is the revealed server seed encoded as hex. Hex-decode it, then SHA-256 the raw bytes to reproduce the
-  // `commit` published at creation and open the dice commitment after the game.
-  case GameEnded(v: Long, over: GameOver, seed: String)
+  // `commit` published at creation (and echoed on every snapshot). With `clientSeeds`, the full roll transcript can be
+  // recomputed using the canonical length-prefixed message (see `DiceSource.rollMessage`):
+  // `roll(ply) = HMAC-SHA256(seed, uint32be(len(white)) ++ white ++ uint32be(len(black)) ++ black ++ int64be(ply))`.
+  case GameEnded(v: Long, over: GameOver, seed: String, clientSeeds: ClientSeeds)
   case Rejected(v: Long, seat: Seat, reason: String)

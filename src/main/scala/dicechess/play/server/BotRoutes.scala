@@ -20,6 +20,7 @@ final case class ChallengeTarget(team: String, name: String, timeControl: Option
     derives Codec.AsObject
 final case class BotGame(gameId: String) derives Codec.AsObject
 final case class BotMove(moves: List[String]) derives Codec.AsObject
+final case class BotSeed(seed: String) derives Codec.AsObject
 
 /** Credentials returned by `POST /bot/anon`: the Bearer token plus the minted anonymous identity. */
 final case class AnonBot(token: String, team: String, name: String, id: String) derives Codec.AsObject
@@ -106,6 +107,20 @@ object BotRoutes:
         withBot(auth, req): bot =>
           seated(registry, id, bot): (room, _) =>
             Ok(ndjson(room.subscribe)).map(_.withContentType(`Content-Type`(ndjsonType)))
+
+      case req @ POST -> Root / "bot" / "game" / id / "seed" =>
+        withBot(auth, req): bot =>
+          req
+            .attemptAs[BotSeed]
+            .value
+            .flatMap:
+              case Left(failure) => BadRequest(failure.message)
+              case Right(body)   =>
+                // Provably-fair dice (#13): contribute post-commit entropy before the opening roll. Fire-and-forget;
+                // a too-late, duplicate, or malformed seed is dropped (or surfaces as `Rejected` on the stream).
+                seated(registry, id, bot)((room, seat) =>
+                  room.submit(seat, GameCommand.SubmitSeed(body.seed)) *> Accepted()
+                )
 
       case req @ POST -> Root / "bot" / "game" / id / "move" =>
         withBot(auth, req): bot =>

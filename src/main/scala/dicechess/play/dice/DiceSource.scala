@@ -16,8 +16,13 @@ import scala.collection.mutable.ListBuffer
   * luck.
   */
 trait DiceSource:
-  /** The three dice (each in 1..6) for the given ply. */
-  def roll(ply: Long): List[Int]
+  /** The three dice (each in 1..6) for the given ply, folding in both clients' seeds.
+    *
+    * The client seeds are supplied at roll time (not at construction): the server commits the server seed *before* it
+    * has seen any client seed, then folds the clients' post-commit entropy into every roll — so neither side can grind
+    * the dice. The seeds are fixed for the whole game (the room passes the same pair on every ply).
+    */
+  def roll(ply: Long, clientSeedW: String, clientSeedB: String): List[Int]
 
   /** SHA-256 of the server seed, published at game start (the commitment). */
   def commit: String
@@ -32,24 +37,26 @@ object DiceSource:
   // Largest multiple of 6 below 256; reject bytes >= this to avoid modulo bias.
   private val Cutoff = 252
 
-  /** Commit-reveal dice: `roll(ply) = HMAC-SHA256(serverSeed, clientW|clientB|ply)` mapped to three unbiased values in
-    * 1..6. Commit the SHA-256 of `serverSeed` before the game, reveal `serverSeed` after — anyone can then re-derive
-    * every roll.
+  /** Commit-reveal dice: `roll(ply, clientW, clientB) = HMAC-SHA256(serverSeed, msg)`, where `msg` is the canonical
+    * length-prefixed message `uint32be(len(clientW)) ++ clientW ++ uint32be(len(clientB)) ++ clientB ++ int64be(ply)`
+    * (see `rollMessage`), mapped to three unbiased values in 1..6. Commit the SHA-256 of `serverSeed` before the game,
+    * reveal `serverSeed` (and the client seeds) after — anyone can then re-derive every roll. The client seeds arrive
+    * at roll time, *after* the commit, so the server cannot have chosen its seed to bias them.
     */
-  def commitReveal(serverSeed: Array[Byte], clientSeedW: String, clientSeedB: String): DiceSource =
+  def commitReveal(serverSeed: Array[Byte]): DiceSource =
     val seed = serverSeed.clone()
     new DiceSource:
-      def commit: String             = hex(sha256(seed))
-      def reveal: String             = hex(seed)
-      def roll(ply: Long): List[Int] =
+      def commit: String                                                       = hex(sha256(seed))
+      def reveal: String                                                       = hex(seed)
+      def roll(ply: Long, clientSeedW: String, clientSeedB: String): List[Int] =
         derive(seed, rollMessage(clientSeedW, clientSeedB, ply))
 
   /** Mint a fresh commit-reveal source with a 32-byte CSPRNG server seed. */
-  def newCommitReveal(clientSeedW: String, clientSeedB: String): IO[DiceSource] =
+  def newCommitReveal(): IO[DiceSource] =
     IO:
       val seed = new Array[Byte](32)
       SecureRandom().nextBytes(seed)
-      commitReveal(seed, clientSeedW, clientSeedB)
+      commitReveal(seed)
 
   /** Canonical, unambiguous HMAC message: length-prefixed seeds + ply, so different (clientW, clientB) splits can never
     * collide (e.g. ("a|b","c") vs ("a","b|c")).

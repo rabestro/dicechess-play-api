@@ -26,14 +26,17 @@ final class BotConnection(
 ) extends PlayerConnection:
 
   def run(room: GameRoom): IO[Unit] =
-    Ref
-      .of[IO, Long](-1L)
-      .flatMap: handled =>
-        room.subscribe
-          .evalTap(event => act(room, handled, event))
-          .collectFirst { case ended: GameEvent.GameEnded => ended }
-          .compile
-          .drain
+    // Contribute post-commit entropy first (provably-fair dice, #13), then play. The room folds both seats' seeds
+    // into every roll; until both arrive it holds the opening roll (then force-starts on a grace).
+    BotConnection.randomSeed.flatMap(seed => room.submit(seat, GameCommand.SubmitSeed(seed))) *>
+      Ref
+        .of[IO, Long](-1L)
+        .flatMap: handled =>
+          room.subscribe
+            .evalTap(event => act(room, handled, event))
+            .collectFirst { case ended: GameEvent.GameEnded => ended }
+            .compile
+            .drain
 
   private def act(room: GameRoom, handled: Ref[IO, Long], event: GameEvent): IO[Unit] =
     turnFor(event) match
@@ -56,3 +59,10 @@ final class BotConnection(
         algorithm.findBestMove(state) match
           case None      => IO.unit // forced pass: the room advances on its own
           case Some(seq) => room.submit(seat, GameCommand.SubmitTurn(seq.moves.map(EngineOps.toUci)))
+
+object BotConnection:
+  /** A fresh 16-byte (128-bit) client dice seed, hex-encoded — the bot's post-commit entropy contribution. */
+  private[game] def randomSeed: IO[String] = IO:
+    val bytes = new Array[Byte](16)
+    java.security.SecureRandom().nextBytes(bytes)
+    bytes.map("%02x".format(_)).mkString

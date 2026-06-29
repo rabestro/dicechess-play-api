@@ -30,6 +30,7 @@ object Codecs:
   given Codec[TimeControl]     = deriveCodec
   given Codec[Seek]            = deriveCodec
   given Codec[Clocks]          = deriveCodec
+  given Codec[ClientSeeds]     = deriveCodec
   given Codec[Principal]       = deriveCodec
   given Codec[PublicGameState] = deriveCodec
   given Codec[GameCommand]     = deriveCodec
