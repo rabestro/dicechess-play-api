@@ -83,7 +83,7 @@ jobs:
       # Build the amd64 image into the runner's Docker first and prove it boots and
       # serves before publishing :latest — guards against "builds fine, won't start".
       - name: Build amd64 image for the smoke test
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -101,7 +101,7 @@ jobs:
         run: IMAGE=dicechess-play-api:smoke bash scripts/smoke-test.sh
 
       - name: Build and push image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
