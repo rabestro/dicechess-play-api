@@ -566,26 +566,30 @@ object GameRoom:
     EngineOps.parse(snapshot.dfen) match
       case Left(error)   => IO.pure(Left(s"corrupt snapshot dfen: $error"))
       case Right(state0) =>
-        val session0 = Session(
-          state0,
-          snapshot.version,
-          snapshot.players,
-          dice,
-          snapshot.ply,
-          snapshot.pending,
-          snapshot.status,
-          snapshot.timeControl,
-          remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
-          turnStartedAt = None,
-          started = snapshot.started,
-          startedAt = None,
-          clientSeeds = snapshot.clientSeeds,
-          lastRoll = snapshot.lastRoll,
-          turns = snapshot.turns
-        )
-        build(session0, snapshot.seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
-          .flatTap(_.supervisedConsume.start)
-          .map(Right(_))
+        IO.monotonic.flatMap { now =>
+          val session0 = Session(
+            state0,
+            snapshot.version,
+            snapshot.players,
+            dice,
+            snapshot.ply,
+            snapshot.pending,
+            snapshot.status,
+            snapshot.timeControl,
+            remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
+            // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
+            // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.
+            turnStartedAt = Option.when(snapshot.pending)(now),
+            started = snapshot.started,
+            startedAt = None,
+            clientSeeds = snapshot.clientSeeds,
+            lastRoll = snapshot.lastRoll,
+            turns = snapshot.turns
+          )
+          build(session0, snapshot.seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
+            .flatTap(_.supervisedConsume.start)
+            .map(Right(_))
+        }
 
   private def build(
       session0: Session,

@@ -49,12 +49,10 @@ final class GameRegistry private (
   def resume: IO[Int] =
     store.loadActive
       .flatMap(_.traverse { case (id, snapshot) =>
-        GameRoom
-          .restore(
-            snapshot,
-            DiceSource.fromHexSeed(snapshot.serverSeed),
-            disconnectGrace = disconnectGrace,
-            persist = store.save(id, _)
+        DiceSource
+          .fromHexSeed(snapshot.serverSeed)
+          .flatTraverse(dice =>
+            GameRoom.restore(snapshot, dice, disconnectGrace = disconnectGrace, persist = store.save(id, _))
           )
           .flatMap {
             case Left(error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error").as(0)

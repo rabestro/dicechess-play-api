@@ -1,6 +1,6 @@
 package dicechess.play.store
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
@@ -96,8 +96,15 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           commit2 <- room2.diceCommit
 
           // The game still ends properly: the resumed room accepts commands and reveals the SAME committed seed.
-          ended  = room2.subscribe.collectFirst { case e: GameEvent.GameEnded => e }.compile.lastOrError
-          resign = IO.sleep(100.millis) *> room2.submit(Seat.White, GameCommand.Resign)
+          // Deterministic handshake: the subscriber's first pulled event (the initial Snapshot) proves registration,
+          // so the resign can't race the subscription and the terminal event can't be missed.
+          ready <- Deferred[IO, Unit]
+          ended = room2.subscribe
+            .evalTap(_ => ready.complete(()).void)
+            .collectFirst { case e: GameEvent.GameEnded => e }
+            .compile
+            .lastOrError
+          resign = ready.get *> room2.submit(Seat.White, GameCommand.Resign)
           terminal <- (ended, resign)
             .parMapN((e, _) => e)
             .timeoutTo(5.seconds, IO.raiseError(RuntimeException("no end")))
