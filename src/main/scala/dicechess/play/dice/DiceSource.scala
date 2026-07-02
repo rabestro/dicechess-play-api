@@ -58,6 +58,12 @@ object DiceSource:
       SecureRandom().nextBytes(seed)
       commitReveal(seed)
 
+  /** Rebuild a source from a persisted server seed (the hex form `reveal` returns) — used to resume a game after a
+    * restart with its committed dice sequence intact.
+    */
+  def fromHexSeed(hex: String): DiceSource =
+    commitReveal(hex.grouped(2).map(pair => Integer.parseInt(pair, 16).toByte).toArray)
+
   /** Canonical, unambiguous HMAC message: length-prefixed seeds + ply, so different (clientW, clientB) splits can never
     * collide (e.g. ("a|b","c") vs ("a","b|c")).
     */

@@ -35,6 +35,14 @@ val LogbackVersion         = "1.5.18"
 val Http4sJdkClientVersion = "0.9.2"
 val MunitVersion           = "1.3.0"
 val MunitCatsEffectVersion = "2.1.0"
+// Persistence stack — kept in lockstep with dicechess-analytics so both backends
+// share one operational profile (same driver, migrations, test harness).
+val DoobieVersion             = "1.0.0-RC9"
+val FlywayVersion             = "12.8.1"
+val PostgresDriverVersion     = "42.7.7"
+val TestcontainersVersion     = "0.43.0"
+val TestcontainersJavaVersion = "1.21.3"
+val DockerJavaVersion         = "3.7.1"
 
 lazy val root = (project in file("."))
   .enablePlugins(JavaAppPackaging)
@@ -55,12 +63,28 @@ lazy val root = (project in file("."))
       "io.circe"   %% "circe-core"          % CirceVersion,
       "io.circe"   %% "circe-generic"       % CirceVersion,
       "io.circe"   %% "circe-parser"        % CirceVersion,
+      // Persistence: warm game snapshots in Postgres (schema `play`), Flyway migrations
+      "org.tpolecat"  %% "doobie-core"                % DoobieVersion,
+      "org.tpolecat"  %% "doobie-hikari"              % DoobieVersion,
+      "org.tpolecat"  %% "doobie-postgres"            % DoobieVersion,
+      "org.tpolecat"  %% "doobie-postgres-circe"      % DoobieVersion,
+      "org.flywaydb"   % "flyway-database-postgresql" % FlywayVersion,
+      "org.postgresql" % "postgresql"                 % PostgresDriverVersion,
       // Logging backend for Ember
       "ch.qos.logback" % "logback-classic" % LogbackVersion % Runtime,
       // Testing
       "org.scalameta" %% "munit"                  % MunitVersion           % Test,
       "org.typelevel" %% "munit-cats-effect"      % MunitCatsEffectVersion % Test,
-      "org.http4s"    %% "http4s-jdk-http-client" % Http4sJdkClientVersion % Test
+      "org.http4s"    %% "http4s-jdk-http-client" % Http4sJdkClientVersion % Test,
+      // Real PostgreSQL in tests via testcontainers (same harness as dicechess-analytics)
+      "com.dimafeng" %% "testcontainers-scala-munit"      % TestcontainersVersion % Test,
+      "com.dimafeng" %% "testcontainers-scala-postgresql" % TestcontainersVersion % Test,
+      // The scala wrapper pins testcontainers-java 1.20.x with docker-java 3.4.x, which
+      // speaks Docker API 1.32 — rejected by Docker 29+ daemons (min 1.41). Force newer.
+      "org.testcontainers"     % "testcontainers"                % TestcontainersJavaVersion % Test,
+      "org.testcontainers"     % "postgresql"                    % TestcontainersJavaVersion % Test,
+      "com.github.docker-java" % "docker-java-api"               % DockerJavaVersion         % Test,
+      "com.github.docker-java" % "docker-java-transport-zerodep" % DockerJavaVersion         % Test
     ),
     scalacOptions ++= Seq(
       "-Werror",
@@ -72,5 +96,8 @@ lazy val root = (project in file("."))
     coverageExcludedFiles := ".*Main\\.scala",
     // Raised to a real threshold once 3a-core lands; the scaffold has no logic to cover yet.
     coverageFailOnMinimum := false,
-    Test / fork           := true
+    Test / fork           := true,
+    // docker-java defaults to Docker API 1.32, which Docker 29+ daemons reject (min 1.41);
+    // pin a modern version for the testcontainers client (same fix as dicechess-analytics).
+    Test / javaOptions += "-Dapi.version=1.43"
   )
