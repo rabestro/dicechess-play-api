@@ -1,11 +1,12 @@
 package dicechess.play.game
 
 import cats.effect.{Deferred, Fiber, IO, Outcome, Ref, Resource}
-import cats.effect.std.Queue
+import cats.effect.std.{Console, Queue}
 import cats.syntax.all.*
 import dicechess.engine.domain.GameState
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
+import dicechess.play.store.{GameSnapshot, TurnRecord}
 import fs2.Stream
 
 import java.security.SecureRandom
@@ -35,7 +36,8 @@ final class GameRoom private (
     presence: Ref[IO, Map[Seat, Int]],
     graceFibers: Ref[IO, Map[Seat, Fiber[IO, Throwable, Unit]]],
     disconnectGrace: FiniteDuration,
-    seedGrace: FiniteDuration
+    seedGrace: FiniteDuration,
+    persist: GameSnapshot => IO[Unit]
 ):
   import GameRoom.*
 
@@ -194,13 +196,14 @@ final class GameRoom private (
           .flatMap:
             case Msg.Begin =>
               stateRef.get.flatMap { s =>
-                // Idempotent: only the first Begin starts the game. The opening roll is gated on post-commit client
-                // entropy — if both seats have already seeded, roll now; otherwise just mark the game started and let
-                // `deadlineFor`/`onTimeout` force-start once the seed grace elapses (so a game never stalls).
-                if s.started || s.ply > 0L || s.ended then IO.unit
+                // Idempotent: a Begin never re-rolls (ply > 0) or revives an ended game. Otherwise it marks the game
+                // started and rolls as soon as both client seeds are in — which also kicks a game resumed from a
+                // snapshot that had started but not yet rolled. If seeds are still missing, `deadlineFor`/`onTimeout`
+                // force-start once the seed grace elapses (so a game never stalls).
+                if s.ply > 0L || s.ended then IO.unit
                 else
                   IO.monotonic.flatMap { now =>
-                    val started = s.copy(started = true, startedAt = Some(now))
+                    val started = if s.started then s else s.copy(started = true, startedAt = Some(now))
                     // Persist `started` (and any seeds already in) before the opening roll, so a roll failure aborts
                     // from current state rather than from stale state (dropping seeds / re-starting).
                     stateRef.set(started) *>
@@ -217,9 +220,9 @@ final class GameRoom private (
     */
   private def onTimeout(s: Session): IO[Session] =
     if s.ended then IO.pure(s)
-    // The opening seed grace elapsed before both seats seeded: force-start so a game never stalls. Any seat that did
-    // not submit falls back to its external id (see `seedFor`).
-    else if s.awaitingSeeds then beginTurn(s)
+    // A started game whose opening roll hasn't happened yet: the seed grace elapsed (force-start; a missing seat
+    // falls back to its external id, see `seedFor`), or the game was resumed from a snapshot taken in that window.
+    else if s.started && s.ply == 0L then beginTurn(s)
     else if !s.pending then IO.pure(s)
     else
       val seat   = EngineOps.activeSeat(s.state)
@@ -288,21 +291,48 @@ final class GameRoom private (
   private def continue: IO[Unit] =
     stateRef.get.flatMap(s => if s.ended then IO.unit else consume)
 
-  /** Advance the session, write it, THEN broadcast — so the Ref always reflects the latest published event. A
-    * subscriber that registers just after a broadcast reads a current Snapshot (and acts), and one that registers just
-    * before catches the live event; broadcasting before the write would let a subscriber in that window miss both and
-    * hang.
+  /** Advance the session, write it, persist it, THEN broadcast — so the Ref always reflects the latest published event,
+    * and anything a player has seen is already durable (a fixed roll must never un-roll on a crash). A subscriber that
+    * registers just after a broadcast reads a current Snapshot (and acts), and one that registers just before catches
+    * the live event; broadcasting before the write would let a subscriber in that window miss both and hang.
     */
   private def emit(s: Session, make: Long => GameEvent): IO[Session] =
     val s2 = s.copy(version = s.version + 1)
-    stateRef.set(s2) *> broadcast(make(s2.version)).as(s2)
+    stateRef.set(s2) *> persistQuietly(s2) *> broadcast(make(s2.version)).as(s2)
+
+  /** Persistence is availability-first: a store failure is logged and the game plays on in memory (degrading to exactly
+    * what the storeless mode offers) rather than wedging the writer fiber mid-game.
+    */
+  private def persistQuietly(s: Session): IO[Unit] =
+    persist(snapshotOf(s)).handleErrorWith(e => Console[IO].errorln(s"[play][persist] snapshot write failed: $e"))
+
+  /** The durable image of the session — enough to resume the room after a restart and, once ended, to hand the game to
+    * analytics.
+    */
+  private def snapshotOf(s: Session): GameSnapshot =
+    GameSnapshot(
+      version = s.version,
+      dfen = EngineOps.serialize(s.state),
+      players = s.players,
+      seatTokens = seatTokens,
+      serverSeed = s.dice.reveal,
+      clientSeeds = s.clientSeeds,
+      started = s.started,
+      ply = s.ply,
+      pending = s.pending,
+      status = s.status,
+      timeControl = s.timeControl,
+      remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
+      lastRoll = s.lastRoll,
+      turns = s.turns
+    )
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
   private def beginTurn(s0: Session): IO[Session] =
     val dice   = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
     val rolled = EngineOps.withDice(s0.state, dice)
     val seat   = EngineOps.activeSeat(rolled)
-    val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true)
+    val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true, lastRoll = dice)
     // The new mover's clock has not started ticking yet (startClock runs below), so these are the banks at turn start —
     // including the increment just credited to the side that completed the previous turn.
     val emitRoll =
@@ -312,9 +342,14 @@ final class GameRoom private (
     emitRoll.flatMap: s2 =>
       if EngineOps.legalMovePaths(rolled).nonEmpty then startClock(s2)
       else
-        val passed = rolled.endTurn()
-        val s3     = s2.copy(state = passed, pending = false)
-        emit(s3, v => GameEvent.TurnPlayed(v, seat, Nil, EngineOps.serialize(passed)))
+        val passed   = rolled.endTurn()
+        val passDfen = EngineOps.serialize(passed)
+        val s3       = s2.copy(
+          state = passed,
+          pending = false,
+          turns = s2.turns :+ TurnRecord(s2.ply, colorLetter(seat), dice, Nil, passDfen)
+        )
+        emit(s3, v => GameEvent.TurnPlayed(v, seat, Nil, passDfen))
           .flatMap(advanceOrEnd)
 
   /** After a completed turn (or a pass), either end on a limit/draw or roll the next turn. */
@@ -349,10 +384,11 @@ final class GameRoom private (
                   emit(s, v => GameEvent.Rejected(v, seat, s"seed must be $MinSeedChars..$MaxSeedChars characters"))
                 else
                   val seeded = s.copy(clientSeeds = s.clientSeeds.updated(seat, seed))
-                  // Both seats in and the game already started: persist the seed first (so a roll failure can't drop
-                  // it from the reveal), then open the gate and roll the opening turn.
-                  if seeded.started && seeded.hasAllSeeds then stateRef.set(seeded) *> beginTurn(seeded)
-                  else IO.pure(seeded)
+                  // Persist the accepted seed (no event is emitted for it), then — if both seats are in and the game
+                  // already started — open the gate and roll the opening turn from the durable state.
+                  if seeded.started && seeded.hasAllSeeds then
+                    stateRef.set(seeded) *> persistQuietly(seeded) *> beginTurn(seeded)
+                  else persistQuietly(seeded).as(seeded)
 
           case GameCommand.SubmitTurn(uci) =>
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
@@ -362,12 +398,17 @@ final class GameRoom private (
                 case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
+                  val nextDfen       = EngineOps.serialize(next)
                   // Stop the mover's clock at the receive time (not now, after validation) and apply the control's bonus
                   // before the next turn rolls and resets the clock for the other side.
                   val sd = debit(s, seat, receivedAt)
                   emit(
-                    sd.copy(state = next, pending = false),
-                    v => GameEvent.TurnPlayed(v, seat, uci, EngineOps.serialize(next))
+                    sd.copy(
+                      state = next,
+                      pending = false,
+                      turns = sd.turns :+ TurnRecord(sd.ply, colorLetter(seat), sd.lastRoll, uci, nextDfen)
+                    ),
+                    v => GameEvent.TurnPlayed(v, seat, uci, nextDfen)
                   )
                     .flatMap: s1 =>
                       winner match
@@ -430,7 +471,11 @@ object GameRoom:
       // `clientSeeds` collects each seat's post-commit entropy before the opening roll.
       started: Boolean = false,
       startedAt: Option[FiniteDuration] = None,
-      clientSeeds: Map[Seat, String] = Map.empty
+      clientSeeds: Map[Seat, String] = Map.empty,
+      // The dice of the turn in flight (recorded into `turns` when the turn completes) and the completed-turn history
+      // — kept for the end-of-game analytics handoff, and persisted so it survives a restart.
+      lastRoll: List[Int] = Nil,
+      turns: Vector[TurnRecord] = Vector.empty
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
@@ -478,48 +523,106 @@ object GameRoom:
       idleCheck: FiniteDuration = DefaultIdleCheck,
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
       timeControl: TimeControl = TimeControl.Unlimited,
-      seedGrace: FiniteDuration = DefaultSeedGrace
+      seedGrace: FiniteDuration = DefaultSeedGrace,
+      persist: GameSnapshot => IO[Unit] = _ => IO.unit
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
       case Right(state0) =>
+        val session0 = Session(
+          state0,
+          0L,
+          players,
+          dice,
+          0L,
+          pending = false,
+          GameStatus.Active,
+          timeControl,
+          remaining = initialRemaining(timeControl, players.keys)
+        )
         for
-          ref <- Ref.of[IO, Session](
-            Session(
-              state0,
-              0L,
-              players,
-              dice,
-              0L,
-              pending = false,
-              GameStatus.Active,
-              timeControl,
-              remaining = initialRemaining(timeControl, players.keys)
-            )
-          )
-          inbox       <- Queue.unbounded[IO, Msg]
-          subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
-          nextId      <- Ref.of[IO, Long](0L)
-          seatTokens  <- mintTokens(players.keys)
-          done        <- Deferred[IO, GameOver]
-          presence    <- Ref.of[IO, Map[Seat, Int]](Map.empty)
-          graceFibers <- Ref.of[IO, Map[Seat, Fiber[IO, Throwable, Unit]]](Map.empty)
-          room = new GameRoom(
-            ref,
-            inbox,
-            subscribers,
-            nextId,
-            fanOutBuffer,
-            seatTokens,
-            idleCheck,
-            done,
-            presence,
-            graceFibers,
-            disconnectGrace,
-            seedGrace
-          )
+          seatTokens <- mintTokens(players.keys)
+          room       <- build(session0, seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
+          // The creation row must be durable before anyone plays: the seat tokens and the dice commitment have been
+          // handed out, so a restart in the first seconds must not lose them.
+          _ <- room.persistQuietly(session0)
           _ <- room.supervisedConsume.start
         yield Right(room)
+
+  /** Rebuild a room from a durable snapshot after a restart. Tokens, seeds, clocks and turn history come from the
+    * snapshot; the caller re-derives the `DiceSource` from the stored server seed, so the committed dice sequence
+    * continues (and still opens the published commitment at reveal). The mover's in-flight turn timer restarts —
+    * monotonic time is process-scoped — which errs in the player's favour.
+    */
+  def restore(
+      snapshot: GameSnapshot,
+      dice: DiceSource,
+      fanOutBuffer: Int = DefaultFanOutBuffer,
+      idleCheck: FiniteDuration = DefaultIdleCheck,
+      disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
+      seedGrace: FiniteDuration = DefaultSeedGrace,
+      persist: GameSnapshot => IO[Unit] = _ => IO.unit
+  ): IO[Either[String, GameRoom]] =
+    EngineOps.parse(snapshot.dfen) match
+      case Left(error)   => IO.pure(Left(s"corrupt snapshot dfen: $error"))
+      case Right(state0) =>
+        IO.monotonic.flatMap { now =>
+          val session0 = Session(
+            state0,
+            snapshot.version,
+            snapshot.players,
+            dice,
+            snapshot.ply,
+            snapshot.pending,
+            snapshot.status,
+            snapshot.timeControl,
+            remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
+            // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
+            // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.
+            turnStartedAt = Option.when(snapshot.pending)(now),
+            started = snapshot.started,
+            startedAt = None,
+            clientSeeds = snapshot.clientSeeds,
+            lastRoll = snapshot.lastRoll,
+            turns = snapshot.turns
+          )
+          build(session0, snapshot.seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
+            .flatTap(_.supervisedConsume.start)
+            .map(Right(_))
+        }
+
+  private def build(
+      session0: Session,
+      seatTokens: Map[Seat, String],
+      fanOutBuffer: Int,
+      idleCheck: FiniteDuration,
+      disconnectGrace: FiniteDuration,
+      seedGrace: FiniteDuration,
+      persist: GameSnapshot => IO[Unit]
+  ): IO[GameRoom] =
+    for
+      ref         <- Ref.of[IO, Session](session0)
+      inbox       <- Queue.unbounded[IO, Msg]
+      subscribers <- Ref.of[IO, Map[Long, Subscriber]](Map.empty)
+      nextId      <- Ref.of[IO, Long](0L)
+      done        <- Deferred[IO, GameOver]
+      presence    <- Ref.of[IO, Map[Seat, Int]](Map.empty)
+      graceFibers <- Ref.of[IO, Map[Seat, Fiber[IO, Throwable, Unit]]](Map.empty)
+    yield new GameRoom(
+      ref,
+      inbox,
+      subscribers,
+      nextId,
+      fanOutBuffer,
+      seatTokens,
+      idleCheck,
+      done,
+      presence,
+      graceFibers,
+      disconnectGrace,
+      seedGrace,
+      persist
+    )
 
   /** Starting clocks for a timed control: both seats get the initial bank (SuddenDeath/Fischer). PerMove keeps no bank
     * (each turn gets a fresh budget) and Unlimited has no clock, so both start empty.
@@ -531,6 +634,9 @@ object GameRoom:
       case _                             => Map.empty
 
   private def floorZero(d: FiniteDuration): FiniteDuration = if d > Duration.Zero then d else Duration.Zero
+
+  /** Analytics colour letter for a *player* seat (turn records are only ever created for the side that moved). */
+  private def colorLetter(seat: Seat): String = if seat == Seat.White then "w" else "b"
 
   /** Remaining time per side as of `now`, in millis — the mover's in-progress turn already subtracted so a snapshot is
     * live, not frozen at the last completed turn. `None` for Unlimited (no clock).

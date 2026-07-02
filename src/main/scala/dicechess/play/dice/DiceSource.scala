@@ -1,6 +1,7 @@
 package dicechess.play.dice
 
 import cats.effect.IO
+import cats.syntax.all.*
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8
@@ -57,6 +58,15 @@ object DiceSource:
       val seed = new Array[Byte](32)
       SecureRandom().nextBytes(seed)
       commitReveal(seed)
+
+  /** Rebuild a source from a persisted server seed (the hex form `reveal` returns) — used to resume a game after a
+    * restart with its committed dice sequence intact. A malformed (corrupt) seed is an error value, so one bad row can
+    * be skipped instead of failing the whole resume.
+    */
+  def fromHexSeed(hex: String): Either[String, DiceSource] =
+    Either
+      .catchOnly[NumberFormatException](hex.grouped(2).map(pair => Integer.parseInt(pair, 16).toByte).toArray)
+      .bimap(_ => s"malformed server seed (not hex): $hex", commitReveal)
 
   /** Canonical, unambiguous HMAC message: length-prefixed seeds + ply, so different (clientW, clientB) splits can never
     * collide (e.g. ("a|b","c") vs ("a","b|c")).

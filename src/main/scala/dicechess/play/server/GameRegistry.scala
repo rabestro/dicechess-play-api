@@ -1,14 +1,23 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref}
+import cats.effect.std.Console
+import cats.syntax.all.*
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import dicechess.play.game.GameRoom
+import dicechess.play.store.GameStore
 
 import scala.concurrent.duration.FiniteDuration
 
-/** In-memory registry of live game rooms (one authoritative node, for now). */
-final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]], disconnectGrace: FiniteDuration):
+/** In-memory registry of live game rooms (one authoritative node, for now). Rooms snapshot themselves into the
+  * `GameStore` on every event, and `resume` rebuilds them on boot — so live games survive a restart or deploy.
+  */
+final class GameRegistry private (
+    rooms: Ref[IO, Map[GameId, GameRoom]],
+    disconnectGrace: FiniteDuration,
+    store: GameStore
+):
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
 
@@ -28,19 +37,38 @@ final class GameRegistry private (rooms: Ref[IO, Map[GameId, GameRoom]], disconn
         Map(Seat.White -> white, Seat.Black -> black),
         dice,
         disconnectGrace = disconnectGrace,
-        timeControl = timeControl
+        timeControl = timeControl,
+        persist = store.save(id, _)
       )
-      result <- made match
-        case Left(error) => IO.pure(Left(error))
-        case Right(room) =>
-          for
-            _ <- rooms.update(_.updated(id, room))
-            // Evict the room once its game ends, so the map doesn't grow without bound.
-            _ <- (room.result *> rooms.update(_.removed(id))).start
-            _ <- room.start
-          yield Right((id, room))
+      result <- made.traverse(room => register(id, room) *> room.start.as((id, room)))
     yield result
 
+  /** Rebuild rooms for every game that was live when the process stopped; returns how many were revived. A snapshot
+    * that fails to restore is logged and skipped — one corrupt row must not take the server down.
+    */
+  def resume: IO[Int] =
+    store.loadActive
+      .flatMap(_.traverse { case (id, snapshot) =>
+        DiceSource
+          .fromHexSeed(snapshot.serverSeed)
+          .flatTraverse(dice =>
+            GameRoom.restore(snapshot, dice, disconnectGrace = disconnectGrace, persist = store.save(id, _))
+          )
+          .flatMap {
+            case Left(error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error").as(0)
+            case Right(room) => register(id, room) *> room.start.as(1)
+          }
+      })
+      .map(_.sum)
+
+  private def register(id: GameId, room: GameRoom): IO[Unit] =
+    rooms.update(_.updated(id, room)) *>
+      // Evict the room once its game ends, so the map doesn't grow without bound.
+      (room.result *> rooms.update(_.removed(id))).start.void
+
 object GameRegistry:
-  def create(disconnectGrace: FiniteDuration = GameRoom.DefaultDisconnectGrace): IO[GameRegistry] =
-    Ref.of[IO, Map[GameId, GameRoom]](Map.empty).map(GameRegistry(_, disconnectGrace))
+  def create(
+      disconnectGrace: FiniteDuration = GameRoom.DefaultDisconnectGrace,
+      store: GameStore = GameStore.noop
+  ): IO[GameRegistry] =
+    Ref.of[IO, Map[GameId, GameRoom]](Map.empty).map(GameRegistry(_, disconnectGrace, store))

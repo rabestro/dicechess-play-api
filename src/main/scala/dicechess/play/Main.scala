@@ -1,6 +1,6 @@
 package dicechess.play
 
-import cats.effect.{IO, IOApp}
+import cats.effect.{IO, IOApp, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
 import dicechess.play.server.{
@@ -16,6 +16,7 @@ import dicechess.play.server.{
   LobbyRoutes,
   PlayRoutes
 }
+import dicechess.play.store.{GameStore, PgGameStore}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 
@@ -26,9 +27,20 @@ object Main extends IOApp.Simple:
   private val port    = port"8080"
   private val version = sys.env.getOrElse("APP_VERSION", "dev")
 
-  def run: IO[Unit] =
+  // Persistence is opt-in by env: with PLAY_DB_URL set, games snapshot into Postgres (schema `play`) and live games
+  // are resumed on boot; without it the server runs in-memory exactly as before (games die with the process).
+  private def storeResource: Resource[IO, GameStore] =
+    PgGameStore.configFromEnv match
+      case Some(config) => PgGameStore.resource(config)
+      case None         => Resource.pure(GameStore.noop)
+
+  def run: IO[Unit] = storeResource.use(serve)
+
+  private def serve(store: GameStore): IO[Unit] =
     for
-      registry   <- GameRegistry.create()
+      registry   <- GameRegistry.create(store = store)
+      resumed    <- registry.resume
+      _          <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
       botAuth    <- BotAuth.fromEnv
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
