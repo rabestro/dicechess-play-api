@@ -15,8 +15,10 @@ import org.flywaydb.core.Flyway
 
 import scala.concurrent.duration.*
 
-/** Postgres-backed store: schema `play` on the shared homelab instance (kept out of the public analytics schema, but
-  * inside the same database so the existing pg_dump backup covers it for free).
+/** Postgres-backed store. Deployed against a **dedicated `play` database** (analytics is an aggregator with its own
+  * lifecycle; play state is operational and restores independently) — pointed at by `PLAY_DB_URL`, with Flyway owning
+  * the `play` schema inside it. play-api reaches analytics only as an ordinary writer via `POST /api/games`, never
+  * through the database.
   *
   * Every round trip is bounded by a timeout: the caller treats store trouble as a degradation, and a *hung* query —
   * unlike a failed one — would otherwise stall the game's writer fiber in a way `handleErrorWith` can't catch.
