@@ -19,6 +19,17 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
   private def seats  =
     Map[Seat, Principal](Seat.White -> Principal.Guest("white"), Seat.Black -> Principal.Guest("black"))
 
+  /** Poll the persisted snapshots until `pred` holds — persistence runs before broadcast, so asserting on the store
+    * side is race-free where subscribing to live events is not (a slow subscriber can miss the opening roll).
+    */
+  private def awaitWritten(written: Ref[IO, Vector[GameSnapshot]])(
+      pred: Vector[GameSnapshot] => Boolean
+  ): IO[Vector[GameSnapshot]] =
+    written.get
+      .flatTap(snaps => IO.sleep(20.millis).unlessA(pred(snaps)))
+      .iterateUntil(pred)
+      .timeoutTo(10.seconds, IO.raiseError(RuntimeException("expected snapshot was never persisted")))
+
   test("the creation row is durable before anyone plays: tokens, seed and version 0 are in the first snapshot"):
     Ref.of[IO, Vector[GameSnapshot]](Vector.empty).flatMap { written =>
       GameRoom
@@ -43,13 +54,11 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
         .flatMap {
           case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
           case Right(room) =>
-            val rolled = room.subscribe.collectFirst { case r: GameEvent.DiceRolled => r }.compile.lastOrError
             for
               _     <- room.start
-              _     <- rolled.timeoutTo(5.seconds, IO.raiseError(RuntimeException("no opening roll")))
+              _     <- awaitWritten(written)(_.exists(_.pending)) // the grace force-start rolled, durably
               _     <- room.submit(Seat.White, GameCommand.Resign)
-              _     <- room.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("no terminal")))
-              snaps <- written.get
+              snaps <- awaitWritten(written)(_.lastOption.exists(_.ended))
             yield
               val versions = snaps.map(_.version)
               assertEquals(versions, versions.sorted, "what a subscriber saw as version N must be durable as N")

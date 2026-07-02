@@ -76,10 +76,13 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           registry1 <- GameRegistry.create(store = db)
           created   <- registry1.create(Principal.Guest("w-uuid"), Principal.Guest("b-uuid"))
           (id, room1) = created.toOption.getOrElse(fail("game creation failed"))
-          rolled      = room1.subscribe.collectFirst { case r: GameEvent.DiceRolled => r }.compile.lastOrError
-          seeds       = room1.submit(Seat.White, GameCommand.SubmitSeed("white-client-seed-0001")) *>
-            room1.submit(Seat.Black, GameCommand.SubmitSeed("black-client-seed-0001"))
-          _ <- (rolled, seeds).parMapN((r, _) => r).timeoutTo(5.seconds, IO.raiseError(RuntimeException("no roll")))
+          _ <- room1.submit(Seat.White, GameCommand.SubmitSeed("white-client-seed-0001"))
+          _ <- room1.submit(Seat.Black, GameCommand.SubmitSeed("black-client-seed-0001"))
+          // Poll the public state instead of subscribing: a slow subscriber can miss the live roll event.
+          _ <- room1.snapshot
+            .flatTap(ps => IO.sleep(20.millis).unlessA(ps.dicePending))
+            .iterateUntil(_.dicePending)
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no opening roll")))
           before  <- room1.snapshot
           commit1 <- room1.diceCommit
           tokens1 = room1.joinTokens
