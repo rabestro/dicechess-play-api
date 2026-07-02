@@ -324,7 +324,8 @@ final class GameRoom private (
       timeControl = s.timeControl,
       remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
       lastRoll = s.lastRoll,
-      turns = s.turns
+      turns = s.turns,
+      createdAtEpochMs = s.createdAtEpochMs
     )
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
@@ -475,7 +476,8 @@ object GameRoom:
       // The dice of the turn in flight (recorded into `turns` when the turn completes) and the completed-turn history
       // — kept for the end-of-game analytics handoff, and persisted so it survives a restart.
       lastRoll: List[Int] = Nil,
-      turns: Vector[TurnRecord] = Vector.empty
+      turns: Vector[TurnRecord] = Vector.empty,
+      createdAtEpochMs: Option[Long] = None
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
@@ -529,18 +531,20 @@ object GameRoom:
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
       case Right(state0) =>
-        val session0 = Session(
-          state0,
-          0L,
-          players,
-          dice,
-          0L,
-          pending = false,
-          GameStatus.Active,
-          timeControl,
-          remaining = initialRemaining(timeControl, players.keys)
-        )
         for
+          createdAt <- IO.realTime
+          session0 = Session(
+            state0,
+            0L,
+            players,
+            dice,
+            0L,
+            pending = false,
+            GameStatus.Active,
+            timeControl,
+            remaining = initialRemaining(timeControl, players.keys),
+            createdAtEpochMs = Some(createdAt.toMillis)
+          )
           seatTokens <- mintTokens(players.keys)
           room       <- build(session0, seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
           // The creation row must be durable before anyone plays: the seat tokens and the dice commitment have been
@@ -584,7 +588,8 @@ object GameRoom:
             startedAt = None,
             clientSeeds = snapshot.clientSeeds,
             lastRoll = snapshot.lastRoll,
-            turns = snapshot.turns
+            turns = snapshot.turns,
+            createdAtEpochMs = snapshot.createdAtEpochMs
           )
           build(session0, snapshot.seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
             .flatTap(_.supervisedConsume.start)
