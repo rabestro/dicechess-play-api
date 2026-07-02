@@ -37,7 +37,10 @@ final case class GameSnapshot(
     timeControl: TimeControl,
     remainingMs: Map[Seat, Long],
     lastRoll: List[Int],
-    turns: Vector[TurnRecord]
+    turns: Vector[TurnRecord],
+    // Wall-clock creation time — carried into the analytics handoff as `started_at`. Optional so snapshots written
+    // before this field existed still decode.
+    createdAtEpochMs: Option[Long] = None
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true
@@ -65,3 +68,22 @@ object GameStore:
   val noop: GameStore = new GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = IO.unit
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
+
+/** An undelivered analytics handoff: the game's `GameIngest` payload plus its retry bookkeeping. */
+final case class OutboxRow(gameId: GameId, payload: io.circe.Json, attempts: Int)
+
+/** The deliverer's port onto the outbox (rows are enqueued transactionally by the store itself when a finished game's
+  * snapshot is saved). `due` returns undelivered, non-parked rows whose next attempt is due.
+  */
+trait OutboxStore:
+  def due(limit: Int): IO[List[OutboxRow]]
+  def markDelivered(gameId: GameId): IO[Unit]
+  def markRetry(
+      gameId: GameId,
+      attempts: Int,
+      retryIn: scala.concurrent.duration.FiniteDuration,
+      error: String
+  ): IO[Unit]
+
+  /** Park a row that will never succeed (a 4xx such as the replay gate's 422) for manual inspection. */
+  def markParked(gameId: GameId, error: String): IO[Unit]
