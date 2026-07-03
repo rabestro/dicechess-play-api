@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.IO
 import cats.syntax.all.*
-import dicechess.play.core.{BotEvent, GameId, MoveTree, Principal, Seat}
+import dicechess.play.core.{BotEvent, GameId, MoveTree, PlayerKind, Players, Principal, PublicPlayer, Seat, Seek}
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
@@ -25,8 +25,11 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
       events          <- BotEvents.create
       registry        <- GameRegistry.create()
       challenges      <- Challenges.create(events, registry, maxPendingPerBot = maxPendingPerBot)
+      lobby           <- Lobby.create(registry)
       registerLimiter <- AnonMintLimiter.create(limit = registerLimit)
-    yield (BotRoutes(auth, challenges, events, registry, limiter, registerLimiter).orNotFound, registry)
+      // LobbyRoutes rides along so the human↔bot seek flows can be exercised end-to-end over HTTP.
+      routes = BotRoutes(auth, challenges, events, registry, lobby, limiter, registerLimiter) <+> LobbyRoutes(lobby)
+    yield (routes.orNotFound, registry)
 
   private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith(_)).map(_._1)
 
@@ -247,6 +250,73 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     app
       .flatMap(_.run(request(Method.GET, uri"/bot/games", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  test("a bot posts a seek a human can see and accept — and both find their game"):
+    AnonMintLimiter
+      .create(limit = 100)
+      .flatMap(appWith(_))
+      .flatMap: (service, registry) =>
+        for
+          created <- service
+            .run(request(Method.POST, uri"/bot/seeks", Some("tok-alice")).withEntity(BotCreateSeek()))
+            .flatMap(_.as[CreatedSeek])
+          // The lobby shows WHO offers the game: a bot, by its public team-qualified name.
+          open <- service.run(Request[IO](Method.GET, uri"/lobby/seeks")).flatMap(_.as[List[Seek]])
+          _ = assertEquals(
+            open.map(s => (s.id, s.kind, s.name)),
+            List((created.seekId, PlayerKind.Bot, Some("acme alice")))
+          )
+          // A guest accepts over the existing lobby route and receives its seat token.
+          matched <- service
+            .run(
+              Request[IO](Method.POST, uri"/lobby/seeks" / created.seekId / "accept").withEntity(AcceptSeek("guest-h1"))
+            )
+            .flatMap(_.as[SeekMatch])
+          // The bot needs no token: the game appears in its listing, seated White (the seek creator's seat).
+          games <- service.run(request(Method.GET, uri"/bot/games", Some("tok-alice"))).flatMap(_.as[BotGames])
+          // And the public snapshot tells everyone who plays: a named bot vs an anonymous human.
+          players <- registry
+            .get(GameId(matched.gameId))
+            .flatMap(_.fold(IO.raiseError(RuntimeException("game vanished")))(_.snapshot))
+            .map(_.players)
+        yield
+          assert(matched.token.nonEmpty)
+          assertEquals(games.games.map(g => (g.gameId, g.seat)), List((matched.gameId, Seat.White)))
+          assertEquals(
+            players,
+            Some(Players(PublicPlayer(PlayerKind.Bot, Some("acme alice")), PublicPlayer(PlayerKind.Human, None)))
+          )
+
+  test("a bot accepts a guest seek; the guest's status poll delivers its token"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek("guest-h2")))
+          .flatMap(_.as[CreatedSeek])
+        accepted <- service.run(request(Method.POST, uri"/bot/seeks" / created.seekId / "accept", Some("tok-bob")))
+        game     <- accepted.as[BotGame]
+        status   <- service
+          .run(Request[IO](Method.GET, uri"/lobby/seeks" / created.seekId +? ("secret" -> created.secret)))
+          .flatMap(_.as[SeekState])
+      yield
+        assertEquals(accepted.status, Status.Created)
+        assert(game.gameId.nonEmpty)
+        assertEquals(status.matched, true)
+        assertEquals(status.gameId, Some(game.gameId))
+        assert(status.token.exists(_.nonEmpty), "the guest creator must get its seat token via the poll")
+
+  test("a bot cannot accept its own seek, and its open seeks are capped"):
+    app.flatMap: service =>
+      def post = service
+        .run(request(Method.POST, uri"/bot/seeks", Some("tok-carol")).withEntity(BotCreateSeek()))
+      for
+        created  <- post.flatMap(_.as[CreatedSeek])
+        own      <- service.run(request(Method.POST, uri"/bot/seeks" / created.seekId / "accept", Some("tok-carol")))
+        _        <- post *> post // seeks 2 and 3 — the default cap
+        overflow <- post
+      yield
+        assertEquals(own.status, Status.BadRequest)
+        assertEquals(overflow.status, Status.TooManyRequests)
 
   test("a finished game leaves the listing (the player index is evicted with the room)"):
     app.flatMap: service =>

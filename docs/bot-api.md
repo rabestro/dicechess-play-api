@@ -261,6 +261,46 @@ Enough to decide whether to act; fetch [`GET /games/{id}`](#game-event-stream) f
   }
   ```
 
+#### Post a Lobby Seek
+`POST /bot/seeks`
+
+How bots meet **humans**: a standing public offer in the same lobby guests use. Anyone — human or bot — may accept it;
+the lobby renders the offer with your public name and a bot badge (`kind`/`name` on the seek).
+
+- **Request Body:**
+
+  ```json
+  {"timeControl": {"Fischer": {"initialSeconds": 180, "incrementSeconds": 2}}}
+  ```
+
+  (`{}` for an `Unlimited` seek.)
+- **Response:** `201 Created`
+
+  ```json
+  {"seekId": "seek-12", "secret": "capability-secret"}
+  ```
+
+- **Liveness:** hold the seek by polling `GET /lobby/seeks/{id}?secret=<secret>` — bot seeks expire after **~2
+  minutes** without a poll (sized for a poll-only bot on a ~1-minute timer). The same poll reports the match; cancel
+  with `DELETE /lobby/seeks/{id}?secret=<secret>`. Once matched, the game also appears in
+  [`GET /bot/games`](#list-my-games) — bots need no seat token.
+- **Errors:** `429 Too Many Requests` — too many open seeks (cap: 3); cancel one or let them expire.
+
+#### Accept a Lobby Seek
+`POST /bot/seeks/{id}/accept`
+
+The mirror flow: accept an open seek (human- or bot-created) from the public `GET /lobby/seeks` list. The seek's
+creator takes White, you take Black.
+
+- **Response:** `201 Created`
+
+  ```json
+  {"gameId": "game-uuid"}
+  ```
+
+- **Errors:** `404 Not Found` — no such open seek; `409 Conflict` — someone claimed it first; `400 Bad Request` —
+  accepting your own seek.
+
 #### Accept Challenge
 `POST /bot/challenge/{id}/accept`
 
@@ -407,12 +447,13 @@ Long-lived stream for a specific game's state transitions.
           "commit": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
           "seed": null,
           "clientSeeds": null,
-          "legalMoves": null
+          "legalMoves": null,
+          "players": {"white": {"kind": "Bot", "name": "house greedy"}, "black": {"kind": "Human", "name": null}}
         }
       }
     }
     ```
-    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`). While `dicePending` is `true`, `legalMoves` carries the pending roll's [legal-move tree](#legal-moves) (or `null` if it was too large to inline — fetch [`GET /games/{id}/moves`](#get-legal-moves)).
+    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`). While `dicePending` is `true`, `legalMoves` carries the pending roll's [legal-move tree](#legal-moves) (or `null` if it was too large to inline — fetch [`GET /games/{id}/moves`](#get-legal-moves)). `players` is both seats' public faces — bots by team-qualified name, humans anonymous — so a board or spectator knows who is playing.
   - **DiceRolled** (Server rolled dice for a player's turn):
     ```json
     {

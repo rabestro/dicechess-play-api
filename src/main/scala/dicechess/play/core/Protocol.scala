@@ -60,6 +60,23 @@ object MoveTree:
   def fromPaths(paths: List[List[String]]): MoveTree =
     MoveTree(paths.filter(_.nonEmpty).groupBy(_.head).map((move, group) => move -> fromPaths(group.map(_.tail))))
 
+/** Whether a participant is a human or a bot — the public taxonomy the lobby and boards render. */
+enum PlayerKind:
+  case Human, Bot
+
+/** The public face of a participant: enough for a board, lobby, or spectator to say WHO plays, never leaking ids. Bots
+  * show their team-qualified display name; guests and users stay anonymous (their ids are private).
+  */
+final case class PublicPlayer(kind: PlayerKind, name: Option[String])
+
+object PublicPlayer:
+  def of(principal: Principal): PublicPlayer = principal match
+    case Principal.Bot(team, name) => PublicPlayer(PlayerKind.Bot, Some(s"$team $name"))
+    case _                         => PublicPlayer(PlayerKind.Human, None)
+
+/** Both seats' public faces, as carried on the game state. */
+final case class Players(white: PublicPlayer, black: PublicPlayer)
+
 /** A wire-safe snapshot of a game, sufficient for a (re)joining client or bot to act. */
 final case class PublicGameState(
     version: Long,
@@ -80,7 +97,9 @@ final case class PublicGameState(
     // The legal turns for the pending roll. Present while `dicePending`, except when the enumeration exceeds the
     // inline cap — then it is `None` and a client fetches the full tree via `GET /games/{id}/moves`. `None` whenever
     // no roll is pending.
-    legalMoves: Option[MoveTree] = None
+    legalMoves: Option[MoveTree] = None,
+    // The public faces of both seats — who a board or spectator is looking at (bots by name, humans anonymous).
+    players: Option[Players] = None
 )
 
 /** The full legal-move tree for a game's pending roll, served by `GET /games/{id}/moves` — never capped, unlike the

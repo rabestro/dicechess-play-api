@@ -1,7 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{Principal, TimeControl}
+import dicechess.play.core.{PlayerKind, Principal, Seek, TimeControl}
 
 import scala.concurrent.duration.*
 
@@ -9,13 +9,21 @@ class LobbySuite extends munit.CatsEffectSuite:
 
   private def lobby: IO[Lobby] = GameRegistry.create().flatMap(Lobby.create(_))
 
-  private val alice = Principal.Guest("alice")
-  private val bob   = Principal.Guest("bob")
+  private val alice  = Principal.Guest("alice")
+  private val bob    = Principal.Guest("bob")
+  private val botFoo = Principal.Bot("acme", "foo")
+
+  /** Create a seek the test expects to be admitted, unwrapping the cap envelope. */
+  private def mustCreate(l: Lobby, creator: Principal, tc: TimeControl): IO[(Seek, String)] =
+    l.create(creator, tc).flatMap {
+      case Right(created) => IO.pure(created)
+      case Left(rejected) => IO.raiseError(RuntimeException(s"create unexpectedly rejected: $rejected"))
+    }
 
   test("a created seek appears in the open list and reports Open to its creator"):
     for
       l              <- lobby
-      (seek, secret) <- l.create(alice, TimeControl.Fischer(300, 3))
+      (seek, secret) <- mustCreate(l, alice, TimeControl.Fischer(300, 3))
       open           <- l.list
       status         <- l.status(seek.id, secret)
     yield
@@ -23,17 +31,26 @@ class LobbySuite extends munit.CatsEffectSuite:
       assertEquals(open.head.timeControl, TimeControl.Fischer(300, 3))
       assertEquals(status, Some(Lobby.SeekStatus.Open))
 
+  test("a guest seek is an anonymous Human; a bot seek carries its public name"):
+    for
+      l          <- lobby
+      (human, _) <- mustCreate(l, alice, TimeControl.Unlimited)
+      (bot, _)   <- mustCreate(l, botFoo, TimeControl.Unlimited)
+    yield
+      assertEquals((human.kind, human.name), (PlayerKind.Human, None))
+      assertEquals((bot.kind, bot.name), (PlayerKind.Bot, Some("acme foo")))
+
   test("status requires the creator's secret"):
     for
       l         <- lobby
-      (seek, _) <- l.create(alice, TimeControl.Unlimited)
+      (seek, _) <- mustCreate(l, alice, TimeControl.Unlimited)
       wrong     <- l.status(seek.id, "nope")
     yield assertEquals(wrong, None)
 
   test("accepting seats a game and gives each side its own seat token; the seek leaves the open list"):
     for
       l              <- lobby
-      (seek, secret) <- l.create(alice, TimeControl.Unlimited)
+      (seek, secret) <- mustCreate(l, alice, TimeControl.Unlimited)
       accepted       <- l.accept(seek.id, bob)
       creatorStatus  <- l.status(seek.id, secret)
       open           <- l.list
@@ -52,7 +69,7 @@ class LobbySuite extends munit.CatsEffectSuite:
   test("a second accept is refused, and accepting an unknown seek is NotFound"):
     for
       l         <- lobby
-      (seek, _) <- l.create(alice, TimeControl.Unlimited)
+      (seek, _) <- mustCreate(l, alice, TimeControl.Unlimited)
       first     <- l.accept(seek.id, bob)
       second    <- l.accept(seek.id, Principal.Guest("carol"))
       unknown   <- l.accept("seek-999", bob)
@@ -61,10 +78,35 @@ class LobbySuite extends munit.CatsEffectSuite:
       assertEquals(second, Left(Lobby.Rejected.AlreadyTaken))
       assertEquals(unknown, Left(Lobby.Rejected.NotFound))
 
+  test("a creator cannot accept its own seek"):
+    for
+      l         <- lobby
+      (seek, _) <- mustCreate(l, botFoo, TimeControl.Unlimited)
+      own       <- l.accept(seek.id, botFoo)
+      stillOpen <- l.list
+    yield
+      assertEquals(own, Left(Lobby.Rejected.OwnSeek))
+      assertEquals(stillOpen.map(_.id), List(seek.id)) // the failed accept must not claim the seek
+
+  test("a bot's open seeks are capped; a claimed seek frees the slot"):
+    for
+      reg      <- GameRegistry.create()
+      l        <- Lobby.create(reg, maxOpenSeeksPerBot = 2)
+      _        <- mustCreate(l, botFoo, TimeControl.Unlimited)
+      (s2, _)  <- mustCreate(l, botFoo, TimeControl.Unlimited)
+      overflow <- l.create(botFoo, TimeControl.Unlimited)
+      // Guests are never capped.
+      _     <- mustCreate(l, alice, TimeControl.Unlimited)
+      _     <- l.accept(s2.id, bob)
+      retry <- l.create(botFoo, TimeControl.Unlimited)
+    yield
+      assertEquals(overflow, Left(Lobby.CreateRejected.TooManyOpenSeeks))
+      assert(retry.isRight, s"a matched seek must free the cap slot: $retry")
+
   test("cancel removes the seek only with the right secret"):
     for
       l              <- lobby
-      (seek, secret) <- l.create(alice, TimeControl.Unlimited)
+      (seek, secret) <- mustCreate(l, alice, TimeControl.Unlimited)
       badCancel      <- l.cancel(seek.id, "nope")
       stillThere     <- l.list
       goodCancel     <- l.cancel(seek.id, secret)
@@ -78,7 +120,7 @@ class LobbySuite extends munit.CatsEffectSuite:
   test("a matched seek can't be cancelled (its game already exists); the creator can still read its token"):
     for
       l              <- lobby
-      (seek, secret) <- l.create(alice, TimeControl.Unlimited)
+      (seek, secret) <- mustCreate(l, alice, TimeControl.Unlimited)
       _              <- l.accept(seek.id, bob)
       cancelled      <- l.cancel(seek.id, secret)
       status         <- l.status(seek.id, secret)
@@ -93,8 +135,21 @@ class LobbySuite extends munit.CatsEffectSuite:
     for
       reg  <- GameRegistry.create()
       l    <- Lobby.create(reg, ttl = 50.millis)
-      _    <- l.create(alice, TimeControl.Unlimited)
+      _    <- mustCreate(l, alice, TimeControl.Unlimited)
       _    <- IO.sleep(120.millis)
       _    <- l.sweep
       gone <- l.list
     yield assertEquals(gone, Nil)
+
+  test("a bot seek outlives the guest TTL — sized for a poll-only bot on a lazy timer"):
+    for
+      reg  <- GameRegistry.create()
+      l    <- Lobby.create(reg, ttl = 50.millis, botTtl = 10.seconds)
+      _    <- mustCreate(l, alice, TimeControl.Unlimited)
+      _    <- mustCreate(l, botFoo, TimeControl.Unlimited)
+      _    <- IO.sleep(120.millis)
+      _    <- l.sweep
+      left <- l.list
+    yield
+      // The quiet guest's seek is swept; the bot's standing offer survives its longer TTL.
+      assertEquals(left.map(_.kind), List(PlayerKind.Bot))

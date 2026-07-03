@@ -152,7 +152,29 @@ class CodecsSuite extends munit.FunSuite:
     )
     assertEquals(
       (GameEvent.Snapshot(9L, terminal): GameEvent).asJson.noSpaces,
-      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"},"legalMoves":null}}}"""
+      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"},"legalMoves":null,"players":null}}}"""
+    )
+
+  test("Seek and Players pin their wire shapes (who a lobby row / board is looking at)"):
+    val botSeek = Seek("seek-7", TimeControl.Unlimited, PlayerKind.Bot, Some("house greedy"))
+    roundtrip[Seek](botSeek)
+    roundtrip[Seek](Seek("seek-8", TimeControl.PerMove(10), PlayerKind.Human, None))
+    assertEquals(
+      botSeek.asJson.noSpaces,
+      """{"id":"seek-7","timeControl":{"Unlimited":{}},"kind":"Bot","name":"house greedy"}"""
+    )
+    val players = Players(PublicPlayer(PlayerKind.Bot, Some("house greedy")), PublicPlayer(PlayerKind.Human, None))
+    roundtrip[Players](players)
+    assertEquals(
+      players.asJson.noSpaces,
+      """{"white":{"kind":"Bot","name":"house greedy"},"black":{"kind":"Human","name":null}}"""
+    )
+    // A pre-upgrade recorded state (no players key) still decodes — the field is additive.
+    assertEquals(
+      decode[PublicGameState](
+        """{"version":1,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Active":{}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0","seed":null,"clientSeeds":null}"""
+      ).map(_.players),
+      Right(None)
     )
 
   test("MoveTree round-trips and pins its wire shape"):

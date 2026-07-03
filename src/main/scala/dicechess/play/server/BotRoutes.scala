@@ -37,6 +37,9 @@ final case class BotRegistered(token: String, team: String, name: String, id: St
 /** The fresh token from `POST /bot/token` (rotation). Shown exactly once; the old token is already invalid. */
 final case class RotatedToken(token: String) derives Codec.AsObject
 
+/** A bot's open-seek offer: just the time control — the identity comes from the Bearer token. */
+final case class BotCreateSeek(timeControl: Option[TimeControl] = None) derives Codec.AsObject
+
 /** The challenge-create response: the pending challenge's fields plus whether the target currently holds an account
   * stream. Advisory — an offline target can still discover the challenge via `GET /bot/challenges` until it expires.
   */
@@ -97,6 +100,7 @@ object BotRoutes:
       challenges: Challenges,
       events: BotEvents,
       registry: GameRegistry,
+      lobby: Lobby,
       limiter: AnonMintLimiter,
       registerLimiter: AnonMintLimiter
   ): HttpRoutes[IO] =
@@ -204,6 +208,36 @@ object BotRoutes:
                     BotActiveGame(id.value, st, s.activeSeat, s.dicePending, s.timeControl, s.clocks, s.version)
             })
             .flatMap(games => Ok(BotGames(games.flatten)))
+
+      // How bots meet humans (#72): post a standing public offer in the SAME lobby guests use. Hold it by polling the
+      // capability-gated GET /lobby/seeks/{id}?secret= (bot seeks get a lazier TTL, sized for a poll-only bot); once
+      // matched, the game also shows up in GET /bot/games — no seat token needed, bots are seated by principal.
+      case req @ POST -> Root / "bot" / "seeks" =>
+        withBot(auth, req): bot =>
+          req
+            .attemptAs[BotCreateSeek]
+            .value
+            .flatMap:
+              case Left(failure) => BadRequest(failure.message)
+              case Right(body)   =>
+                lobby
+                  .create(bot, body.timeControl.getOrElse(TimeControl.Unlimited))
+                  .flatMap:
+                    case Right((seek, secret))                       => Created(CreatedSeek(seek.id, secret))
+                    case Left(Lobby.CreateRejected.TooManyOpenSeeks) =>
+                      TooManyRequests("too many open seeks — cancel one or let them expire")
+
+      // The mirror flow: a bot accepts an open (human- or bot-created) seek.
+      case req @ POST -> Root / "bot" / "seeks" / id / "accept" =>
+        withBot(auth, req): bot =>
+          lobby
+            .accept(id, bot)
+            .flatMap:
+              case Right(m)                           => Created(BotGame(m.gameId))
+              case Left(Lobby.Rejected.NotFound)      => NotFound()
+              case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
+              case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
+              case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case req @ POST -> Root / "bot" / "challenge" / id / "accept" =>
         withBot(auth, req): bot =>

@@ -44,9 +44,12 @@ object LobbyRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              lobby.create(Principal.Guest(body.creator), body.timeControl.getOrElse(TimeControl.Unlimited)).flatMap {
-                case (seek, secret) => Created(CreatedSeek(seek.id, secret))
-              }
+              lobby
+                .create(Principal.Guest(body.creator), body.timeControl.getOrElse(TimeControl.Unlimited))
+                .flatMap:
+                  case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
+                  // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
+                  case Left(Lobby.CreateRejected.TooManyOpenSeeks) => TooManyRequests("too many open seeks")
 
       case GET -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>
         secret match
@@ -72,6 +75,7 @@ object LobbyRoutes:
                   case Right(m)                           => Created(SeekMatch(m.gameId, m.token))
                   case Left(Lobby.Rejected.NotFound)      => NotFound()
                   case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
+                  case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
                   case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case DELETE -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>

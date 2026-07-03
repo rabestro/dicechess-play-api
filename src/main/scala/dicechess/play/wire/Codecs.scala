@@ -23,6 +23,7 @@ object Codecs:
   given Codec[Side]        = nameCodec("Side", Side.values)
   given Codec[Seat]        = nameCodec("Seat", Seat.values)
   given Codec[Termination] = nameCodec("Termination", Termination.values)
+  given Codec[PlayerKind]  = nameCodec("PlayerKind", PlayerKind.values)
 
   // MoveTree is recursive, so it can't be derived: a node encodes as the plain object of its children (sorted for a
   // stable wire), and any JSON object decodes back into nodes.
@@ -42,6 +43,8 @@ object Codecs:
   given Codec[Clocks]          = deriveCodec
   given Codec[ClientSeeds]     = deriveCodec
   given Codec[Principal]       = deriveCodec
+  given Codec[PublicPlayer]    = deriveCodec
+  given Codec[Players]         = deriveCodec
   given Codec[PublicGameState] = deriveCodec
   given Codec[GameMoves]       = deriveCodec
   given Codec[GameCommand]     = deriveCodec
