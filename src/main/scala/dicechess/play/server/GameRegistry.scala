@@ -15,11 +15,19 @@ import scala.concurrent.duration.FiniteDuration
   */
 final class GameRegistry private (
     rooms: Ref[IO, Map[GameId, GameRoom]],
+    byPlayer: Ref[IO, Map[Principal, Set[GameId]]],
     disconnectGrace: FiniteDuration,
     store: GameStore
 ):
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
+
+  /** The live games `principal` is seated in — an index lookup plus O(own games), not a scan over every room on the
+    * node: bot discovery polls this on a timer, so its cost must not grow with everyone else's games.
+    */
+  def gamesFor(principal: Principal): IO[List[(GameId, GameRoom)]] =
+    (byPlayer.get.map(_.getOrElse(principal, Set.empty)), rooms.get).mapN: (ids, all) =>
+      ids.toList.sortBy(_.value).flatMap(id => all.get(id).map(id -> _))
 
   /** Create and start a room for two players. Dice come from a fresh commit-reveal source whose server seed is
     * committed before any client connects; each player then folds in its own post-commit seed (see GameRoom's gate).
@@ -62,13 +70,27 @@ final class GameRegistry private (
       .map(_.sum)
 
   private def register(id: GameId, room: GameRoom): IO[Unit] =
-    rooms.update(_.updated(id, room)) *>
-      // Evict the room once its game ends, so the map doesn't grow without bound.
-      (room.result *> rooms.update(_.removed(id))).start.void
+    room.seating.flatMap: seats =>
+      val players = seats.values.toList
+      rooms.update(_.updated(id, room)) *>
+        byPlayer.update(index =>
+          players.foldLeft(index)((acc, p) => acc.updated(p, acc.getOrElse(p, Set.empty) + id))
+        ) *>
+        // Evict the room (and its index entries) once its game ends, so neither map grows without bound.
+        (room.result *> deregister(id, players)).start.void
+
+  private def deregister(id: GameId, players: List[Principal]): IO[Unit] =
+    rooms.update(_.removed(id)) *>
+      byPlayer.update(index =>
+        players.foldLeft(index): (acc, p) =>
+          val rest = acc.getOrElse(p, Set.empty) - id
+          if rest.isEmpty then acc.removed(p) else acc.updated(p, rest)
+      )
 
 object GameRegistry:
   def create(
       disconnectGrace: FiniteDuration = GameRoom.DefaultDisconnectGrace,
       store: GameStore = GameStore.noop
   ): IO[GameRegistry] =
-    Ref.of[IO, Map[GameId, GameRoom]](Map.empty).map(GameRegistry(_, disconnectGrace, store))
+    (Ref.of[IO, Map[GameId, GameRoom]](Map.empty), Ref.of[IO, Map[Principal, Set[GameId]]](Map.empty))
+      .mapN(GameRegistry(_, _, disconnectGrace, store))

@@ -1,7 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{BotEvent, Challenge, Principal}
+import dicechess.play.core.{BotEvent, Principal, Seat}
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
@@ -13,15 +13,18 @@ import scala.concurrent.duration.*
 
 class BotRoutesSuite extends munit.CatsEffectSuite:
 
-  private def appWith(limiter: AnonMintLimiter): IO[HttpApp[IO]] =
+  private def appWith(
+      limiter: AnonMintLimiter,
+      maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot
+  ): IO[HttpApp[IO]] =
     for
       auth       <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
       events     <- BotEvents.create
       registry   <- GameRegistry.create()
-      challenges <- Challenges.create(events, registry)
+      challenges <- Challenges.create(events, registry, maxPendingPerBot = maxPendingPerBot)
     yield BotRoutes(auth, challenges, events, registry, limiter).orNotFound
 
-  private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith)
+  private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith(_))
 
   private def request(method: Method, uri: Uri, token: Option[String]): Request[IO] =
     val base = Request[IO](method, uri)
@@ -51,7 +54,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
   test("POST /bot/anon is rate-limited per client (429 + Retry-After)"):
     AnonMintLimiter
       .create(limit = 2)
-      .flatMap(appWith)
+      .flatMap(appWith(_))
       .flatMap: service =>
         val mint = Request[IO](Method.POST, uri"/bot/anon")
         for
@@ -73,10 +76,10 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(noAuth, Status.Unauthorized)
         assertEquals(badToken, Status.Unauthorized)
 
-  private def challengeBobAsAlice(service: HttpApp[IO]): IO[Challenge] =
+  private def challengeBobAsAlice(service: HttpApp[IO]): IO[ChallengeCreated] =
     service
       .run(request(Method.POST, uri"/bot/challenge", Some("tok-alice")).withEntity(ChallengeTarget("acme", "bob")))
-      .flatMap(_.as[Challenge])
+      .flatMap(_.as[ChallengeCreated])
 
   /** Alice challenges Bob and Bob accepts; yields the seated game's id. */
   private def seatedGame(service: HttpApp[IO]): IO[String] =
@@ -110,11 +113,89 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(challenge.challenger, Principal.Bot("acme", "alice"))
         assertEquals(challenge.target, Principal.Bot("acme", "bob"))
         assert(challenge.id.nonEmpty)
+        // Nobody holds an account stream in this app — advisory only, the entry is still pending and pollable.
+        assertEquals(challenge.targetOnline, false)
 
   test("POST /bot/challenge is 401 without a token"):
     app
       .flatMap(_.run(request(Method.POST, uri"/bot/challenge", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  test("a bot challenging itself is a 400"):
+    app
+      .flatMap(
+        _.run(request(Method.POST, uri"/bot/challenge", Some("tok-alice")).withEntity(ChallengeTarget("acme", "alice")))
+      )
+      .map(r => assertEquals(r.status, Status.BadRequest))
+
+  test("the pending-challenge cap answers 429"):
+    AnonMintLimiter
+      .create(limit = 100)
+      .flatMap(appWith(_, maxPendingPerBot = 1))
+      .flatMap: service =>
+        for
+          first <- service.run(
+            request(Method.POST, uri"/bot/challenge", Some("tok-alice")).withEntity(ChallengeTarget("acme", "bob"))
+          )
+          overflow <- service.run(
+            request(Method.POST, uri"/bot/challenge", Some("tok-alice")).withEntity(ChallengeTarget("acme", "carol"))
+          )
+        yield
+          assertEquals(first.status, Status.Created)
+          assertEquals(overflow.status, Status.TooManyRequests)
+
+  test("GET /bot/challenges lists pending challenges as in/out for the caller"):
+    app.flatMap: service =>
+      for
+        created <- challengeBobAsAlice(service)
+        alice <- service.run(request(Method.GET, uri"/bot/challenges", Some("tok-alice"))).flatMap(_.as[BotChallenges])
+        bob   <- service.run(request(Method.GET, uri"/bot/challenges", Some("tok-bob"))).flatMap(_.as[BotChallenges])
+        carol <- service.run(request(Method.GET, uri"/bot/challenges", Some("tok-carol"))).flatMap(_.as[BotChallenges])
+      yield
+        assertEquals(alice.out.map(_.id), List(created.id)) // the challenger watches its outgoing challenge
+        assertEquals(alice.in, Nil)
+        assertEquals(bob.in.map(_.id), List(created.id)) // the target discovers it by polling — no stream needed
+        assertEquals(bob.out, Nil)
+        assertEquals(carol, BotChallenges(Nil, Nil)) // uninvolved bots see nothing
+
+  test("GET /bot/challenges is 401 without a token"):
+    app
+      .flatMap(_.run(request(Method.GET, uri"/bot/challenges", None)))
+      .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  test("GET /bot/games lists only the games the caller is seated in"):
+    app.flatMap: service =>
+      for
+        gameId <- seatedGame(service)
+        alice  <- service.run(request(Method.GET, uri"/bot/games", Some("tok-alice"))).flatMap(_.as[BotGames])
+        bob    <- service.run(request(Method.GET, uri"/bot/games", Some("tok-bob"))).flatMap(_.as[BotGames])
+        carol  <- service.run(request(Method.GET, uri"/bot/games", Some("tok-carol"))).flatMap(_.as[BotGames])
+      yield
+        // Both players recover the game (and their seat) with no stream held — the post-restart resume path.
+        assertEquals(alice.games.map(g => (g.gameId, g.seat)), List((gameId, Seat.White)))
+        assertEquals(bob.games.map(g => (g.gameId, g.seat)), List((gameId, Seat.Black)))
+        assertEquals(carol.games, Nil)
+
+  test("GET /bot/games is 401 without a token"):
+    app
+      .flatMap(_.run(request(Method.GET, uri"/bot/games", None)))
+      .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  test("a finished game leaves the listing (the player index is evicted with the room)"):
+    app.flatMap: service =>
+      def pollEmpty: IO[Unit] =
+        service
+          .run(request(Method.GET, uri"/bot/games", Some("tok-alice")))
+          .flatMap(_.as[BotGames])
+          .flatMap(listed => if listed.games.isEmpty then IO.unit else IO.sleep(50.millis) *> pollEmpty)
+      for
+        gameId <- seatedGame(service)
+        before <- service.run(request(Method.GET, uri"/bot/games", Some("tok-alice"))).flatMap(_.as[BotGames])
+        _ = assertEquals(before.games.map(_.gameId), List(gameId))
+        _ <- service.run(request(Method.POST, uri"/bot/game" / gameId / "resign", Some("tok-alice")))
+        // Eviction runs on the room-result fiber, so it lands shortly after the resign — poll until it does.
+        _ <- pollEmpty.timeoutTo(5.seconds, IO.raiseError(RuntimeException("the finished game was never evicted")))
+      yield ()
 
   test("the challenged bot accepts and receives a game id"):
     app.flatMap: service =>

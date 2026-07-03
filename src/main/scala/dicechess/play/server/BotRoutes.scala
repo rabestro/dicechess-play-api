@@ -1,7 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{GameCommand, GameId, Principal, Seat, TimeControl}
+import cats.syntax.all.*
+import dicechess.play.core.{Challenge, Clocks, GameCommand, GameId, GameStatus, Principal, Seat, TimeControl}
 import dicechess.play.game.GameRoom
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
@@ -10,7 +11,7 @@ import io.circe.syntax.*
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
 import org.http4s.headers.{Authorization, `Content-Type`, `Retry-After`, `WWW-Authenticate`}
-import org.http4s.{AuthScheme, Challenge, Credentials, HttpRoutes, MediaType, Request, Response}
+import org.http4s.{AuthScheme, Challenge as HttpChallenge, Credentials, HttpRoutes, MediaType, Request, Response}
 import org.typelevel.ci.*
 
 import scala.concurrent.duration.*
@@ -25,12 +26,41 @@ final case class BotSeed(seed: String) derives Codec.AsObject
 /** Credentials returned by `POST /bot/anon`: the Bearer token plus the minted anonymous identity. */
 final case class AnonBot(token: String, team: String, name: String, id: String) derives Codec.AsObject
 
+/** The challenge-create response: the pending challenge's fields plus whether the target currently holds an account
+  * stream. Advisory — an offline target can still discover the challenge via `GET /bot/challenges` until it expires.
+  */
+final case class ChallengeCreated(
+    id: String,
+    challenger: Principal,
+    target: Principal,
+    timeControl: TimeControl,
+    targetOnline: Boolean
+) derives Codec.AsObject
+
+/** The caller's pending challenges: addressed to it (`in` — accept/decline by id) and created by it (`out`). */
+final case class BotChallenges(in: List[Challenge], out: List[Challenge]) derives Codec.AsObject
+
+/** A live game the caller is seated in — enough to decide whether to act; fetch `GET /games/{id}` for the position and
+  * `GET /games/{id}/moves` for the legal-move tree.
+  */
+final case class BotActiveGame(
+    gameId: String,
+    seat: Seat,
+    activeSeat: Seat,
+    dicePending: Boolean,
+    timeControl: TimeControl,
+    clocks: Option[Clocks],
+    version: Long
+) derives Codec.AsObject
+
+final case class BotGames(games: List[BotActiveGame]) derives Codec.AsObject
+
 /** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, the challenge lifecycle, and the game
   * play surface (game event stream + move/resign).
   */
 object BotRoutes:
 
-  private val bearerChallenge = `WWW-Authenticate`(Challenge("Bearer", "dicechess-bot"))
+  private val bearerChallenge = `WWW-Authenticate`(HttpChallenge("Bearer", "dicechess-bot"))
   private val ndjsonType      = MediaType.unsafeParse("application/x-ndjson")
 
   /** ndjson keep-alive cadence — under the ember server's 60s read-idle so an idle stream (a bot waiting for a
@@ -81,7 +111,37 @@ object BotRoutes:
                     Principal.Bot(target.team, target.name),
                     target.timeControl.getOrElse(TimeControl.Unlimited)
                   )
-                  .flatMap(Created(_))
+                  .flatMap:
+                    case Right(created) =>
+                      val ch = created.challenge
+                      Created(ChallengeCreated(ch.id, ch.challenger, ch.target, ch.timeControl, created.targetOnline))
+                    case Left(Challenges.CreateRejected.SelfChallenge) =>
+                      BadRequest("a bot cannot challenge itself")
+                    case Left(Challenges.CreateRejected.TooManyPending) =>
+                      TooManyRequests("too many pending challenges — accept, decline, or let them expire")
+
+      // The polling counterpart of the account stream: pending challenges involving the caller. `in` entries are
+      // claimable by id; an `out` entry vanishing means it was accepted (see GET /bot/games), declined, or expired.
+      case req @ GET -> Root / "bot" / "challenges" =>
+        withBot(auth, req): bot =>
+          challenges.listFor(bot).flatMap((in, out) => Ok(BotChallenges(in, out)))
+
+      // The polling counterpart of `GameStart` — and the post-restart recovery path: every live game the caller is
+      // seated in, whether or not it ever saw the start event. The registry serves this from a per-player index, so
+      // the cost is O(the caller's games), not O(every game on the node).
+      case req @ GET -> Root / "bot" / "games" =>
+        withBot(auth, req): bot =>
+          registry
+            .gamesFor(bot)
+            .flatMap(_.traverse { (id, room) =>
+              (seatOf(room, bot), room.snapshot).mapN: (seat, s) =>
+                // A just-ended room can linger until the registry evicts it; a listing is for live games only.
+                seat
+                  .filter(_ => s.status == GameStatus.Active)
+                  .map: st =>
+                    BotActiveGame(id.value, st, s.activeSeat, s.dicePending, s.timeControl, s.clocks, s.version)
+            })
+            .flatMap(games => Ok(BotGames(games.flatten)))
 
       case req @ POST -> Root / "bot" / "challenge" / id / "accept" =>
         withBot(auth, req): bot =>
