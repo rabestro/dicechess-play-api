@@ -64,9 +64,9 @@ object Main extends IOApp.Simple:
       mintLimit  <- AnonMintLimiter.create()
       lobby      <- Lobby.create(registry)
       cors       <- Cors.fromEnv
-      // The seek-sweeper and the ingest deliverer are scoped to the server: they run while it runs and are cancelled
-      // with it, so a failure surfaces instead of being silently dropped by a detached fiber.
-      _ <- (deliverer.background, lobby.sweeper().background).tupled
+      // The sweepers (seeks, pending challenges) and the ingest deliverer are scoped to the server: they run while it
+      // runs and are cancelled with it, so a failure surfaces instead of being silently dropped by a detached fiber.
+      _ <- (deliverer.background, lobby.sweeper().background, challenges.sweeper().background).tupled
         .surround:
           EmberServerBuilder
             .default[IO]

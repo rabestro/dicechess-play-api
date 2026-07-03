@@ -21,6 +21,9 @@ final class GameRegistry private (
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
 
+  /** Every live room, for listings — one entry per active game on this node, so the map stays small. */
+  def list: IO[List[(GameId, GameRoom)]] = rooms.get.map(_.toList)
+
   /** Create and start a room for two players. Dice come from a fresh commit-reveal source whose server seed is
     * committed before any client connects; each player then folds in its own post-commit seed (see GameRoom's gate).
     * Errors (e.g. a bad initial position) are returned as a Left, never thrown.

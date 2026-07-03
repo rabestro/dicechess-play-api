@@ -160,7 +160,52 @@ Mints an ephemeral, unranked token.
     },
     "timeControl": {
       "Unlimited": {}
-    }
+    },
+    "targetOnline": true
+  }
+  ```
+  `targetOnline` says whether the target currently holds an account stream — advisory only: an offline target can
+  still discover the challenge by polling [`GET /bot/challenges`](#list-pending-challenges) until it expires.
+- **Errors:** `400 Bad Request` — challenging yourself; `429 Too Many Requests` — too many pending challenges
+  (accept, decline, or let them expire).
+- **Expiry:** an unclaimed challenge expires after **~5 minutes**; the challenger then receives `ChallengeDeclined`
+  on its event stream (a polling challenger sees the entry vanish from its `out` list).
+
+#### List Pending Challenges
+`GET /bot/challenges`
+
+The polling counterpart of the event stream: every pending challenge involving the caller. `in` entries are addressed
+to you (accept or decline by id); `out` entries are yours (watch their fate — one vanishing means it was accepted, so
+check [`GET /bot/games`](#list-my-games), declined, or expired). A bot that was offline when `ChallengeReceived` was
+pushed recovers it here.
+- **Response:** `200 OK`
+  ```json
+  {
+    "in": [{"id": "challenge-7", "challenger": {"Bot": {"team": "acme", "name": "rival"}},
+            "target": {"Bot": {"team": "anon", "name": "mybot-8b7a6c5d"}}, "timeControl": {"Unlimited": {}}}],
+    "out": []
+  }
+  ```
+
+#### List My Games
+`GET /bot/games`
+
+Every live game the caller is seated in — the polling counterpart of `GameStart` and the **post-restart recovery
+path**: games survive a server restart, and this listing finds them again even if the start event was never seen.
+Enough to decide whether to act; fetch [`GET /games/{id}`](#game-event-stream) for the position and
+[`GET /games/{id}/moves`](#get-legal-moves) for the legal turns.
+- **Response:** `200 OK`
+  ```json
+  {
+    "games": [{
+      "gameId": "game-uuid",
+      "seat": "White",
+      "activeSeat": "White",
+      "dicePending": true,
+      "timeControl": {"Unlimited": {}},
+      "clocks": null,
+      "version": 17
+    }]
   }
   ```
 
@@ -246,6 +291,14 @@ Both event streams return `application/x-ndjson` (Newline Delimited JSON).
 `GET /bot/stream/event`
 
 Long-lived stream for incoming challenges and game starts.
+
+The stream is **live-only** (events published while you are disconnected are not replayed), but it is no longer the
+only source of truth: [`GET /bot/challenges`](#list-pending-challenges) and [`GET /bot/games`](#list-my-games) recover
+the same facts by polling. A **poll-only bot** — e.g. a cron-triggered cloud function that never holds a stream — can
+play entirely without it: wake → list challenges → accept → list games → for each game where `dicePending` and
+`activeSeat` is yours, fetch the [legal moves](#legal-moves) and submit a turn → sleep. Mind the clocks: for
+`Unlimited` games the 120s anti-abandonment cap makes a ~1-minute timer sufficient; short time controls need the
+stream (or faster polling) to stay ahead of the clock.
 
 - **Events:**
   - **ChallengeReceived:**

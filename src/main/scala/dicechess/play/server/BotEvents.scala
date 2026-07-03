@@ -20,6 +20,12 @@ final class BotEvents private (subscribers: Ref[IO, Map[Long, BotEvents.Sub]], n
       .resource(Resource.make(register(principal))(sub => unregister(sub.id)))
       .flatMap(sub => Stream.fromQueueUnterminated(sub.queue).interruptWhen(sub.dropped.get.attempt))
 
+  /** Whether `principal` currently holds at least one live account stream — advisory presence (a bot may also be a
+    * poller that never streams; absence here is not absence from the platform).
+    */
+  def online(principal: Principal): IO[Boolean] =
+    subscribers.get.map(_.values.exists(_.principal == principal))
+
   /** Deliver an event to every live stream addressed to `target`; a laggard is dropped, never blocking the caller. */
   def publish(target: Principal, event: BotEvent): IO[Unit] =
     subscribers.get.flatMap: subs =>
