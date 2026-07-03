@@ -30,13 +30,11 @@ object EngineOps:
     move.fromSquare.toNotation + move.toSquare.toNotation +
       move.promotionPieceType.map(_.asNotation).getOrElse("")
 
-  /** All legal turns for the current dice pool, as engine `Move` paths. */
+  /** All legal turns for the current dice pool, as engine `Move` paths. Enumerated once per roll by the room (which
+    * caches the result for wire exposure and submit validation) — never per submitted command.
+    */
   def legalMovePaths(state: GameState): List[List[Move]] =
     TurnGenerator.generateAllLegalTurnPaths(state)
-
-  /** The legal turn whose UCI sequence equals `uci`, if any. */
-  def findLegalPath(state: GameState, uci: List[String]): Option[List[Move]] =
-    legalMovePaths(state).find(_.map(toUci) == uci)
 
   /** Applies a chosen path of micro-moves. Returns the resulting state and the winning side if the opponent's king was
     * captured — in which case `endTurn()` is deliberately NOT called, because the game is already over.

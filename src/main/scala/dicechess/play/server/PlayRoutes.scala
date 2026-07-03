@@ -67,6 +67,16 @@ object PlayRoutes:
             case None       => NotFound()
             case Some(room) => room.snapshot.flatMap(Ok(_))
 
+      // Public like the state snapshot above — legal moves are a pure function of the already-public DFEN. Always the
+      // full tree: this is the fallback when the inline `legalMoves` on DiceRolled/Snapshot was elided by the cap,
+      // and the primary source for polling bots.
+      case GET -> Root / "games" / id / "moves" =>
+        registry
+          .get(GameId(id))
+          .flatMap:
+            case None       => NotFound()
+            case Some(room) => room.legalMoves.flatMap(Ok(_))
+
       // The seat is resolved from a verified join token; a tokenless connection is a read-only spectator.
       case GET -> Root / "games" / id / "ws" :? TokenParam(token) =>
         registry

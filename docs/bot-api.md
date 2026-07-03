@@ -60,7 +60,36 @@ Dice Chess uses DFEN to represent positions with rolled dice. It extends standar
   - `6` → King (`k` / `K`)
 - The letters are sorted numerically by their die value and capitalized for White, lowercase for Black.
 - *Example:* If it is White's turn and the rolled dice are `[2, 3, 6]`, the 7th field is `NBK`.
-- Compute legal moves using the engine for these dice and submit them.
+- You do **not** need to compute legal moves yourself: the server publishes them with every roll (see [Legal Moves](#legal-moves)).
+
+### Legal Moves
+
+The server enumerates every legal turn for the pending roll and puts it on the wire, so a bot needs **no rules
+implementation of its own** — in any language.
+
+The shape is a **prefix tree of UCI micro-moves**: each key is a micro-move, its value is the tree of legal
+continuations.
+
+```json
+{"e2e4": {"g1f3": {}, "b1c3": {}}, "d2d4": {"d4d5": {}}}
+```
+
+- **A node with no children (`{}`) is a complete legal turn**: walk any root-to-leaf path and submit it as `moves`.
+  This is safe because every legal turn uses the maximal number of dice (the *Maximum Micro-moves Rule* is already
+  applied), except a turn that captures the king — which ends the game and is always a leaf.
+- **An empty tree (`{}` at the top level)** means the roll has no legal move: the server auto-passes on its own —
+  submit nothing.
+- **`null`** (only on the inline copies) means the enumeration was too large to inline — fetch the full tree from
+  [`GET /games/{id}/moves`](#get-legal-moves).
+
+The tree rides in three places:
+1. `DiceRolled.legalMoves` — with every roll.
+2. `Snapshot.state.legalMoves` (and the public `GET /games/{id}` snapshot) — while `dicePending` is true, so a
+   (re)joining or polling bot can act from the snapshot alone.
+3. [`GET /games/{id}/moves`](#get-legal-moves) — always the full tree, never capped.
+
+A complete random bot is therefore just: read the tree, walk root→leaf picking a random child at each node, and
+`POST` the path — no engine, no DFEN parsing required.
 
 ---
 
@@ -184,6 +213,27 @@ Submits the turn's micro-moves in UCI notation. Submit one move per rolled die.
 
 - **Response:** `202 Accepted`
 
+#### Get Legal Moves
+`GET /games/{id}/moves`
+
+The full [legal-move tree](#legal-moves) for the game's pending roll — never capped, unlike the inline copies on
+`DiceRolled`/`Snapshot`. Public (no `Authorization` header needed): legal moves are a pure function of the
+already-public position.
+
+- **Response:** `200 OK`
+  ```json
+  {
+    "version": 4,
+    "dfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 NBK",
+    "dicePending": true,
+    "legalMoves": {"b1c3": {"g1f3": {"e2e4": {}}}, "e2e4": {"b1c3": {"g1f3": {}}}}
+  }
+  ```
+  `version` and `dfen` tie the tree to the roll it answers (compare with the `v` of the `DiceRolled` you are acting
+  on). `legalMoves` is `{}` when `dicePending` is `false` (between turns or after the game ends) or when the roll is
+  a forced pass.
+- **Errors:** `404 Not Found` — unknown game id.
+
 ---
 
 ## Streaming Endpoints (ndjson)
@@ -236,12 +286,13 @@ Long-lived stream for a specific game's state transitions.
           "clocks": null,
           "commit": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
           "seed": null,
-          "clientSeeds": null
+          "clientSeeds": null,
+          "legalMoves": null
         }
       }
     }
     ```
-    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`).
+    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`). While `dicePending` is `true`, `legalMoves` carries the pending roll's [legal-move tree](#legal-moves) (or `null` if it was too large to inline — fetch [`GET /games/{id}/moves`](#get-legal-moves)).
   - **DiceRolled** (Server rolled dice for a player's turn):
     ```json
     {
@@ -250,11 +301,13 @@ Long-lived stream for a specific game's state transitions.
         "seat": "White",
         "dice": [2, 3, 6],
         "dfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 NBK",
-        "clocks": {"white": 180000, "black": 175000}
+        "clocks": {"white": 180000, "black": 175000},
+        "legalMoves": {"b1c3": {"g1f3": {"e2e4": {}}}, "e2e4": {"b1c3": {"g1f3": {}}}}
       }
     }
     ```
     `clocks` is remaining milliseconds per side, or `null` for an `Unlimited` game. It rides on every `Snapshot` and `DiceRolled`; the side to move keeps ticking, so count down locally between events. On a flag-fall the game ends with `termination: "Timeout"` and the loser's clock at `0`.
+    `legalMoves` is the roll's [legal-move tree](#legal-moves): walk any root-to-leaf path and submit it. `{}` = no legal move (the server auto-passes; submit nothing); `null` = too large to inline, fetch [`GET /games/{id}/moves`](#get-legal-moves).
   - **TurnPlayed** (Turn moves applied):
     ```json
     {
@@ -347,7 +400,7 @@ Replace `<gameId>` with the ID from the `GameStart` event:
 ```bash
 curl -N -H "Authorization: Bearer $T" https://play-api.jc.id.lv/bot/game/stream/<gameId>
 ```
-On each `DiceRolled` event where the `seat` matches your bot, compute the best turn path and submit it.
+On each `DiceRolled` event where the `seat` matches your bot, pick a turn from its `legalMoves` tree (any root-to-leaf path) and submit it; if `legalMoves` is `null` (over the inline cap), fetch the full tree from `GET /games/{id}/moves` first.
 
 ### 5. Submit Your Dice Seed (Terminal 2)
 As soon as the game starts — before the opening roll — contribute your entropy for the provably-fair dice:

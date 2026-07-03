@@ -94,6 +94,68 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
         assertEquals(tState.timeControl, TimeControl.Fischer(300, 3)) // forward-compat: recorded, not yet enforced
 
+  test("GET /games/{id}/moves serves the full legal-move tree for the pending roll"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+      yield (port, http)
+
+    resources.use: (port, http) =>
+      val base = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), base / "games"))
+        // Creation alone never rolls (the room waits for Begin via a WS attach or the seed grace), so the tree is
+        // empty while no roll is pending — and the endpoint says so instead of 404ing.
+        idle    <- http.expect[GameMoves](base / "games" / created.gameId / "moves")
+        missing <- http.status(GET(base / "games" / "nope" / "moves"))
+      yield
+        assertEquals(idle.dicePending, false)
+        assertEquals(idle.legalMoves, MoveTree.empty)
+        assertEquals(missing, Status.NotFound)
+
+  test("GET /games/{id}/moves carries the pending roll's tree once the game rolls"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+        ws   <- Resource.eval(JdkWSClient.simple[IO])
+      yield (port, http, ws)
+
+    resources.use: (port, http, ws) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
+
+      // Poll until a roll with a real decision is pending (auto-passes flip `dicePending` only transiently).
+      def pollMovable(uri: Uri): IO[GameMoves] =
+        http
+          .expect[GameMoves](uri)
+          .flatMap: moves =>
+            if moves.dicePending && moves.legalMoves.children.nonEmpty then IO.pure(moves)
+            else IO.sleep(100.millis) *> pollMovable(uri)
+
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        blackUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.Black))
+        moves <- (
+          ws.connectHighLevel(WSRequest(whiteUri)),
+          ws.connectHighLevel(WSRequest(blackUri))
+        ).tupled.use: (white, black) =>
+          // Seed both seats (opens the opening-roll gate), then wait for a movable roll while both sockets stay
+          // attached (a dropped seat would forfeit after the test server's short reconnect grace).
+          send(white, GameCommand.SubmitSeed("client-seed-White-0123456789")) *>
+            send(black, GameCommand.SubmitSeed("client-seed-Black-0123456789")) *>
+            pollMovable(httpBase / "games" / created.gameId / "moves")
+              .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no movable roll became pending")))
+      yield
+        // The served tree is exactly the engine's enumeration for the DFEN the endpoint itself reported.
+        val expected = EngineOps.parse(moves.dfen) match
+          case Left(error)  => fail(s"endpoint dfen must parse: $error")
+          case Right(state) =>
+            MoveTree.fromPaths(EngineOps.legalMovePaths(state).map(_.map(EngineOps.toUci)))
+        assertEquals(moves.legalMoves, expected)
+
   test("POST /games rejects a malformed body with 400, not 500"):
     val resources =
       for
@@ -298,6 +360,6 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     conn.send(WSFrame.Text((command: GameCommand).asJson.noSpaces))
 
   private def turnFor(seat: Seat, event: GameEvent): Option[(Long, String)] = event match
-    case GameEvent.DiceRolled(v, s, _, dfen, _) if s == seat                  => Some((v, dfen))
+    case GameEvent.DiceRolled(v, s, _, dfen, _, _) if s == seat               => Some((v, dfen))
     case GameEvent.Snapshot(v, ps) if ps.dicePending && ps.activeSeat == seat => Some((v, ps.dfen))
     case _                                                                    => None

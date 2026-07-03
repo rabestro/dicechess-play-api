@@ -1,10 +1,11 @@
 package dicechess.play.game
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import dicechess.engine.search.BotRegistry
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
+import dicechess.play.store.GameSnapshot
 
 import java.security.MessageDigest
 import scala.concurrent.duration.*
@@ -239,3 +240,133 @@ class GameRoomSuite extends munit.CatsEffectSuite:
             .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no game-end event")))
       }
       .map(event => assertEquals(event.clientSeeds, ClientSeeds(seedW, seedB)))
+
+  /** Any root-to-leaf walk of the wire tree — a complete legal turn by construction. */
+  private def leafPath(tree: MoveTree): List[String] =
+    tree.children.headOption match
+      case None              => Nil
+      case Some((uci, next)) => uci :: leafPath(next)
+
+  /** The engine's own enumeration for a DFEN, as the wire tree — the independent oracle the events must agree with. */
+  private def treeFor(dfen: String): MoveTree =
+    EngineOps.parse(dfen) match
+      case Left(error)  => fail(s"event dfen must parse: $error")
+      case Right(state) => MoveTree.fromPaths(EngineOps.legalMovePaths(state).map(_.map(EngineOps.toUci)))
+
+  /** Seed both seats (instant roll, deterministic dice), start, and hand back the first roll with a real decision —
+    * auto-passes stream by on their own until one arrives.
+    */
+  private def firstMovableRoll(room: GameRoom): IO[GameEvent.DiceRolled] =
+    val movable = room.subscribe
+      .collectFirst { case r: GameEvent.DiceRolled if r.legalMoves.exists(_.children.nonEmpty) => r }
+      .compile
+      .lastOrError
+    val drive =
+      room.submit(Seat.White, GameCommand.SubmitSeed(seedW)) *>
+        room.submit(Seat.Black, GameCommand.SubmitSeed(seedB)) *>
+        room.start
+    (movable, drive)
+      .parMapN((roll, _) => roll)
+      .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no movable roll arrived")))
+
+  test("DiceRolled carries the legal-move tree, and submits validate against the cached paths"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
+    GameRoom
+      .create(seats, dice, seedGrace = 10.seconds, maxInlinePaths = Int.MaxValue)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          firstMovableRoll(room).flatMap { roll =>
+            // The inline tree is exactly the engine's enumeration for the event's own DFEN...
+            assertEquals(roll.legalMoves, Some(treeFor(roll.dfen)))
+            val path = leafPath(roll.legalMoves.get)
+            // ...and GET /games/{id}/moves serves the same tree, tied to the same roll.
+            room.legalMoves.flatMap { full =>
+              assert(full.dicePending)
+              assertEquals(full.legalMoves, roll.legalMoves.get)
+              // An off-tree turn is rejected from the cache; a root-to-leaf walk is accepted — in submit order.
+              val outcomes = room.subscribe
+                .collect {
+                  case e: GameEvent.Rejected   => Left(e.reason)
+                  case e: GameEvent.TurnPlayed => Right(e.moves)
+                }
+                .take(2)
+                .compile
+                .toList
+              // Let the outcome subscription register before submitting (same idiom as the resign tests above).
+              val submits =
+                IO.sleep(100.millis) *>
+                  room.submit(roll.seat, GameCommand.SubmitTurn(List("a1a1"))) *>
+                  room.submit(roll.seat, GameCommand.SubmitTurn(path))
+              (outcomes, submits)
+                .parMapN((seen, _) => seen)
+                .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no submit outcomes arrived")))
+                .map(seen => assertEquals(seen, List(Left("illegal turn"), Right(path))))
+            }
+          }
+      }
+
+  test("above the inline cap the tree is elided from events but stays fully queryable"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
+    GameRoom
+      // Cap 0: every movable roll's tree is elided (a forced pass — zero paths — would still ride inline).
+      .create(seats, dice, seedGrace = 10.seconds, maxInlinePaths = 0)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          val elided = room.subscribe
+            .collectFirst { case r: GameEvent.DiceRolled if r.legalMoves.isEmpty => r }
+            .compile
+            .lastOrError
+          val drive =
+            room.submit(Seat.White, GameCommand.SubmitSeed(seedW)) *>
+              room.submit(Seat.Black, GameCommand.SubmitSeed(seedB)) *>
+              room.start
+          (elided, drive)
+            .parMapN((roll, _) => roll)
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no elided roll arrived")))
+            .flatMap { roll =>
+              (room.legalMoves, room.snapshot).mapN { (full, snap) =>
+                // The event elided the tree, but the dedicated endpoint still has all of it...
+                assertEquals(full.legalMoves, treeFor(roll.dfen))
+                assert(full.legalMoves.children.nonEmpty)
+                // ...and the capped Snapshot elides it the same way as the event did.
+                assert(snap.dicePending)
+                assertEquals(snap.legalMoves, None)
+              }
+            }
+      }
+
+  test("a restored room recomputes the pending roll's paths: tree served, submits validated"):
+    val dice = DiceSource.commitReveal("restore-seed-fixture".getBytes("UTF-8"))
+    for
+      stored <- Ref.of[IO, Option[GameSnapshot]](None)
+      room   <- GameRoom
+        .create(seats, dice, seedGrace = 10.seconds, maxInlinePaths = Int.MaxValue, persist = s => stored.set(Some(s)))
+        .flatMap(made => IO.fromEither(made.left.map(e => RuntimeException(s"room creation failed: $e"))))
+      roll <- firstMovableRoll(room)
+      // The latest persisted snapshot is the pending movable roll (persist-before-broadcast).
+      snap <- stored.get.map(_.getOrElse(fail("no snapshot was persisted")))
+      _ = assert(snap.pending, "the persisted snapshot must carry the pending roll")
+      restoredDice <- IO.fromEither(DiceSource.fromHexSeed(snap.serverSeed).left.map(RuntimeException(_)))
+      restored     <- GameRoom
+        .restore(snap, restoredDice)
+        .flatMap(made => IO.fromEither(made.left.map(e => RuntimeException(s"restore failed: $e"))))
+      moves <- restored.legalMoves
+      // The cache is transient, so the restored room must have re-derived the same tree from the stored DFEN...
+      _ = assertEquals(moves.legalMoves, roll.legalMoves.get)
+      _ = assert(moves.dicePending)
+      // ...and a turn picked from it must be accepted by the restored room's validation.
+      played <- {
+        val outcome = restored.subscribe
+          .collectFirst { case e: GameEvent.TurnPlayed => e }
+          .compile
+          .lastOrError
+        // Let the outcome subscription register before submitting (same idiom as the resign tests above).
+        val submit =
+          IO.sleep(100.millis) *> restored.submit(roll.seat, GameCommand.SubmitTurn(leafPath(moves.legalMoves)))
+        (outcome, submit)
+          .parMapN((event, _) => event)
+          .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the restored room never played the turn")))
+      }
+    yield assertEquals(played.moves, leafPath(moves.legalMoves))

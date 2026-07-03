@@ -3,7 +3,7 @@ package dicechess.play.game
 import cats.effect.{Deferred, Fiber, IO, Outcome, Ref, Resource}
 import cats.effect.std.{Console, Queue}
 import cats.syntax.all.*
-import dicechess.engine.domain.GameState
+import dicechess.engine.domain.{GameState, Move}
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import dicechess.play.store.{GameSnapshot, TurnRecord}
@@ -37,6 +37,7 @@ final class GameRoom private (
     graceFibers: Ref[IO, Map[Seat, Fiber[IO, Throwable, Unit]]],
     disconnectGrace: FiniteDuration,
     seedGrace: FiniteDuration,
+    maxInlinePaths: Int,
     persist: GameSnapshot => IO[Unit]
 ):
   import GameRoom.*
@@ -53,7 +54,10 @@ final class GameRoom private (
       .resource(Resource.make(register)(sub => unregister(sub.id)))
       .flatMap: sub =>
         val snapshot =
-          Stream.eval((stateRef.get, IO.monotonic).mapN((s, now) => GameEvent.Snapshot(s.version, s.publicAt(now))))
+          Stream.eval(
+            (stateRef.get, IO.monotonic)
+              .mapN((s, now) => GameEvent.Snapshot(s.version, s.publicAt(now, maxInlinePaths)))
+          )
         val live = Stream.fromQueueUnterminated(sub.queue)
         (snapshot ++ live)
           .interruptWhen(sub.dropped.get.attempt)
@@ -160,7 +164,14 @@ final class GameRoom private (
   def diceCommit: IO[String] = stateRef.get.map(_.dice.commit)
 
   /** Current public state (for a REST snapshot or a freshly-joining client). */
-  def snapshot: IO[PublicGameState] = (stateRef.get, IO.monotonic).mapN((s, now) => s.publicAt(now))
+  def snapshot: IO[PublicGameState] = (stateRef.get, IO.monotonic).mapN((s, now) => s.publicAt(now, maxInlinePaths))
+
+  /** The full legal-move tree for the pending roll — never capped, unlike the inline `legalMoves` on the events (see
+    * `GET /games/{id}/moves`). Empty when no roll is pending or the roll is a forced pass.
+    */
+  def legalMoves: IO[GameMoves] =
+    stateRef.get.map: s =>
+      GameMoves(s.version, EngineOps.serialize(s.state), s.pending, s.legalTree)
 
   // ── consumer fiber ─────────────────────────────────────────────────────────
 
@@ -328,26 +339,40 @@ final class GameRoom private (
       createdAtEpochMs = s.createdAtEpochMs
     )
 
-  /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. */
+  /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. The turn's legal paths are
+    * enumerated (and their UCI index and wire tree built) exactly once here and cached on the session — `SubmitTurn`
+    * validates with a cache lookup, so a spammed or illegal submit never re-runs the engine's turn generation.
+    */
   private def beginTurn(s0: Session): IO[Session] =
-    val dice   = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
-    val rolled = EngineOps.withDice(s0.state, dice)
-    val seat   = EngineOps.activeSeat(rolled)
-    val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true, lastRoll = dice)
+    val dice          = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
+    val rolled        = EngineOps.withDice(s0.state, dice)
+    val seat          = EngineOps.activeSeat(rolled)
+    val (turns, tree) = turnCache(rolled)
+    val s1            = s0.copy(
+      state = rolled,
+      ply = s0.ply + 1,
+      pending = true,
+      lastRoll = dice,
+      legalTurns = turns,
+      legalTree = tree
+    )
     // The new mover's clock has not started ticking yet (startClock runs below), so these are the banks at turn start —
     // including the increment just credited to the side that completed the previous turn.
+    val inline   = Option.when(turns.sizeIs <= maxInlinePaths)(tree)
     val emitRoll =
       IO.monotonic.flatMap: now =>
         val clocks = liveClocks(s1, now)
-        emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled), clocks))
+        emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled), clocks, inline))
     emitRoll.flatMap: s2 =>
-      if EngineOps.legalMovePaths(rolled).nonEmpty then startClock(s2)
+      if turns.nonEmpty then startClock(s2)
       else
         val passed   = rolled.endTurn()
         val passDfen = EngineOps.serialize(passed)
         val s3       = s2.copy(
           state = passed,
           pending = false,
+          legalTurns = Map.empty,
+          legalTree = MoveTree.empty,
           turns = s2.turns :+ TurnRecord(s2.ply, colorLetter(seat), dice, Nil, passDfen)
         )
         emit(s3, v => GameEvent.TurnPlayed(v, seat, Nil, passDfen))
@@ -395,7 +420,8 @@ final class GameRoom private (
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
               emit(s, v => GameEvent.Rejected(v, seat, "not your turn"))
             else
-              EngineOps.findLegalPath(s.state, uci) match
+              // Validate against the UCI index cached when the turn was rolled — a lookup, never a re-enumeration.
+              s.legalTurns.get(uci) match
                 case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
@@ -407,6 +433,8 @@ final class GameRoom private (
                     sd.copy(
                       state = next,
                       pending = false,
+                      legalTurns = Map.empty,
+                      legalTree = MoveTree.empty,
                       turns = sd.turns :+ TurnRecord(sd.ply, colorLetter(seat), sd.lastRoll, uci, nextDfen)
                     ),
                     v => GameEvent.TurnPlayed(v, seat, uci, nextDfen)
@@ -449,6 +477,21 @@ object GameRoom:
   private val MinSeedChars = 16
   private val MaxSeedChars = 256
 
+  /** Above this many legal turn paths, the `legalMoves` tree is elided from `DiceRolled`/`Snapshot` (streams are
+    * uncompressed and the enumeration's tail reaches tens of thousands of paths) — `GET /games/{id}/moves` always
+    * serves the full tree. ~1000 paths keep the inline tree under a few tens of KB and cover the vast majority of turns
+    * (p50 is ~160 paths).
+    */
+  val DefaultMaxInlineTurnPaths: Int = 1000
+
+  /** The per-roll turn cache, built once when the dice land: the UCI→engine-path index `SubmitTurn` validates against
+    * (a lookup per submit, never a re-enumeration or re-mapping), and the prebuilt wire tree every snapshot and
+    * `GET /games/{id}/moves` read serves as-is.
+    */
+  private def turnCache(state: GameState): (Map[List[String], List[Move]], MoveTree) =
+    val turns = EngineOps.legalMovePaths(state).map(path => path.map(EngineOps.toUci) -> path).toMap
+    (turns, MoveTree.fromPaths(turns.keys.toList))
+
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
 
@@ -477,7 +520,12 @@ object GameRoom:
       // — kept for the end-of-game analytics handoff, and persisted so it survives a restart.
       lastRoll: List[Int] = Nil,
       turns: Vector[TurnRecord] = Vector.empty,
-      createdAtEpochMs: Option[Long] = None
+      createdAtEpochMs: Option[Long] = None,
+      // The roll-in-flight turn cache (see `turnCache`): the UCI index `SubmitTurn` validates against and the
+      // prebuilt wire tree. Transient: never persisted (a pure function of the pending `state`), recomputed on
+      // restore, cleared when the turn completes.
+      legalTurns: Map[List[String], List[Move]] = Map.empty,
+      legalTree: MoveTree = MoveTree.empty
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
@@ -497,8 +545,10 @@ object GameRoom:
     /** The pair of client seeds actually folded into the dice, for the end-of-game reveal. */
     def clientSeedsRevealed: ClientSeeds = ClientSeeds(seedFor(Seat.White), seedFor(Seat.Black))
 
-    /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). */
-    def publicAt(now: FiniteDuration): PublicGameState =
+    /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). The pending roll's
+      * legal-move tree rides along inline unless it exceeds `maxInlinePaths` (then `GET /games/{id}/moves`).
+      */
+    def publicAt(now: FiniteDuration, maxInlinePaths: Int): PublicGameState =
       // Reveal the seeds only once the game is over (so a late (re)joiner can still verify); secret while active.
       val (revealed, seeds) = status match
         case GameStatus.Ended(_) => (Some(dice.reveal), Some(clientSeedsRevealed))
@@ -513,7 +563,8 @@ object GameRoom:
         liveClocks(this, now),
         dice.commit,
         revealed,
-        seeds
+        seeds,
+        Option.when(pending && legalTurns.sizeIs <= maxInlinePaths)(legalTree)
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
@@ -526,6 +577,7 @@ object GameRoom:
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
       timeControl: TimeControl = TimeControl.Unlimited,
       seedGrace: FiniteDuration = DefaultSeedGrace,
+      maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
       persist: GameSnapshot => IO[Unit] = _ => IO.unit
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
@@ -546,7 +598,16 @@ object GameRoom:
             createdAtEpochMs = Some(createdAt.toMillis)
           )
           seatTokens <- mintTokens(players.keys)
-          room       <- build(session0, seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
+          room       <- build(
+            session0,
+            seatTokens,
+            fanOutBuffer,
+            idleCheck,
+            disconnectGrace,
+            seedGrace,
+            maxInlinePaths,
+            persist
+          )
           // The creation row must be durable before anyone plays: the seat tokens and the dice commitment have been
           // handed out, so a restart in the first seconds must not lose them.
           _ <- room.persistQuietly(session0)
@@ -565,12 +626,16 @@ object GameRoom:
       idleCheck: FiniteDuration = DefaultIdleCheck,
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
       seedGrace: FiniteDuration = DefaultSeedGrace,
+      maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
       persist: GameSnapshot => IO[Unit] = _ => IO.unit
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(snapshot.dfen) match
       case Left(error)   => IO.pure(Left(s"corrupt snapshot dfen: $error"))
       case Right(state0) =>
         IO.monotonic.flatMap { now =>
+          // The cache is transient; a pending roll's turns re-derive from the persisted DFEN (dice included).
+          val (turns, tree) =
+            if snapshot.pending then turnCache(state0) else (Map.empty[List[String], List[Move]], MoveTree.empty)
           val session0 = Session(
             state0,
             snapshot.version,
@@ -589,9 +654,20 @@ object GameRoom:
             clientSeeds = snapshot.clientSeeds,
             lastRoll = snapshot.lastRoll,
             turns = snapshot.turns,
-            createdAtEpochMs = snapshot.createdAtEpochMs
+            createdAtEpochMs = snapshot.createdAtEpochMs,
+            legalTurns = turns,
+            legalTree = tree
           )
-          build(session0, snapshot.seatTokens, fanOutBuffer, idleCheck, disconnectGrace, seedGrace, persist)
+          build(
+            session0,
+            snapshot.seatTokens,
+            fanOutBuffer,
+            idleCheck,
+            disconnectGrace,
+            seedGrace,
+            maxInlinePaths,
+            persist
+          )
             .flatTap(_.supervisedConsume.start)
             .map(Right(_))
         }
@@ -603,6 +679,7 @@ object GameRoom:
       idleCheck: FiniteDuration,
       disconnectGrace: FiniteDuration,
       seedGrace: FiniteDuration,
+      maxInlinePaths: Int,
       persist: GameSnapshot => IO[Unit]
   ): IO[GameRoom] =
     for
@@ -626,6 +703,7 @@ object GameRoom:
       graceFibers,
       disconnectGrace,
       seedGrace,
+      maxInlinePaths,
       persist
     )
 

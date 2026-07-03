@@ -2,7 +2,7 @@ package dicechess.play.wire
 
 import dicechess.play.core.*
 import io.circe.generic.semiauto.deriveCodec
-import io.circe.{Codec, Decoder, Encoder}
+import io.circe.{Codec, Decoder, Encoder, Json, KeyDecoder}
 
 /** JSON wire codecs for the transport-neutral protocol. The WebSocket edge (and later the Bot API) are codecs over
   * these types — the game core never imports JSON.
@@ -24,6 +24,16 @@ object Codecs:
   given Codec[Seat]        = nameCodec("Seat", Seat.values)
   given Codec[Termination] = nameCodec("Termination", Termination.values)
 
+  // MoveTree is recursive, so it can't be derived: a node encodes as the plain object of its children (sorted for a
+  // stable wire), and any JSON object decodes back into nodes.
+  private def encodeMoveTree(node: MoveTree): Json =
+    Json.obj(node.children.toList.sortBy(_._1).map((move, child) => move -> encodeMoveTree(child))*)
+
+  given Codec[MoveTree] = Codec.from(
+    Decoder.recursive(rec => Decoder.decodeMap(using KeyDecoder.decodeKeyString, rec).map(MoveTree.apply)),
+    Encoder.instance(encodeMoveTree)
+  )
+
   given Codec[GameResult]      = deriveCodec
   given Codec[GameOver]        = deriveCodec
   given Codec[GameStatus]      = deriveCodec
@@ -33,6 +43,7 @@ object Codecs:
   given Codec[ClientSeeds]     = deriveCodec
   given Codec[Principal]       = deriveCodec
   given Codec[PublicGameState] = deriveCodec
+  given Codec[GameMoves]       = deriveCodec
   given Codec[GameCommand]     = deriveCodec
   given Codec[GameEvent]       = deriveCodec
   given Codec[Challenge]       = deriveCodec
