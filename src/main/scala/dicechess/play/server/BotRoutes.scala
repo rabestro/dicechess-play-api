@@ -26,6 +26,17 @@ final case class BotSeed(seed: String) derives Codec.AsObject
 /** Credentials returned by `POST /bot/anon`: the Bearer token plus the minted anonymous identity. */
 final case class AnonBot(token: String, team: String, name: String, id: String) derives Codec.AsObject
 
+/** A registration request: the durable identity to claim. Both parts must be lowercase slugs. */
+final case class RegisterBot(team: String, name: String) derives Codec.AsObject
+
+/** Credentials returned by `POST /bot/register`: the Bearer token (shown exactly once — only its hash is stored) plus
+  * the claimed durable identity.
+  */
+final case class BotRegistered(token: String, team: String, name: String, id: String) derives Codec.AsObject
+
+/** The fresh token from `POST /bot/token` (rotation). Shown exactly once; the old token is already invalid. */
+final case class RotatedToken(token: String) derives Codec.AsObject
+
 /** The challenge-create response: the pending challenge's fields plus whether the target currently holds an account
   * stream. Advisory — an offline target can still discover the challenge via `GET /bot/challenges` until it expires.
   */
@@ -86,7 +97,8 @@ object BotRoutes:
       challenges: Challenges,
       events: BotEvents,
       registry: GameRegistry,
-      limiter: AnonMintLimiter
+      limiter: AnonMintLimiter,
+      registerLimiter: AnonMintLimiter
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       // Zero-registration self-service: mint an ephemeral, unranked anonymous bot token for testing.
@@ -100,6 +112,45 @@ object BotRoutes:
                 .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
             case Right(()) =>
               auth.mintAnon(name).flatMap((token, bot) => Created(AnonBot(token, bot.team, bot.name, bot.externalId)))
+
+      // Durable self-service identity (#70): unlike /bot/anon, the identity survives server restarts, so together
+      // with GET /bot/games a registered bot resumes its games after a deploy instead of forfeiting them. Un-gated
+      // like the anon mint, with its own (stricter) per-IP budget.
+      case req @ POST -> Root / "bot" / "register" =>
+        registerLimiter
+          .attempt(clientIp(req))
+          .flatMap:
+            case Left(retryAfter) =>
+              TooManyRequests("registration rate limit exceeded — retry later")
+                .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
+            case Right(()) =>
+              req
+                .attemptAs[RegisterBot]
+                .value
+                .flatMap:
+                  case Left(failure) => BadRequest(failure.message)
+                  case Right(body)   =>
+                    auth
+                      .register(body.team, body.name)
+                      .flatMap:
+                        case Right((token, bot)) =>
+                          Created(BotRegistered(token, bot.team, bot.name, bot.externalId))
+                        case Left(BotAuth.RegisterRejected.InvalidSlug) =>
+                          BadRequest("team and name must be lowercase slugs: [a-z0-9][a-z0-9-]*, at most 32 chars")
+                        case Left(BotAuth.RegisterRejected.ReservedTeam) =>
+                          BadRequest("this team is reserved")
+                        case Left(BotAuth.RegisterRejected.Taken) =>
+                          Conflict("this bot identity is already taken")
+
+      // Rotate the caller's token: the old one stops authenticating immediately, the new one is shown exactly once.
+      // Registered bots only — anon tokens are re-minted, static ones live in the server env.
+      case req @ POST -> Root / "bot" / "token" =>
+        withBot(auth, req): bot =>
+          auth
+            .rotate(bot)
+            .flatMap:
+              case Some(token) => Ok(RotatedToken(token))
+              case None        => Forbidden("only a registered bot can rotate its token")
 
       case req @ GET -> Root / "bot" / "account" =>
         withBot(auth, req)(bot => Ok(BotAccount(bot.team, bot.name, bot.externalId)))

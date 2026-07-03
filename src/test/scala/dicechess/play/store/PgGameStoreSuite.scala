@@ -57,6 +57,30 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("bot identities round-trip: register once, authenticate by hash, rotate atomically"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          claimed  <- db.register("dragons", "smaug", "hash-1")
+          dupe     <- db.register("dragons", "smaug", "hash-other")
+          found    <- db.authenticate("hash-1")
+          unknown  <- db.authenticate("hash-none")
+          rotated  <- db.rotate("dragons", "smaug", "hash-2")
+          oldDead  <- db.authenticate("hash-1")
+          newAlive <- db.authenticate("hash-2")
+          ghost    <- db.rotate("dragons", "nobody", "hash-3")
+        yield
+          assert(claimed, "a fresh identity must register")
+          assert(!dupe, "the primary key must make the second claim lose")
+          assertEquals(found, Some(Principal.Bot("dragons", "smaug")): Option[Principal.Bot])
+          assertEquals(unknown, None)
+          assert(rotated, "rotation of a registered identity must succeed")
+          assertEquals(oldDead, None)
+          assertEquals(newAlive, Some(Principal.Bot("dragons", "smaug")): Option[Principal.Bot])
+          assert(!ghost, "rotating an unregistered identity must report false")
+      }
+    }
+
   test("ended games are not resumed"):
     withContainers { pg =>
       store(pg).use { db =>

@@ -17,7 +17,7 @@ import dicechess.play.server.{
   PlayRoutes
 }
 import dicechess.play.ingest.IngestDeliverer
-import dicechess.play.store.{GameStore, PgGameStore}
+import dicechess.play.store.{BotStore, GameStore, PgGameStore}
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
@@ -29,12 +29,13 @@ object Main extends IOApp.Simple:
   private val port    = port"8080"
   private val version = sys.env.getOrElse("APP_VERSION", "dev")
 
-  // Persistence is opt-in by env: with PLAY_DB_URL set, games snapshot into Postgres and live games are resumed on
-  // boot; with INGEST_URL/INGEST_TOKEN also set, finished games are delivered to analytics from the durable outbox.
-  // Without PLAY_DB_URL the server runs in-memory exactly as before (games die with the process).
-  private def appResources: Resource[IO, (GameStore, IO[Unit])] =
+  // Persistence is opt-in by env: with PLAY_DB_URL set, games snapshot into Postgres, live games are resumed on boot,
+  // and registered bot identities are durable; with INGEST_URL/INGEST_TOKEN also set, finished games are delivered to
+  // analytics from the durable outbox. Without PLAY_DB_URL the server runs in-memory exactly as before (games and
+  // registered bots die with the process).
+  private def appResources: Resource[IO, (GameStore, BotStore, IO[Unit])] =
     PgGameStore.configFromEnv match
-      case None           => Resource.pure((GameStore.noop, IO.never))
+      case None           => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, IO.never))
       case Some(dbConfig) =>
         PgGameStore.resource(dbConfig).flatMap { store =>
           IngestDeliverer.configFromEnv match
@@ -42,28 +43,31 @@ object Main extends IOApp.Simple:
               val warn = cats.effect.std
                 .Console[IO]
                 .errorln("[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games accumulate in the outbox")
-              Resource.pure((store, warn *> IO.never))
+              Resource.pure((store, store, warn *> IO.never))
             case Some(ingestConfig) =>
               EmberClientBuilder
                 .default[IO]
                 .build
-                .map(http => (store, IngestDeliverer(store, http, ingestConfig).loop.void))
+                .map(http => (store, store, IngestDeliverer(store, http, ingestConfig).loop.void))
         }
 
   def run: IO[Unit] = appResources.use(serve)
 
-  private def serve(resources: (GameStore, IO[Unit])): IO[Unit] =
-    val (store, deliverer) = resources
+  private def serve(resources: (GameStore, BotStore, IO[Unit])): IO[Unit] =
+    val (store, botStore, deliverer) = resources
     for
       registry   <- GameRegistry.create(store = store)
       resumed    <- registry.resume
       _          <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
-      botAuth    <- BotAuth.fromEnv
+      botAuth    <- BotAuth.fromEnv(botStore)
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
       mintLimit  <- AnonMintLimiter.create()
-      lobby      <- Lobby.create(registry)
-      cors       <- Cors.fromEnv
+      // Registration is rarer than anon minting by nature (one durable identity per team, not one per test session),
+      // so it gets its own, much stricter per-IP budget.
+      registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
+      lobby         <- Lobby.create(registry)
+      cors          <- Cors.fromEnv
       // The sweepers (seeks, pending challenges) and the ingest deliverer are scoped to the server: they run while it
       // runs and are cancelled with it, so a failure surfaces instead of being silently dropped by a detached fiber.
       _ <- (deliverer.background, lobby.sweeper().background, challenges.sweeper().background).tupled
@@ -79,10 +83,14 @@ object Main extends IOApp.Simple:
                   challenges,
                   botEvents,
                   registry,
-                  mintLimit
+                  mintLimit,
+                  registerLimit
                 )).orNotFound
               )
             )
             .build
             .useForever
     yield ()
+
+  /** Per-IP hourly budget for `POST /bot/register` — a team registers a handful of identities, not thirty. */
+  private val RegisterLimitPerHour = 5

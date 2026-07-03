@@ -69,6 +69,45 @@ object GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = IO.unit
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
 
+/** Persistence seam for durable self-service bot identities (#70). Only token *hashes* cross this boundary — hashing
+  * (and token minting) is the caller's job, so the store stays a dumb map from hash to identity.
+  */
+trait BotStore:
+  /** Claim `(team, name)` with the given token hash. False when the identity is already taken. */
+  def register(team: String, name: String, tokenHash: String): IO[Boolean]
+
+  /** The registered identity a presented token's hash authenticates as, if any. */
+  def authenticate(tokenHash: String): IO[Option[Principal.Bot]]
+
+  /** Swap the identity's token hash (rotation: the old token stops authenticating immediately). False when no such
+    * registered identity exists — the caller distinguishes registered bots from static/anonymous ones by this.
+    */
+  def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]
+
+object BotStore:
+  /** In-memory mode (no `PLAY_DB_URL`): registration works for the process's lifetime — durability, like game
+    * persistence, is what the database adds. Backed by a single Ref keyed by token hash.
+    */
+  def inMemory: IO[BotStore] =
+    cats.effect.Ref.of[IO, Map[String, Principal.Bot]](Map.empty).map { ref =>
+      new BotStore:
+        def register(team: String, name: String, tokenHash: String): IO[Boolean] =
+          ref.modify { bots =>
+            if bots.values.exists(b => b.team == team && b.name == name) then (bots, false)
+            else (bots.updated(tokenHash, Principal.Bot(team, name)), true)
+          }
+
+        def authenticate(tokenHash: String): IO[Option[Principal.Bot]] = ref.get.map(_.get(tokenHash))
+
+        def rotate(team: String, name: String, newTokenHash: String): IO[Boolean] =
+          ref.modify { bots =>
+            if bots.values.exists(b => b.team == team && b.name == name) then
+              val cleared = bots.filterNot((_, b) => b.team == team && b.name == name)
+              (cleared.updated(newTokenHash, Principal.Bot(team, name)), true)
+            else (bots, false)
+          }
+    }
+
 /** An undelivered analytics handoff: the game's `GameIngest` payload plus its retry bookkeeping. */
 final case class OutboxRow(gameId: GameId, payload: io.circe.Json, attempts: Int)
 

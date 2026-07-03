@@ -2,14 +2,17 @@ package dicechess.play.server
 
 import cats.effect.IO
 import dicechess.play.core.Principal
+import dicechess.play.store.BotStore
 
 import scala.concurrent.duration.*
 
 class BotAuthSuite extends munit.CatsEffectSuite:
 
+  private def fromSpec(spec: String, anonTtl: FiniteDuration = BotAuth.DefaultAnonTtl): IO[BotAuth] =
+    BotStore.inMemory.flatMap(BotAuth.fromSpec(spec, _, anonTtl))
+
   test("authenticates known static tokens, rejects unknown"):
-    BotAuth
-      .fromSpec("acme|greedy|tok-1,acme|mcts|tok-2")
+    fromSpec("acme|greedy|tok-1,acme|mcts|tok-2")
       .flatMap: auth =>
         for
           a <- auth.authenticate("tok-1")
@@ -21,8 +24,7 @@ class BotAuthSuite extends munit.CatsEffectSuite:
           assertEquals(c, None)
 
   test("ignores malformed or empty roster entries"):
-    BotAuth
-      .fromSpec("bad-entry,acme|greedy|tok,||,team|name|")
+    fromSpec("bad-entry,acme|greedy|tok,||,team|name|")
       .flatMap: auth =>
         for
           ok    <- auth.authenticate("tok")
@@ -32,14 +34,13 @@ class BotAuthSuite extends munit.CatsEffectSuite:
           assertEquals(empty, None)
 
   test("an empty roster authenticates nothing"):
-    BotAuth.fromSpec("").flatMap(_.authenticate("anything")).map(assertEquals(_, None))
+    fromSpec("").flatMap(_.authenticate("anything")).map(assertEquals(_, None))
 
   test("a static entry in the reserved anon team is rejected"):
-    BotAuth.fromSpec("anon|evil|tok").flatMap(_.authenticate("tok")).map(assertEquals(_, None))
+    fromSpec("anon|evil|tok").flatMap(_.authenticate("tok")).map(assertEquals(_, None))
 
   test("a minted anonymous token authenticates as bot:team:anon:*, then expires"):
-    BotAuth
-      .fromSpec("", anonTtl = 120.millis)
+    fromSpec("", anonTtl = 120.millis)
       .flatMap: auth =>
         for
           minted <- auth.mintAnon(Some("Alice!"))
@@ -58,8 +59,7 @@ class BotAuthSuite extends munit.CatsEffectSuite:
           assertEquals(countAfter, 0)
 
   test("an anonymous token with no label is bot:team:anon:<uuid>, colon-free"):
-    BotAuth
-      .fromSpec("")
+    fromSpec("")
       .flatMap: auth =>
         auth
           .mintAnon(None)
@@ -67,3 +67,56 @@ class BotAuthSuite extends munit.CatsEffectSuite:
             assertEquals(bot.team, "anon")
             assert(bot.externalId.startsWith("bot:team:anon:"), bot.externalId)
             assert(!bot.name.contains(":"), s"name must be colon-free: ${bot.name}")
+
+  test("a registered token authenticates as its durable identity"):
+    fromSpec("")
+      .flatMap: auth =>
+        for
+          registered <- auth.register("dragons", "smaug")
+          (token, bot) = registered.toOption.get
+          found <- auth.authenticate(token)
+          wrong <- auth.authenticate("not-the-token")
+        yield
+          assertEquals(bot, Principal.Bot("dragons", "smaug"))
+          assertEquals(found, Some(bot))
+          assertEquals(wrong, None)
+
+  test("registration rejects invalid slugs, reserved teams, and taken identities"):
+    fromSpec("acme|greedy|tok")
+      .flatMap: auth =>
+        for
+          badSlug  <- auth.register("Dragons", "smaug") // uppercase: not a slug
+          badName  <- auth.register("dragons", "smaug:v2")
+          anonTeam <- auth.register("anon", "smaug")
+          house    <- auth.register("house", "smaug")   // reserved even with no static entry occupying it
+          static   <- auth.register("acme", "greedy")   // the static roster identity can't be claimed
+          first    <- auth.register("dragons", "smaug")
+          dupe     <- auth.register("dragons", "smaug")
+        yield
+          assertEquals(badSlug, Left(BotAuth.RegisterRejected.InvalidSlug))
+          assertEquals(badName, Left(BotAuth.RegisterRejected.InvalidSlug))
+          assertEquals(anonTeam, Left(BotAuth.RegisterRejected.ReservedTeam))
+          assertEquals(house, Left(BotAuth.RegisterRejected.ReservedTeam))
+          assertEquals(static, Left(BotAuth.RegisterRejected.Taken))
+          assert(first.isRight, s"a fresh identity must register: $first")
+          assertEquals(dupe.left.map(identity), Left(BotAuth.RegisterRejected.Taken))
+
+  test("rotation invalidates the old token, keeps the identity, and is registered-only"):
+    fromSpec("acme|greedy|tok")
+      .flatMap: auth =>
+        for
+          registered <- auth.register("dragons", "smaug")
+          (oldToken, bot) = registered.toOption.get
+          rotated  <- auth.rotate(bot)
+          oldDead  <- auth.authenticate(oldToken)
+          newAlive <- auth.authenticate(rotated.get)
+          // Static and anon callers cannot rotate: their tokens live in the env / are re-minted instead.
+          staticNo <- auth.rotate(Principal.Bot("acme", "greedy"))
+          anon     <- auth.mintAnon(None)
+          anonNo   <- auth.rotate(anon._2)
+        yield
+          assert(rotated.isDefined, "a registered bot must be able to rotate")
+          assertEquals(oldDead, None)
+          assertEquals(newAlive, Some(bot: Principal))
+          assertEquals(staticNo, None)
+          assertEquals(anonNo, None)

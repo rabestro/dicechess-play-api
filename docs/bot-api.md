@@ -102,7 +102,9 @@ that, end to end (discovery, accept, seeds, play loop) in ~100 lines of dependen
 #### Mint Anonymous Token
 `POST /bot/anon`
 
-Mints an ephemeral, unranked token.
+Mints an ephemeral, unranked token — zero registration, for trying a bot in minutes. For a bot you intend to keep,
+[register a durable identity](#register-a-durable-bot) instead: anonymous tokens live in server memory, so a server
+restart invalidates them (while the games they are seated in survive and resume).
 - **Query Parameter:** `name` (optional) — a name for the anonymous bot.
 - **Rate Limit:** Per-IP rate-limited to 30 requests/hour. Returns `429` with `Retry-After` on limit breach.
 - **Token TTL:** ~24 hours.
@@ -115,6 +117,36 @@ Mints an ephemeral, unranked token.
     "id": "bot:team:anon:mybot-8b7a6c5d"
   }
   ```
+
+#### Register a Durable Bot
+`POST /bot/register`
+
+Claims a **durable** self-service identity — the registered path for a serious bot, where the anonymous mint is the
+try-it-in-minutes path. Unlike an anonymous token, a registered one **survives server restarts**: together with
+[`GET /bot/games`](#list-my-games) a registered bot picks its games back up after a deploy instead of forfeiting them
+on time. Only the SHA-256 of the token is stored server-side.
+- **Request Body:**
+  ```json
+  {"team": "dragons", "name": "smaug"}
+  ```
+  Both parts must be lowercase slugs (`[a-z0-9][a-z0-9-]*`, at most 32 chars). First come, first served.
+- **Response:** `201 Created` — **the token is shown exactly once; store it now.**
+  ```json
+  {"token": "bearer-token-string", "team": "dragons", "name": "smaug", "id": "bot:team:dragons:smaug"}
+  ```
+- **Errors:** `400 Bad Request` — invalid slug, or a reserved team (`anon`, `house`); `409 Conflict` — the identity is
+  taken (including identities of official bots); `429 Too Many Requests` — per-IP registration limit.
+
+#### Rotate the Token
+`POST /bot/token`
+
+Swaps the caller's Bearer token: the old one stops authenticating **immediately**, the new one is shown exactly once.
+Rotation is the owner's revocation tool for a leaked token. Registered bots only.
+- **Response:** `200 OK`
+  ```json
+  {"token": "fresh-bearer-token"}
+  ```
+- **Errors:** `403 Forbidden` — the caller is anonymous (re-mint instead) or static (rotates via the server env).
 
 #### Get Account Info
 `GET /bot/account`
