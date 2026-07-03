@@ -370,3 +370,46 @@ class GameRoomSuite extends munit.CatsEffectSuite:
           .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the restored room never played the turn")))
       }
     yield assertEquals(played.moves, leafPath(moves.legalMoves))
+
+  test("submitTurn answers the writer's verdict synchronously: refusals, then the applied version"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
+    GameRoom
+      .create(seats, dice, seedGrace = 10.seconds, maxInlinePaths = Int.MaxValue)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          firstMovableRoll(room).flatMap { roll =>
+            val path  = leafPath(roll.legalMoves.get)
+            val other = if roll.seat == Seat.White then Seat.Black else Seat.White
+            for
+              offTurn <- room.submitTurn(other, path)
+              illegal <- room.submitTurn(roll.seat, List("a1a1"))
+              applied <- room.submitTurn(roll.seat, path)
+              // The turn was consumed, so replaying the exact same path is now the opponent's roll — off-turn again.
+              replay <- room.submitTurn(roll.seat, path)
+            yield
+              assertEquals(offTurn, GameRoom.TurnVerdict.Refused("not your turn"))
+              assertEquals(illegal, GameRoom.TurnVerdict.Refused("illegal turn"))
+              applied match
+                case GameRoom.TurnVerdict.Applied(version) =>
+                  assert(version > roll.v, s"the applied version ($version) must supersede the roll's (${roll.v})")
+                case other => fail(s"expected Applied, got: $other")
+              assertEquals(replay, GameRoom.TurnVerdict.Refused("not your turn"))
+          }
+      }
+      .timeoutTo(15.seconds, IO.raiseError(RuntimeException("verdicts did not arrive")))
+
+  test("submitTurn on a finished game answers 'game is over' instead of hanging"):
+    val dice = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
+    GameRoom
+      .create(seats, dice, seedGrace = 10.seconds)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          for
+            _       <- room.submit(Seat.White, GameCommand.Resign)
+            _       <- room.result
+            verdict <- room.submitTurn(Seat.Black, List("e2e4"))
+          yield assertEquals(verdict, GameRoom.TurnVerdict.Refused("game is over"))
+      }
+      .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the ended-game verdict did not arrive")))

@@ -98,7 +98,21 @@ final class GameRoom private (
     * time — not the queue-wait or the engine validation that follows.
     */
   def submit(seat: Seat, command: GameCommand): IO[Unit] =
-    IO.monotonic.flatMap(receivedAt => inbox.offer(Msg.Command(seat, command, receivedAt)))
+    IO.monotonic.flatMap(receivedAt => inbox.offer(Msg.Command(seat, command, receivedAt, reply = None)))
+
+  /** Submit the turn and await the writer's verdict: `Applied` with the `TurnPlayed` version, or `Refused` with the
+    * same reason the stream's `Rejected` carries — the synchronous feedback surface for polling bots. The verdict is
+    * answered only after the outcome event is persisted and broadcast, so a 200 to the caller is already durable.
+    * Stream events are unchanged.
+    */
+  def submitTurn(seat: Seat, moves: List[String]): IO[TurnVerdict] =
+    stateRef.get.flatMap: s =>
+      // The writer fiber stops once the game ends, so an ended room would never drain the inbox — answer eagerly.
+      // (A game ending in the gap between this check and the offer is caught by the caller's verdict timeout.)
+      if s.ended then IO.pure(TurnVerdict.Refused("game is over"))
+      else
+        (Deferred[IO, TurnVerdict], IO.monotonic).flatMapN: (reply, receivedAt) =>
+          inbox.offer(Msg.Command(seat, GameCommand.SubmitTurn(moves), receivedAt, Some(reply))) *> reply.get
 
   /** Begin the game (roll the first turn). Call after subscribers have attached. */
   def start: IO[Unit] = inbox.offer(Msg.Begin)
@@ -221,8 +235,8 @@ final class GameRoom private (
                       (if started.hasAllSeeds then beginTurn(started).flatMap(stateRef.set) else IO.unit)
                   }
               } *> continue
-            case Msg.Command(seat, command, receivedAt) =>
-              stateRef.get.flatMap(s => process(s, seat, command, receivedAt)).flatMap(stateRef.set) *> continue
+            case Msg.Command(seat, command, receivedAt, reply) =>
+              stateRef.get.flatMap(s => process(s, seat, command, receivedAt, reply)).flatMap(stateRef.set) *> continue
             case Msg.Timeout =>
               stateRef.get.flatMap(onTimeout).flatMap(stateRef.set) *> continue
 
@@ -390,9 +404,15 @@ final class GameRoom private (
       v => GameEvent.GameEnded(v, over, s.dice.reveal, s.clientSeedsRevealed)
     ).flatTap(_ => done.complete(over).attempt.void)
 
-  private def process(s: Session, seat: Seat, command: GameCommand, receivedAt: FiniteDuration): IO[Session] =
+  private def process(
+      s: Session,
+      seat: Seat,
+      command: GameCommand,
+      receivedAt: FiniteDuration,
+      reply: Option[Deferred[IO, TurnVerdict]]
+  ): IO[Session] =
     s.status match
-      case GameStatus.Ended(_) => IO.pure(s)
+      case GameStatus.Ended(_) => answer(reply, TurnVerdict.Refused("game is over")).as(s)
       case GameStatus.Active   =>
         command match
           case GameCommand.Resign =>
@@ -417,12 +437,17 @@ final class GameRoom private (
                   else persistQuietly(seeded).as(seeded)
 
           case GameCommand.SubmitTurn(uci) =>
+            // The verdict is answered AFTER the outcome event is emitted (state written, snapshot persisted,
+            // broadcast), so a synchronous `Applied` already implies durability.
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
               emit(s, v => GameEvent.Rejected(v, seat, "not your turn"))
+                .flatTap(_ => answer(reply, TurnVerdict.Refused("not your turn")))
             else
               // Validate against the UCI index cached when the turn was rolled — a lookup, never a re-enumeration.
               s.legalTurns.get(uci) match
-                case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
+                case None =>
+                  emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
+                    .flatTap(_ => answer(reply, TurnVerdict.Refused("illegal turn")))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
                   val nextDfen       = EngineOps.serialize(next)
@@ -440,9 +465,15 @@ final class GameRoom private (
                     v => GameEvent.TurnPlayed(v, seat, uci, nextDfen)
                   )
                     .flatMap: s1 =>
-                      winner match
-                        case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
-                        case None    => advanceOrEnd(s1)
+                      // Answer with the TurnPlayed version before rolling on: the caller correlates it with the stream.
+                      answer(reply, TurnVerdict.Applied(s1.version)) *>
+                        (winner match
+                          case Some(w) => endGame(s1, GameOver(GameResult.Win(w), Termination.KingCaptured))
+                          case None    => advanceOrEnd(s1))
+
+  /** Complete a synchronous reply channel, if the command carried one. */
+  private def answer(reply: Option[Deferred[IO, TurnVerdict]], verdict: TurnVerdict): IO[Unit] =
+    reply.traverse_(_.complete(verdict).void)
 
 object GameRoom:
 
@@ -495,9 +526,19 @@ object GameRoom:
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
 
+  /** The writer's verdict on a synchronously-submitted turn — the request/response face of `TurnPlayed`/`Rejected`. */
+  enum TurnVerdict:
+    case Applied(version: Long)
+    case Refused(reason: String)
+
   private enum Msg:
     case Begin
-    case Command(seat: Seat, command: GameCommand, receivedAt: FiniteDuration)
+    case Command(
+        seat: Seat,
+        command: GameCommand,
+        receivedAt: FiniteDuration,
+        reply: Option[Deferred[IO, TurnVerdict]]
+    )
     case Timeout
 
   final private case class Session(

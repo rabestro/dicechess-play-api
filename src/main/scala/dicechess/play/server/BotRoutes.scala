@@ -55,6 +55,12 @@ final case class BotActiveGame(
 
 final case class BotGames(games: List[BotActiveGame]) derives Codec.AsObject
 
+/** The synchronous verdict on a submitted turn: `applied` with the `TurnPlayed` version (200), or refused with the same
+  * reason the stream's `Rejected` carries (409). A fire-and-forget bot simply ignores the body.
+  */
+final case class MoveOutcome(applied: Boolean, version: Option[Long] = None, reason: Option[String] = None)
+    derives Codec.AsObject
+
 /** The third-party Bot API (Lichess-shaped): identity, the per-bot event stream, the challenge lifecycle, and the game
   * play surface (game event stream + move/resign).
   */
@@ -67,6 +73,11 @@ object BotRoutes:
     * challenge, or the gap between turns) isn't dropped at either end. The blank line is ignored by clients.
     */
   private val KeepAlive: FiniteDuration = 25.seconds
+
+  /** How long a move submit waits for the writer's verdict before degrading to the legacy fire-and-forget 202. The
+    * writer answers in microseconds; this only bites if the room fiber is wedged — never hang the HTTP call on it.
+    */
+  private val VerdictTimeout: FiniteDuration = 5.seconds
 
   private object NameParam extends OptionalQueryParamDecoderMatcher[String]("name")
 
@@ -190,9 +201,18 @@ object BotRoutes:
             .flatMap:
               case Left(failure) => BadRequest(failure.message)
               case Right(move)   =>
-                // Fire-and-forget: the outcome (TurnPlayed / Rejected / GameEnded) arrives on the event stream.
+                // Synchronous verdict (the writer processes a command in microseconds — validation is a cache lookup):
+                // 200 applied with the TurnPlayed version, 409 refused with the stream Rejected's reason. The stream
+                // events are unchanged; a wedged writer degrades to the old fire-and-forget 202 instead of hanging.
                 seated(registry, id, bot)((room, seat) =>
-                  room.submit(seat, GameCommand.SubmitTurn(move.moves)) *> Accepted()
+                  room
+                    .submitTurn(seat, move.moves)
+                    .flatMap:
+                      case GameRoom.TurnVerdict.Applied(version) =>
+                        Ok(MoveOutcome(applied = true, version = Some(version)))
+                      case GameRoom.TurnVerdict.Refused(reason) =>
+                        Conflict(MoveOutcome(applied = false, reason = Some(reason)))
+                    .timeoutTo(VerdictTimeout, Accepted())
                 )
 
       case req @ POST -> Root / "bot" / "game" / id / "resign" =>

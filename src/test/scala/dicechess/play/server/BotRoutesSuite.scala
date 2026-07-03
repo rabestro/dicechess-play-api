@@ -1,7 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{BotEvent, Principal, Seat}
+import cats.syntax.all.*
+import dicechess.play.core.{BotEvent, GameId, MoveTree, Principal, Seat}
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
@@ -16,15 +17,15 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
   private def appWith(
       limiter: AnonMintLimiter,
       maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot
-  ): IO[HttpApp[IO]] =
+  ): IO[(HttpApp[IO], GameRegistry)] =
     for
       auth       <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
       events     <- BotEvents.create
       registry   <- GameRegistry.create()
       challenges <- Challenges.create(events, registry, maxPendingPerBot = maxPendingPerBot)
-    yield BotRoutes(auth, challenges, events, registry, limiter).orNotFound
+    yield (BotRoutes(auth, challenges, events, registry, limiter).orNotFound, registry)
 
-  private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith(_))
+  private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith(_)).map(_._1)
 
   private def request(method: Method, uri: Uri, token: Option[String]): Request[IO] =
     val base = Request[IO](method, uri)
@@ -55,6 +56,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     AnonMintLimiter
       .create(limit = 2)
       .flatMap(appWith(_))
+      .map(_._1)
       .flatMap: service =>
         val mint = Request[IO](Method.POST, uri"/bot/anon")
         for
@@ -132,6 +134,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     AnonMintLimiter
       .create(limit = 100)
       .flatMap(appWith(_, maxPendingPerBot = 1))
+      .map(_._1)
       .flatMap: service =>
         for
           first <- service.run(
@@ -243,14 +246,81 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
       .flatMap(_.run(request(Method.GET, uri"/bot/game/stream" / "nope", Some("tok-alice"))))
       .map(r => assertEquals(r.status, Status.NotFound))
 
-  test("a seated bot can submit a move (accepted; outcome arrives on the stream)"):
+  test("a move before any roll is refused synchronously (409 not your turn)"):
     app.flatMap: service =>
       seatedGame(service).flatMap: gameId =>
+        // No seeds submitted, so the opening roll is still gated: no turn is pending for anyone.
         service
           .run(
             request(Method.POST, uri"/bot/game" / gameId / "move", Some("tok-alice")).withEntity(BotMove(List("e2e4")))
           )
-          .map(r => assertEquals(r.status, Status.Accepted))
+          .flatMap: resp =>
+            assertEquals(resp.status, Status.Conflict)
+            resp.as[MoveOutcome].map(o => assertEquals(o, MoveOutcome(applied = false, reason = Some("not your turn"))))
+
+  test("a move submit answers the verdict synchronously: 409 with the reason, then 200 with the version"):
+    AnonMintLimiter
+      .create(limit = 100)
+      .flatMap(appWith(_))
+      .flatMap: (service, registry) =>
+        /** Any root-to-leaf walk of the tree — a complete legal turn by construction. */
+        def leafPath(tree: MoveTree): List[String] =
+          tree.children.headOption match
+            case None              => Nil
+            case Some((uci, next)) => uci :: leafPath(next)
+
+        // Poll the room until a roll with a real decision is pending (auto-passes advance on their own).
+        def movable(gameId: String): IO[(Seat, MoveTree)] =
+          registry
+            .get(GameId(gameId))
+            .flatMap:
+              case None       => IO.raiseError(RuntimeException("game vanished"))
+              case Some(room) =>
+                (room.snapshot, room.legalMoves).flatMapN: (snap, moves) =>
+                  if moves.dicePending && moves.legalMoves.children.nonEmpty then
+                    IO.pure((snap.activeSeat, moves.legalMoves))
+                  else IO.sleep(50.millis) *> movable(gameId)
+
+        def seed(gameId: String, token: String, seed: String): IO[Status] =
+          service
+            .run(request(Method.POST, uri"/bot/game" / gameId / "seed", Some(token)).withEntity(BotSeed(seed)))
+            .map(_.status)
+
+        for
+          gameId <- seatedGame(service)
+          // Both seats seed via the API — this opens the gate and rolls the first turn immediately.
+          _                  <- seed(gameId, "tok-alice", "alice-client-seed-0001")
+          _                  <- seed(gameId, "tok-bob", "bob-client-seed-00001")
+          (activeSeat, tree) <- movable(gameId).timeoutTo(
+            10.seconds,
+            IO.raiseError(RuntimeException("no movable roll"))
+          )
+          // Alice challenged, so she is White; the mover's token follows the active seat.
+          mover     = if activeSeat == Seat.White then "tok-alice" else "tok-bob"
+          offTurner = if activeSeat == Seat.White then "tok-bob" else "tok-alice"
+          offTurn <- service.run(
+            request(Method.POST, uri"/bot/game" / gameId / "move", Some(offTurner)).withEntity(BotMove(leafPath(tree)))
+          )
+          illegal <- service.run(
+            request(Method.POST, uri"/bot/game" / gameId / "move", Some(mover)).withEntity(BotMove(List("a1a1")))
+          )
+          applied <- service.run(
+            request(Method.POST, uri"/bot/game" / gameId / "move", Some(mover)).withEntity(BotMove(leafPath(tree)))
+          )
+          offTurnBody <- offTurn.as[MoveOutcome]
+          illegalBody <- illegal.as[MoveOutcome]
+          appliedBody <- applied.as[MoveOutcome]
+        yield
+          assertEquals(offTurn.status, Status.Conflict)
+          assertEquals(offTurnBody.reason, Some("not your turn"))
+          assertEquals(illegal.status, Status.Conflict)
+          assertEquals(illegalBody, MoveOutcome(applied = false, reason = Some("illegal turn")))
+          assertEquals(applied.status, Status.Ok)
+          assertEquals(appliedBody.applied, true)
+          assert(
+            appliedBody.version.exists(_ > 0L),
+            s"the applied verdict must carry the TurnPlayed version: $appliedBody"
+          )
 
   test("a seated bot can submit a dice seed (accepted; folded in before the opening roll)"):
     app.flatMap: service =>
