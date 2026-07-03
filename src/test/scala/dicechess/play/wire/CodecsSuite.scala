@@ -44,8 +44,12 @@ class CodecsSuite extends munit.FunSuite:
       clientSeeds = Some(ClientSeeds("w-seed", "b-seed"))
     )
     roundtrip[GameEvent](GameEvent.Snapshot(9L, endedPs))
-    roundtrip[GameEvent](GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000))))
-    roundtrip[GameEvent](GameEvent.DiceRolled(5L, Seat.Black, List(4), "dfen2", None))
+    val tree = MoveTree(Map("e2e4" -> MoveTree(Map("g1f3" -> MoveTree.empty)), "a2a3" -> MoveTree.empty))
+    roundtrip[GameEvent](
+      GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000)), Some(tree))
+    )
+    roundtrip[GameEvent](GameEvent.DiceRolled(5L, Seat.Black, List(4), "dfen2", None, None))
+    roundtrip[GameEvent](GameEvent.DiceRolled(6L, Seat.Black, List(1, 1, 1), "dfen3", None, Some(MoveTree.empty)))
     roundtrip[GameEvent](
       GameEvent.GameEnded(
         9L,
@@ -94,13 +98,33 @@ class CodecsSuite extends munit.FunSuite:
     assertEquals((GameCommand.Resign: GameCommand).asJson.noSpaces, """{"Resign":{}}""")
     assertEquals(
       (GameEvent
-        .DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", Some(Clocks(180000, 175000))): GameEvent).asJson.noSpaces,
-      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":{"white":180000,"black":175000}}}"""
+        .DiceRolled(
+          1L,
+          Seat.White,
+          List(2, 3, 6),
+          "fen",
+          Some(Clocks(180000, 175000)),
+          Some(MoveTree(Map("e2e4" -> MoveTree(Map("g1f3" -> MoveTree.empty)), "a2a3" -> MoveTree.empty)))
+        ): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":{"white":180000,"black":175000},"legalMoves":{"a2a3":{},"e2e4":{"g1f3":{}}}}}"""
     )
-    // Unlimited games carry no clocks: the field is present and null (Circe's default for None).
+    // Unlimited games carry no clocks: the field is present and null (Circe's default for None). A null legalMoves
+    // means the enumeration was over the inline cap — the full tree is at GET /games/{id}/moves.
     assertEquals(
-      (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", None): GameEvent).asJson.noSpaces,
-      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":null}}"""
+      (GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", None, None): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":null,"legalMoves":null}}"""
+    )
+    // The empty tree is a forced pass the server plays itself — distinct from null (elided by the cap).
+    assertEquals(
+      (GameEvent
+        .DiceRolled(2L, Seat.Black, List(6, 6, 6), "fen", None, Some(MoveTree.empty)): GameEvent).asJson.noSpaces,
+      """{"DiceRolled":{"v":2,"seat":"Black","dice":[6,6,6],"dfen":"fen","clocks":null,"legalMoves":{}}}"""
+    )
+    // A bot that only knows the pre-legalMoves protocol still decodes today's events (the field is additive), and a
+    // recorded pre-upgrade event still decodes today (absent key -> None).
+    assertEquals(
+      decode[GameEvent]("""{"DiceRolled":{"v":1,"seat":"White","dice":[2,3,6],"dfen":"fen","clocks":null}}"""),
+      Right(GameEvent.DiceRolled(1L, Seat.White, List(2, 3, 6), "fen", None, None))
     )
     // GameEnded reveals the server seed plus the two client seeds, so the whole roll transcript is verifiable.
     assertEquals(
@@ -128,5 +152,25 @@ class CodecsSuite extends munit.FunSuite:
     )
     assertEquals(
       (GameEvent.Snapshot(9L, terminal): GameEvent).asJson.noSpaces,
-      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}}"""
+      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"},"legalMoves":null}}}"""
+    )
+
+  test("MoveTree round-trips and pins its wire shape"):
+    val tree = MoveTree(
+      Map(
+        "e2e4" -> MoveTree(Map("g1f3" -> MoveTree.empty, "b1c3" -> MoveTree.empty)),
+        "d2d4" -> MoveTree.empty
+      )
+    )
+    roundtrip[MoveTree](tree)
+    roundtrip[MoveTree](MoveTree.empty)
+    // A node is the plain object of its children (keys sorted for a stable wire); a childless node is a complete turn.
+    assertEquals(tree.asJson.noSpaces, """{"d2d4":{},"e2e4":{"b1c3":{},"g1f3":{}}}""")
+
+  test("GameMoves pins its wire shape"):
+    val body = GameMoves(4L, "fen NBK", dicePending = true, MoveTree(Map("e2e4" -> MoveTree.empty)))
+    roundtrip[GameMoves](body)
+    assertEquals(
+      body.asJson.noSpaces,
+      """{"version":4,"dfen":"fen NBK","dicePending":true,"legalMoves":{"e2e4":{}}}"""
     )

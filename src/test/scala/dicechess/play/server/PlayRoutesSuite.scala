@@ -94,6 +94,26 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
         assertEquals(tState.timeControl, TimeControl.Fischer(300, 3)) // forward-compat: recorded, not yet enforced
 
+  test("GET /games/{id}/moves serves the full legal-move tree for the pending roll"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+      yield (port, http)
+
+    resources.use: (port, http) =>
+      val base = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), base / "games"))
+        // Creation alone never rolls (the room waits for Begin via a WS attach or the seed grace), so the tree is
+        // empty while no roll is pending — and the endpoint says so instead of 404ing.
+        idle    <- http.expect[GameMoves](base / "games" / created.gameId / "moves")
+        missing <- http.status(GET(base / "games" / "nope" / "moves"))
+      yield
+        assertEquals(idle.dicePending, false)
+        assertEquals(idle.legalMoves, MoveTree.empty)
+        assertEquals(missing, Status.NotFound)
+
   test("POST /games rejects a malformed body with 400, not 500"):
     val resources =
       for
@@ -298,6 +318,6 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     conn.send(WSFrame.Text((command: GameCommand).asJson.noSpaces))
 
   private def turnFor(seat: Seat, event: GameEvent): Option[(Long, String)] = event match
-    case GameEvent.DiceRolled(v, s, _, dfen, _) if s == seat                  => Some((v, dfen))
+    case GameEvent.DiceRolled(v, s, _, dfen, _, _) if s == seat               => Some((v, dfen))
     case GameEvent.Snapshot(v, ps) if ps.dicePending && ps.activeSeat == seat => Some((v, ps.dfen))
     case _                                                                    => None

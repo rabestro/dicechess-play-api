@@ -43,6 +43,23 @@ final case class Clocks(white: Long, black: Long)
   */
 final case class ClientSeeds(white: String, black: String)
 
+/** The legal turns for a pending roll, as a prefix tree of UCI micro-moves — e.g. `{"e2e4": {"g1f3": {}}}`. Every legal
+  * turn uses the maximal number of dice (the Maximum Micro-moves Rule), except a turn that captures the king, which
+  * ends the game and is exclusively a leaf — so a node with no children IS a complete legal turn: walk any root-to-leaf
+  * path and submit it. An empty tree means the roll has no legal move and the server is about to auto-pass. Computed by
+  * the engine on the server, so a bot needs no rules implementation of its own.
+  */
+final case class MoveTree(children: Map[String, MoveTree])
+
+object MoveTree:
+  val empty: MoveTree = MoveTree(Map.empty)
+
+  /** Build the tree from UCI move paths. An empty path (a pass) is not representable and is dropped — the wire signals
+    * a pass as the empty tree instead.
+    */
+  def fromPaths(paths: List[List[String]]): MoveTree =
+    MoveTree(paths.filter(_.nonEmpty).groupBy(_.head).map((move, group) => move -> fromPaths(group.map(_.tail))))
+
 /** A wire-safe snapshot of a game, sufficient for a (re)joining client or bot to act. */
 final case class PublicGameState(
     version: Long,
@@ -59,8 +76,18 @@ final case class PublicGameState(
     // can still open the dice commitment. `None` while the game is active (the seed stays secret mid-game).
     seed: Option[String],
     // The client seeds folded into the dice, revealed together with `seed` (so both are `None` while active).
-    clientSeeds: Option[ClientSeeds]
+    clientSeeds: Option[ClientSeeds],
+    // The legal turns for the pending roll. Present while `dicePending`, except when the enumeration exceeds the
+    // inline cap — then it is `None` and a client fetches the full tree via `GET /games/{id}/moves`. `None` whenever
+    // no roll is pending.
+    legalMoves: Option[MoveTree] = None
 )
+
+/** The full legal-move tree for a game's pending roll, served by `GET /games/{id}/moves` — never capped, unlike the
+  * inline `legalMoves` on `PublicGameState`/`DiceRolled`. `version` and `dfen` tie the tree to the roll it answers; the
+  * tree is empty when `dicePending` is false (between turns / game over) or the roll is a forced pass.
+  */
+final case class GameMoves(version: Long, dfen: String, dicePending: Boolean, legalMoves: MoveTree)
 
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
   * codecs over this vocabulary. Kept minimal for 3a-core; draw/double/resync arrive in later milestones.
@@ -79,7 +106,16 @@ enum GameCommand:
   */
 enum GameEvent:
   case Snapshot(v: Long, state: PublicGameState)
-  case DiceRolled(v: Long, seat: Seat, dice: List[Int], dfen: String, clocks: Option[Clocks])
+  // `legalMoves` carries the roll's legal turns (see MoveTree); `None` only when the enumeration exceeded the inline
+  // cap — fetch `GET /games/{id}/moves` then. The empty tree announces a forced pass the server plays itself.
+  case DiceRolled(
+      v: Long,
+      seat: Seat,
+      dice: List[Int],
+      dfen: String,
+      clocks: Option[Clocks],
+      legalMoves: Option[MoveTree]
+  )
   case TurnPlayed(v: Long, seat: Seat, moves: List[String], fenAfter: String)
   // `seed` is the revealed server seed encoded as hex. Hex-decode it, then SHA-256 the raw bytes to reproduce the
   // `commit` published at creation (and echoed on every snapshot). With `clientSeeds`, the full roll transcript can be
