@@ -605,7 +605,10 @@ object GameRoom:
         dice.commit,
         revealed,
         seeds,
-        Option.when(pending && legalTurns.sizeIs <= maxInlinePaths)(legalTree)
+        Option.when(pending && legalTurns.sizeIs <= maxInlinePaths)(legalTree),
+        // The public faces of the seats: who a board or spectator is looking at (bots by name, humans anonymous).
+        (players.get(Seat.White), players.get(Seat.Black))
+          .mapN((w, b) => Players(PublicPlayer.of(w), PublicPlayer.of(b)))
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */

@@ -20,19 +20,25 @@ final class Lobby private (
     seeks: Ref[IO, Map[String, Lobby.Entry]],
     registry: GameRegistry,
     nextId: Ref[IO, Long],
-    ttl: FiniteDuration
+    ttl: FiniteDuration,
+    botTtl: FiniteDuration,
+    maxOpenSeeksPerBot: Int
 ):
   import Lobby.*
 
-  /** Post an open seek; returns it plus the creator's capability secret (needed to poll its status / cancel it). */
-  def create(creator: Principal, timeControl: TimeControl): IO[(Seek, String)] =
-    for
-      n      <- nextId.getAndUpdate(_ + 1)
-      secret <- randomSecret
-      now    <- IO.monotonic
-      seek = Seek(s"seek-$n", timeControl)
-      _ <- seeks.update(_.updated(seek.id, Entry(seek, creator, secret, EntryState.Open, now)))
-    yield (seek, secret)
+  /** Post an open seek; returns it plus the creator's capability secret (needed to poll its status / cancel it). The
+    * seek carries the creator's public face (`kind`/`name`) so humans can see — and choose — bot opponents. A bot's
+    * open seeks are capped (`Left` when spent); guests keep the uncapped 15s-poll semantics.
+    */
+  def create(creator: Principal, timeControl: TimeControl): IO[Either[CreateRejected, (Seek, String)]] =
+    (nextId.getAndUpdate(_ + 1), randomSecret, IO.monotonic).flatMapN: (n, secret, now) =>
+      val face = PublicPlayer.of(creator)
+      val seek = Seek(s"seek-$n", timeControl, face.kind, face.name)
+      seeks.modify: current =>
+        val openByCreator = current.values.count(e => e.creator == creator && e.state == EntryState.Open)
+        if face.kind == PlayerKind.Bot && openByCreator >= maxOpenSeeksPerBot then
+          (current, Left(CreateRejected.TooManyOpenSeeks))
+        else (current.updated(seek.id, Entry(seek, creator, secret, EntryState.Open, now)), Right((seek, secret)))
 
   /** Only seeks still `Open` — claimed/matched ones are hidden from the public list. */
   def list: IO[List[Seek]] =
@@ -53,7 +59,7 @@ final class Lobby private (
   /** Accept an open seek: seat a game (creator = White, accepter = Black) and return the accepter's game + seat token.
     */
   def accept(id: String, accepter: Principal): IO[Either[Rejected, Match]] =
-    claim(id).flatMap {
+    claim(id, accepter).flatMap {
       case Left(rejected)       => IO.pure(Left(rejected))
       case Right((creator, tc)) =>
         registry.create(creator, accepter, tc).flatMap {
@@ -82,19 +88,26 @@ final class Lobby private (
         case Some(e) if e.secret == secret && e.state == EntryState.Open => (current.removed(id), true)
         case _                                                           => (current, false)
 
-  /** Drop seeks whose creator hasn't polled within the TTL (gone). */
+  /** Drop seeks whose creator hasn't polled within its TTL (gone). Bot seeks get the longer `botTtl`, sized for a
+    * poll-only bot on a lazy timer holding a standing offer.
+    */
   def sweep: IO[Unit] =
-    IO.monotonic.flatMap(now => seeks.update(_.filter((_, e) => now - e.lastSeenAt < ttl)))
+    IO.monotonic.flatMap(now => seeks.update(_.filter((_, e) => now - e.lastSeenAt < ttlOf(e))))
+
+  private def ttlOf(e: Entry): FiniteDuration = if e.seek.kind == PlayerKind.Bot then botTtl else ttl
 
   /** Background TTL-sweep loop; start once at boot. */
   def sweeper(interval: FiniteDuration = SweepInterval): IO[Unit] = (IO.sleep(interval) *> sweep).foreverM
 
-  /** Atomically move an open seek to `Claimed`, so two accepters can't both seat a game. */
-  private def claim(id: String): IO[Either[Rejected, (Principal, TimeControl)]] =
+  /** Atomically move an open seek to `Claimed`, so two accepters can't both seat a game. A creator cannot accept its
+    * own seek: the room seats principals, and one principal on both seats has no distinguishable seat.
+    */
+  private def claim(id: String, accepter: Principal): IO[Either[Rejected, (Principal, TimeControl)]] =
     seeks.modify: current =>
       current.get(id) match
-        case None    => (current, Left(Rejected.NotFound))
-        case Some(e) =>
+        case None                             => (current, Left(Rejected.NotFound))
+        case Some(e) if e.creator == accepter => (current, Left(Rejected.OwnSeek))
+        case Some(e)                          =>
           e.state match
             case EntryState.Open =>
               (current.updated(id, e.copy(state = EntryState.Claimed)), Right((e.creator, e.seek.timeControl)))
@@ -104,6 +117,14 @@ object Lobby:
 
   /** How long a seek survives without the creator polling it (creator presumed gone). */
   val DefaultTtl: FiniteDuration = 15.seconds
+
+  /** Bot seeks live longer between polls: a poll-only bot on a ~1-minute timer must be able to hold a standing offer
+    * without a 15s heartbeat. Bots are authenticated and their open seeks are capped, so the looser TTL is safe.
+    */
+  val DefaultBotTtl: FiniteDuration = 2.minutes
+
+  /** Cap on one bot's simultaneously OPEN seeks — bounds the lobby against a seek-spamming bot. */
+  val DefaultMaxOpenSeeksPerBot: Int = 3
 
   /** How often the background sweep runs. */
   val SweepInterval: FiniteDuration = 5.seconds
@@ -116,10 +137,15 @@ object Lobby:
     case Open
     case Matched(gameId: String, token: String)
 
+  /** Why a create was refused. */
+  enum CreateRejected:
+    case TooManyOpenSeeks // the bot is at its open-seeks cap
+
   /** Why an accept was refused. */
   enum Rejected:
     case NotFound
     case AlreadyTaken
+    case OwnSeek // the creator itself tried to accept
     case Failed(reason: String)
 
   private enum EntryState:
@@ -135,9 +161,14 @@ object Lobby:
       lastSeenAt: FiniteDuration
   )
 
-  def create(registry: GameRegistry, ttl: FiniteDuration = DefaultTtl): IO[Lobby] =
+  def create(
+      registry: GameRegistry,
+      ttl: FiniteDuration = DefaultTtl,
+      botTtl: FiniteDuration = DefaultBotTtl,
+      maxOpenSeeksPerBot: Int = DefaultMaxOpenSeeksPerBot
+  ): IO[Lobby] =
     (Ref.of[IO, Map[String, Entry]](Map.empty), Ref.of[IO, Long](0L))
-      .mapN((seeks, nextId) => new Lobby(seeks, registry, nextId, ttl))
+      .mapN((seeks, nextId) => new Lobby(seeks, registry, nextId, ttl, botTtl, maxOpenSeeksPerBot))
 
   private def randomSecret: IO[String] = IO:
     val bytes = new Array[Byte](16)

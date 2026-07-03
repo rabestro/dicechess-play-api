@@ -83,6 +83,7 @@ object Main extends IOApp.Simple:
                   challenges,
                   botEvents,
                   registry,
+                  lobby,
                   mintLimit,
                   registerLimit
                 )).orNotFound
