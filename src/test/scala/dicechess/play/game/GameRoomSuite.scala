@@ -253,12 +253,18 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       case Left(error)  => fail(s"event dfen must parse: $error")
       case Right(state) => MoveTree.fromPaths(EngineOps.legalMovePaths(state).map(_.map(EngineOps.toUci)))
 
+  final private case class MovableRoll(seat: Seat, dfen: String, legalMoves: Option[MoveTree], v: Long)
+
   /** Seed both seats (instant roll, deterministic dice), start, and hand back the first roll with a real decision —
     * auto-passes stream by on their own until one arrives.
     */
-  private def firstMovableRoll(room: GameRoom): IO[GameEvent.DiceRolled] =
+  private def firstMovableRoll(room: GameRoom): IO[MovableRoll] =
     val movable = room.subscribe
-      .collectFirst { case r: GameEvent.DiceRolled if r.legalMoves.exists(_.children.nonEmpty) => r }
+      .collectFirst:
+        case GameEvent.Snapshot(v, s) if s.dicePending && s.legalMoves.exists(_.children.nonEmpty) =>
+          MovableRoll(s.activeSeat, s.dfen, s.legalMoves, v)
+        case GameEvent.DiceRolled(v, seat, _, dfen, _, Some(tree)) if tree.children.nonEmpty =>
+          MovableRoll(seat, dfen, Some(tree), v)
       .compile
       .lastOrError
     val drive =
@@ -315,7 +321,11 @@ class GameRoomSuite extends munit.CatsEffectSuite:
         case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
         case Right(room) =>
           val elided = room.subscribe
-            .collectFirst { case r: GameEvent.DiceRolled if r.legalMoves.isEmpty => r }
+            .collectFirst:
+              case GameEvent.Snapshot(v, s) if s.dicePending && s.legalMoves.isEmpty =>
+                MovableRoll(s.activeSeat, s.dfen, None, v)
+              case GameEvent.DiceRolled(v, seat, _, dfen, _, None) =>
+                MovableRoll(seat, dfen, None, v)
             .compile
             .lastOrError
           val drive =
