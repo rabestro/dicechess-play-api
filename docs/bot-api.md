@@ -3,6 +3,7 @@
 This is a public, end-user reference for connecting third-party bots to the Dice Chess play platform.
 
 For a reference client implementation in Scala, see [rabestro/dicechess-reference-bot](https://github.com/rabestro/dicechess-reference-bot).
+For a minimal poll-only bot in dependency-free Python (~100 lines, public domain), see [examples/random_bot.py](examples/random_bot.py).
 
 ## Base URL & Authentication
 
@@ -89,7 +90,8 @@ The tree rides in three places:
 3. [`GET /games/{id}/moves`](#get-legal-moves) — always the full tree, never capped.
 
 A complete random bot is therefore just: read the tree, walk root→leaf picking a random child at each node, and
-`POST` the path — no engine, no DFEN parsing required.
+`POST` the path — no engine, no DFEN parsing required. [examples/random_bot.py](examples/random_bot.py) is exactly
+that, end to end (discovery, accept, seeds, play loop) in ~100 lines of dependency-free Python.
 
 ---
 
@@ -258,7 +260,21 @@ Submits the turn's micro-moves in UCI notation. Submit one move per rolled die.
     "moves": ["e2e4", "g8f6"]
   }
   ```
-- **Response:** `202 Accepted` (fire-and-forget; validity results arrive asynchronously on the game stream as `TurnPlayed` or `Rejected`).
+- **Response:** the verdict, synchronously — a `TurnPlayed`/`Rejected` still broadcasts on the game stream as before,
+  so fire-and-forget bots can simply ignore the body.
+  - `200 OK` — the turn was applied; `version` is the resulting `TurnPlayed`'s `v`:
+
+    ```json
+    {"applied": true, "version": 17, "reason": null}
+    ```
+  - `409 Conflict` — refused, with the same reason the stream's `Rejected` carries (`"not your turn"`,
+    `"illegal turn"`, `"game is over"`):
+
+    ```json
+    {"applied": false, "version": null, "reason": "illegal turn"}
+    ```
+  - `202 Accepted` — fallback: the server could not produce a verdict within a few seconds (it never blocks the call
+    on a wedged game); treat it like the legacy fire-and-forget submit and watch the stream.
 
 #### Resign Game
 `POST /bot/game/{id}/resign`
@@ -303,7 +319,8 @@ The stream is **live-only** (events published while you are disconnected are not
 only source of truth: [`GET /bot/challenges`](#list-pending-challenges) and [`GET /bot/games`](#list-my-games) recover
 the same facts by polling. A **poll-only bot** — e.g. a cron-triggered cloud function that never holds a stream — can
 play entirely without it: wake → list challenges → accept → list games → for each game where `dicePending` and
-`activeSeat` is yours, fetch the [legal moves](#legal-moves) and submit a turn → sleep. Mind the clocks: for
+`activeSeat` is yours, fetch the [legal moves](#legal-moves) and submit a turn (the verdict — applied or the
+rejection reason — comes back synchronously on the submit itself) → sleep. Mind the clocks: for
 `Unlimited` games the 120s anti-abandonment cap makes a ~1-minute timer sufficient; short time controls need the
 stream (or faster polling) to stay ahead of the clock.
 
@@ -479,6 +496,8 @@ curl -sX POST -H "Authorization: Bearer $T" \
   -d '{"moves":["e2e4"]}' \
   https://play-api.jc.id.lv/bot/game/<gameId>/move
 ```
+The response tells you immediately whether the turn was applied (`{"applied":true,"version":…}`) or why it was
+refused (`{"applied":false,"reason":"illegal turn"}`) — no stream needed to debug a rejected move.
 
 ### Self-Play Test Loop
 
