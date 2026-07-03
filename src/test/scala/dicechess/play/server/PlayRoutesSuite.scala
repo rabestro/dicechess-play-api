@@ -114,6 +114,48 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(idle.legalMoves, MoveTree.empty)
         assertEquals(missing, Status.NotFound)
 
+  test("GET /games/{id}/moves carries the pending roll's tree once the game rolls"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+        ws   <- Resource.eval(JdkWSClient.simple[IO])
+      yield (port, http, ws)
+
+    resources.use: (port, http, ws) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
+
+      // Poll until a roll with a real decision is pending (auto-passes flip `dicePending` only transiently).
+      def pollMovable(uri: Uri): IO[GameMoves] =
+        http
+          .expect[GameMoves](uri)
+          .flatMap: moves =>
+            if moves.dicePending && moves.legalMoves.children.nonEmpty then IO.pure(moves)
+            else IO.sleep(100.millis) *> pollMovable(uri)
+
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        blackUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.Black))
+        moves <- (
+          ws.connectHighLevel(WSRequest(whiteUri)),
+          ws.connectHighLevel(WSRequest(blackUri))
+        ).tupled.use: (white, black) =>
+          // Seed both seats (opens the opening-roll gate), then wait for a movable roll while both sockets stay
+          // attached (a dropped seat would forfeit after the test server's short reconnect grace).
+          send(white, GameCommand.SubmitSeed("client-seed-White-0123456789")) *>
+            send(black, GameCommand.SubmitSeed("client-seed-Black-0123456789")) *>
+            pollMovable(httpBase / "games" / created.gameId / "moves")
+              .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no movable roll became pending")))
+      yield
+        // The served tree is exactly the engine's enumeration for the DFEN the endpoint itself reported.
+        val expected = EngineOps.parse(moves.dfen) match
+          case Left(error)  => fail(s"endpoint dfen must parse: $error")
+          case Right(state) =>
+            MoveTree.fromPaths(EngineOps.legalMovePaths(state).map(_.map(EngineOps.toUci)))
+        assertEquals(moves.legalMoves, expected)
+
   test("POST /games rejects a malformed body with 400, not 500"):
     val resources =
       for

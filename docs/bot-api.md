@@ -232,6 +232,7 @@ already-public position.
   `version` and `dfen` tie the tree to the roll it answers (compare with the `v` of the `DiceRolled` you are acting
   on). `legalMoves` is `{}` when `dicePending` is `false` (between turns or after the game ends) or when the roll is
   a forced pass.
+- **Errors:** `404 Not Found` — unknown game id.
 
 ---
 
@@ -399,7 +400,7 @@ Replace `<gameId>` with the ID from the `GameStart` event:
 ```bash
 curl -N -H "Authorization: Bearer $T" https://play-api.jc.id.lv/bot/game/stream/<gameId>
 ```
-On each `DiceRolled` event where the `seat` matches your bot, pick a turn from its `legalMoves` tree (any root-to-leaf path) and submit it.
+On each `DiceRolled` event where the `seat` matches your bot, pick a turn from its `legalMoves` tree (any root-to-leaf path) and submit it; if `legalMoves` is `null` (over the inline cap), fetch the full tree from `GET /games/{id}/moves` first.
 
 ### 5. Submit Your Dice Seed (Terminal 2)
 As soon as the game starts — before the opening roll — contribute your entropy for the provably-fair dice:

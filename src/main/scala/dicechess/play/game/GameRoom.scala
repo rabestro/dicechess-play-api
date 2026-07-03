@@ -171,13 +171,7 @@ final class GameRoom private (
     */
   def legalMoves: IO[GameMoves] =
     stateRef.get.map: s =>
-      GameMoves(s.version, EngineOps.serialize(s.state), s.pending, moveTreeOf(s.legalPaths))
-
-  /** The tree carried inline on `DiceRolled`: elided (`None`) above the cap, since event streams are uncompressed and
-    * the enumeration's tail is heavy — clients fall back to `GET /games/{id}/moves`.
-    */
-  private def inlineMoves(paths: List[List[Move]]): Option[MoveTree] =
-    Option.when(paths.sizeIs <= maxInlinePaths)(moveTreeOf(paths))
+      GameMoves(s.version, EngineOps.serialize(s.state), s.pending, s.legalTree)
 
   // ── consumer fiber ─────────────────────────────────────────────────────────
 
@@ -346,30 +340,39 @@ final class GameRoom private (
     )
 
   /** Roll for the side to move; publish the roll; auto-pass while there is no legal move. The turn's legal paths are
-    * enumerated exactly once here and cached on the session — `SubmitTurn` validates against the cache, so a spammed or
-    * illegal submit never re-runs the engine's turn generation.
+    * enumerated (and their UCI index and wire tree built) exactly once here and cached on the session — `SubmitTurn`
+    * validates with a cache lookup, so a spammed or illegal submit never re-runs the engine's turn generation.
     */
   private def beginTurn(s0: Session): IO[Session] =
-    val dice   = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
-    val rolled = EngineOps.withDice(s0.state, dice)
-    val seat   = EngineOps.activeSeat(rolled)
-    val paths  = EngineOps.legalMovePaths(rolled)
-    val s1     = s0.copy(state = rolled, ply = s0.ply + 1, pending = true, lastRoll = dice, legalPaths = paths)
+    val dice          = s0.dice.roll(s0.ply, s0.seedFor(Seat.White), s0.seedFor(Seat.Black))
+    val rolled        = EngineOps.withDice(s0.state, dice)
+    val seat          = EngineOps.activeSeat(rolled)
+    val (turns, tree) = turnCache(rolled)
+    val s1            = s0.copy(
+      state = rolled,
+      ply = s0.ply + 1,
+      pending = true,
+      lastRoll = dice,
+      legalTurns = turns,
+      legalTree = tree
+    )
     // The new mover's clock has not started ticking yet (startClock runs below), so these are the banks at turn start —
     // including the increment just credited to the side that completed the previous turn.
+    val inline   = Option.when(turns.sizeIs <= maxInlinePaths)(tree)
     val emitRoll =
       IO.monotonic.flatMap: now =>
         val clocks = liveClocks(s1, now)
-        emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled), clocks, inlineMoves(paths)))
+        emit(s1, v => GameEvent.DiceRolled(v, seat, dice, EngineOps.serialize(rolled), clocks, inline))
     emitRoll.flatMap: s2 =>
-      if paths.nonEmpty then startClock(s2)
+      if turns.nonEmpty then startClock(s2)
       else
         val passed   = rolled.endTurn()
         val passDfen = EngineOps.serialize(passed)
         val s3       = s2.copy(
           state = passed,
           pending = false,
-          legalPaths = Nil,
+          legalTurns = Map.empty,
+          legalTree = MoveTree.empty,
           turns = s2.turns :+ TurnRecord(s2.ply, colorLetter(seat), dice, Nil, passDfen)
         )
         emit(s3, v => GameEvent.TurnPlayed(v, seat, Nil, passDfen))
@@ -417,8 +420,8 @@ final class GameRoom private (
             if !s.pending || seat != EngineOps.activeSeat(s.state) then
               emit(s, v => GameEvent.Rejected(v, seat, "not your turn"))
             else
-              // Validate against the paths cached when the turn was rolled — never re-enumerate per submit.
-              s.legalPaths.find(_.map(EngineOps.toUci) == uci) match
+              // Validate against the UCI index cached when the turn was rolled — a lookup, never a re-enumeration.
+              s.legalTurns.get(uci) match
                 case None       => emit(s, v => GameEvent.Rejected(v, seat, "illegal turn"))
                 case Some(path) =>
                   val (next, winner) = EngineOps.applyPath(s.state, path)
@@ -430,7 +433,8 @@ final class GameRoom private (
                     sd.copy(
                       state = next,
                       pending = false,
-                      legalPaths = Nil,
+                      legalTurns = Map.empty,
+                      legalTree = MoveTree.empty,
                       turns = sd.turns :+ TurnRecord(sd.ply, colorLetter(seat), sd.lastRoll, uci, nextDfen)
                     ),
                     v => GameEvent.TurnPlayed(v, seat, uci, nextDfen)
@@ -480,9 +484,13 @@ object GameRoom:
     */
   val DefaultMaxInlineTurnPaths: Int = 1000
 
-  /** The wire tree for a set of engine turn paths. */
-  private def moveTreeOf(paths: List[List[Move]]): MoveTree =
-    MoveTree.fromPaths(paths.map(_.map(EngineOps.toUci)))
+  /** The per-roll turn cache, built once when the dice land: the UCI→engine-path index `SubmitTurn` validates against
+    * (a lookup per submit, never a re-enumeration or re-mapping), and the prebuilt wire tree every snapshot and
+    * `GET /games/{id}/moves` read serves as-is.
+    */
+  private def turnCache(state: GameState): (Map[List[String], List[Move]], MoveTree) =
+    val turns = EngineOps.legalMovePaths(state).map(path => path.map(EngineOps.toUci) -> path).toMap
+    (turns, MoveTree.fromPaths(turns.keys.toList))
 
   /** A live subscriber's mailbox plus a one-shot "you fell behind, disconnect" signal. */
   final private case class Subscriber(id: Long, queue: Queue[IO, GameEvent], dropped: Deferred[IO, Unit])
@@ -513,10 +521,11 @@ object GameRoom:
       lastRoll: List[Int] = Nil,
       turns: Vector[TurnRecord] = Vector.empty,
       createdAtEpochMs: Option[Long] = None,
-      // The legal turn paths for the roll in flight, enumerated once in `beginTurn` and used for both the wire's
-      // `legalMoves` tree and `SubmitTurn` validation. Transient: never persisted (it is a pure function of the
-      // pending `state`), recomputed on restore.
-      legalPaths: List[List[Move]] = Nil
+      // The roll-in-flight turn cache (see `turnCache`): the UCI index `SubmitTurn` validates against and the
+      // prebuilt wire tree. Transient: never persisted (a pure function of the pending `state`), recomputed on
+      // restore, cleared when the turn completes.
+      legalTurns: Map[List[String], List[Move]] = Map.empty,
+      legalTree: MoveTree = MoveTree.empty
   ):
     def ended: Boolean = status match
       case GameStatus.Ended(_) => true
@@ -555,7 +564,7 @@ object GameRoom:
         dice.commit,
         revealed,
         seeds,
-        Option.when(pending && legalPaths.sizeIs <= maxInlinePaths)(moveTreeOf(legalPaths))
+        Option.when(pending && legalTurns.sizeIs <= maxInlinePaths)(legalTree)
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
@@ -624,6 +633,9 @@ object GameRoom:
       case Left(error)   => IO.pure(Left(s"corrupt snapshot dfen: $error"))
       case Right(state0) =>
         IO.monotonic.flatMap { now =>
+          // The cache is transient; a pending roll's turns re-derive from the persisted DFEN (dice included).
+          val (turns, tree) =
+            if snapshot.pending then turnCache(state0) else (Map.empty[List[String], List[Move]], MoveTree.empty)
           val session0 = Session(
             state0,
             snapshot.version,
@@ -643,8 +655,8 @@ object GameRoom:
             lastRoll = snapshot.lastRoll,
             turns = snapshot.turns,
             createdAtEpochMs = snapshot.createdAtEpochMs,
-            // The cache is transient; a pending roll's paths re-derive from the persisted DFEN (dice included).
-            legalPaths = if snapshot.pending then EngineOps.legalMovePaths(state0) else Nil
+            legalTurns = turns,
+            legalTree = tree
           )
           build(
             session0,
