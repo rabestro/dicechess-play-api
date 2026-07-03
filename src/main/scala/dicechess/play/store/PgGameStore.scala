@@ -8,7 +8,7 @@ import doobie.implicits.*
 import doobie.postgres.circe.jsonb.implicits.*
 import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
-import dicechess.play.core.GameId
+import dicechess.play.core.{GameId, Principal}
 import dicechess.play.ingest.PlaysiteIngest
 import io.circe.Json
 import io.circe.syntax.*
@@ -24,7 +24,7 @@ import scala.concurrent.duration.*
   * Every round trip is bounded by a timeout: the caller treats store trouble as a degradation, and a *hung* query —
   * unlike a failed one — would otherwise stall the game's writer fiber in a way `handleErrorWith` can't catch.
   */
-final class PgGameStore private (xa: Transactor[IO]) extends GameStore with OutboxStore:
+final class PgGameStore private (xa: Transactor[IO]) extends GameStore with OutboxStore with BotStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload: the terminal
@@ -72,6 +72,32 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
     sql"""UPDATE play.outbox
           SET failed_permanently = true, attempts = attempts + 1, last_error = $error
           WHERE game_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
+
+  // ── BotStore ────────────────────────────────────────────────────────────────
+
+  /** Claim the identity atomically: the primary key makes a concurrent double-register lose cleanly. */
+  def register(team: String, name: String, tokenHash: String): IO[Boolean] =
+    sql"""INSERT INTO play.bots (team, name, token_hash)
+          VALUES ($team, $name, $tokenHash)
+          ON CONFLICT (team, name) DO NOTHING""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
+
+  def authenticate(tokenHash: String): IO[Option[Principal.Bot]] =
+    sql"""SELECT team, name FROM play.bots WHERE token_hash = $tokenHash"""
+      .query[(String, String)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(Principal.Bot(_, _)))
+
+  def rotate(team: String, name: String, newTokenHash: String): IO[Boolean] =
+    sql"""UPDATE play.bots SET token_hash = $newTokenHash, rotated_at = now()
+          WHERE team = $team AND name = $name""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
 
   /** Every live game, decoded row by row: one corrupt snapshot is logged and skipped, never aborting the batch — a
     * single bad row must not stop every other game from resuming.

@@ -16,14 +16,17 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
 
   private def appWith(
       limiter: AnonMintLimiter,
-      maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot
+      maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot,
+      registerLimit: Int = 100
   ): IO[(HttpApp[IO], GameRegistry)] =
     for
-      auth       <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol")
-      events     <- BotEvents.create
-      registry   <- GameRegistry.create()
-      challenges <- Challenges.create(events, registry, maxPendingPerBot = maxPendingPerBot)
-    yield (BotRoutes(auth, challenges, events, registry, limiter).orNotFound, registry)
+      bots            <- dicechess.play.store.BotStore.inMemory
+      auth            <- BotAuth.fromSpec("acme|alice|tok-alice,acme|bob|tok-bob,acme|carol|tok-carol", bots)
+      events          <- BotEvents.create
+      registry        <- GameRegistry.create()
+      challenges      <- Challenges.create(events, registry, maxPendingPerBot = maxPendingPerBot)
+      registerLimiter <- AnonMintLimiter.create(limit = registerLimit)
+    yield (BotRoutes(auth, challenges, events, registry, limiter, registerLimiter).orNotFound, registry)
 
   private def app: IO[HttpApp[IO]] = AnonMintLimiter.create(limit = 100).flatMap(appWith(_)).map(_._1)
 
@@ -68,6 +71,67 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
           assertEquals(s2, Status.Created)
           assertEquals(r3.status, Status.TooManyRequests)
           assert(r3.headers.get[`Retry-After`].isDefined, "a 429 must carry Retry-After")
+
+  test("POST /bot/register mints a durable identity that authenticates; the slug rules gate it"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        account <- service.run(request(Method.GET, uri"/bot/account", Some(created.token))).flatMap(_.as[BotAccount])
+        badSlug <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("Dragons", "smaug")))
+          .map(_.status)
+        reserved <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("house", "smaug")))
+          .map(_.status)
+        taken <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .map(_.status)
+        static <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("acme", "alice")))
+          .map(_.status)
+      yield
+        assertEquals(created.id, "bot:team:dragons:smaug")
+        assertEquals(account.id, created.id) // the once-shown token authenticates as the claimed identity
+        assertEquals(badSlug, Status.BadRequest)
+        assertEquals(reserved, Status.BadRequest)
+        assertEquals(taken, Status.Conflict)
+        assertEquals(static, Status.Conflict) // the static roster can't be impersonated
+
+  test("POST /bot/register is rate-limited per client"):
+    AnonMintLimiter
+      .create(limit = 100)
+      .flatMap(appWith(_, registerLimit = 1))
+      .map(_._1)
+      .flatMap: service =>
+        for
+          first  <- service.run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "one")))
+          second <- service.run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "two")))
+        yield
+          assertEquals(first.status, Status.Created)
+          assertEquals(second.status, Status.TooManyRequests)
+          assert(second.headers.get[`Retry-After`].isDefined, "a 429 must carry Retry-After")
+
+  test("POST /bot/token rotates a registered token; anon and static callers get 403"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        rotated <- service
+          .run(request(Method.POST, uri"/bot/token", Some(created.token)))
+          .flatMap(_.as[RotatedToken])
+        oldDead  <- service.run(request(Method.GET, uri"/bot/account", Some(created.token))).map(_.status)
+        newAlive <- service.run(request(Method.GET, uri"/bot/account", Some(rotated.token))).flatMap(_.as[BotAccount])
+        anon     <- service.run(Request[IO](Method.POST, uri"/bot/anon")).flatMap(_.as[AnonBot])
+        anonNo   <- service.run(request(Method.POST, uri"/bot/token", Some(anon.token))).map(_.status)
+        staticNo <- service.run(request(Method.POST, uri"/bot/token", Some("tok-alice"))).map(_.status)
+      yield
+        assertEquals(oldDead, Status.Unauthorized) // the rotated-away token is gone immediately
+        assertEquals(newAlive.id, created.id)      // the identity itself is unchanged
+        assertEquals(anonNo, Status.Forbidden)
+        assertEquals(staticNo, Status.Forbidden)
 
   test("an unknown / no Bearer token is unauthorized"):
     app.flatMap: service =>
