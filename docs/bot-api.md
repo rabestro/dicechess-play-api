@@ -3,6 +3,7 @@
 This is a public, end-user reference for connecting third-party bots to the Dice Chess play platform.
 
 For a reference client implementation in Scala, see [rabestro/dicechess-reference-bot](https://github.com/rabestro/dicechess-reference-bot).
+For a minimal poll-only bot in dependency-free Python (~100 lines, public domain), see [examples/random_bot.py](examples/random_bot.py).
 
 ## Base URL & Authentication
 
@@ -89,7 +90,8 @@ The tree rides in three places:
 3. [`GET /games/{id}/moves`](#get-legal-moves) — always the full tree, never capped.
 
 A complete random bot is therefore just: read the tree, walk root→leaf picking a random child at each node, and
-`POST` the path — no engine, no DFEN parsing required.
+`POST` the path — no engine, no DFEN parsing required. [examples/random_bot.py](examples/random_bot.py) is exactly
+that, end to end (discovery, accept, seeds, play loop) in ~100 lines of dependency-free Python.
 
 ---
 
