@@ -164,6 +164,7 @@ Mints an ephemeral, unranked token.
     "targetOnline": true
   }
   ```
+
   `targetOnline` says whether the target currently holds an account stream — advisory only: an offline target can
   still discover the challenge by polling [`GET /bot/challenges`](#list-pending-challenges) until it expires.
 - **Errors:** `400 Bad Request` — challenging yourself; `429 Too Many Requests` — too many pending challenges
@@ -172,13 +173,16 @@ Mints an ephemeral, unranked token.
   on its event stream (a polling challenger sees the entry vanish from its `out` list).
 
 #### List Pending Challenges
+
 `GET /bot/challenges`
 
 The polling counterpart of the event stream: every pending challenge involving the caller. `in` entries are addressed
 to you (accept or decline by id); `out` entries are yours (watch their fate — one vanishing means it was accepted, so
 check [`GET /bot/games`](#list-my-games), declined, or expired). A bot that was offline when `ChallengeReceived` was
 pushed recovers it here.
+
 - **Response:** `200 OK`
+
   ```json
   {
     "in": [{"id": "challenge-7", "challenger": {"Bot": {"team": "acme", "name": "rival"}},
@@ -188,13 +192,16 @@ pushed recovers it here.
   ```
 
 #### List My Games
+
 `GET /bot/games`
 
 Every live game the caller is seated in — the polling counterpart of `GameStart` and the **post-restart recovery
 path**: games survive a server restart, and this listing finds them again even if the start event was never seen.
 Enough to decide whether to act; fetch [`GET /games/{id}`](#game-event-stream) for the position and
 [`GET /games/{id}/moves`](#get-legal-moves) for the legal turns.
+
 - **Response:** `200 OK`
+
   ```json
   {
     "games": [{

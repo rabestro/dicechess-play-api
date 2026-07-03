@@ -127,18 +127,19 @@ object BotRoutes:
           challenges.listFor(bot).flatMap((in, out) => Ok(BotChallenges(in, out)))
 
       // The polling counterpart of `GameStart` — and the post-restart recovery path: every live game the caller is
-      // seated in, whether or not it ever saw the start event.
+      // seated in, whether or not it ever saw the start event. The registry serves this from a per-player index, so
+      // the cost is O(the caller's games), not O(every game on the node).
       case req @ GET -> Root / "bot" / "games" =>
         withBot(auth, req): bot =>
-          registry.list
+          registry
+            .gamesFor(bot)
             .flatMap(_.traverse { (id, room) =>
-              seatOf(room, bot).flatMap:
-                case None       => IO.pure(None)
-                case Some(seat) =>
-                  room.snapshot.map: s =>
-                    // A just-ended room can linger until the registry evicts it; a listing is for live games only.
-                    Option.when(s.status == GameStatus.Active):
-                      BotActiveGame(id.value, seat, s.activeSeat, s.dicePending, s.timeControl, s.clocks, s.version)
+              (seatOf(room, bot), room.snapshot).mapN: (seat, s) =>
+                // A just-ended room can linger until the registry evicts it; a listing is for live games only.
+                seat
+                  .filter(_ => s.status == GameStatus.Active)
+                  .map: st =>
+                    BotActiveGame(id.value, st, s.activeSeat, s.dicePending, s.timeControl, s.clocks, s.version)
             })
             .flatMap(games => Ok(BotGames(games.flatten)))
 

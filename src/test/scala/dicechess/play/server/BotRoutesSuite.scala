@@ -181,6 +181,22 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
       .flatMap(_.run(request(Method.GET, uri"/bot/games", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
 
+  test("a finished game leaves the listing (the player index is evicted with the room)"):
+    app.flatMap: service =>
+      def pollEmpty: IO[Unit] =
+        service
+          .run(request(Method.GET, uri"/bot/games", Some("tok-alice")))
+          .flatMap(_.as[BotGames])
+          .flatMap(listed => if listed.games.isEmpty then IO.unit else IO.sleep(50.millis) *> pollEmpty)
+      for
+        gameId <- seatedGame(service)
+        before <- service.run(request(Method.GET, uri"/bot/games", Some("tok-alice"))).flatMap(_.as[BotGames])
+        _ = assertEquals(before.games.map(_.gameId), List(gameId))
+        _ <- service.run(request(Method.POST, uri"/bot/game" / gameId / "resign", Some("tok-alice")))
+        // Eviction runs on the room-result fiber, so it lands shortly after the resign — poll until it does.
+        _ <- pollEmpty.timeoutTo(5.seconds, IO.raiseError(RuntimeException("the finished game was never evicted")))
+      yield ()
+
   test("the challenged bot accepts and receives a game id"):
     app.flatMap: service =>
       for
