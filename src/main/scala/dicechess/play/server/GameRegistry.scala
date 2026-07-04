@@ -22,6 +22,11 @@ final class GameRegistry private (
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
 
+  /** Every live room, for the public games listing — one entry per active game on this node, so the map stays small.
+    * Per-caller lookups should use [[gamesFor]] instead (indexed); this is for the whole-lobby view.
+    */
+  def list: IO[List[(GameId, GameRoom)]] = rooms.get.map(_.toList)
+
   /** The live games `principal` is seated in — an index lookup plus O(own games), not a scan over every room on the
     * node: bot discovery polls this on a timer, so its cost must not grow with everyone else's games.
     */

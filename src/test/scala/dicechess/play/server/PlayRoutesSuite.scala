@@ -94,6 +94,38 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
         assertEquals(tState.timeControl, TimeControl.Fischer(300, 3)) // forward-compat: recorded, not yet enforced
 
+  test("GET /games lists live games with players, most action first; finished games leave it"):
+    val resources =
+      for
+        port <- server
+        http <- Resource.eval(JdkHttpClient.simple[IO])
+        ws   <- Resource.eval(JdkWSClient.simple[IO])
+      yield (port, http, ws)
+
+    resources.use: (port, http, ws) =>
+      val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
+      val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
+
+      def listing: IO[LiveGames] = http.expect[LiveGames](httpBase / "games")
+
+      for
+        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+        listed  <- listing
+        entry = listed.games.find(_.gameId == created.gameId).getOrElse(fail("created game not listed"))
+        // Who plays is public: two anonymous humans here (bots would carry their names).
+        _ = assertEquals(
+          entry.players,
+          Some(Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Human, None)))
+        )
+        _ = assertEquals(listed.total, listed.games.size) // under the cap the total IS the page
+        // End the game over the wire; the room is evicted and the listing must drop it.
+        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+        _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)
+        _ <- listing
+          .iterateUntil(_.games.forall(_.gameId != created.gameId))
+          .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
+      yield ()
+
   test("GET /games/{id}/moves serves the full legal-move tree for the pending roll"):
     val resources =
       for
