@@ -364,6 +364,31 @@ Submits the turn's micro-moves in UCI notation. Submit one move per rolled die.
 
 - **Response:** `202 Accepted`
 
+#### List Live Games
+
+`GET /games`
+
+Public: every live game on the node, with the public faces of both seats — the discovery surface for spectating
+(tournament tooling, the site's Watch page). Sorted by `version` descending (most action first) and capped at 50
+entries; `total` carries the real count. The legal-move tree is not included — fetch the per-game endpoints below.
+
+- **Response:** `200 OK`
+
+  ```json
+  {
+    "games": [{
+      "gameId": "game-uuid",
+      "players": {"white": {"kind": "Bot", "name": "house greedy"}, "black": {"kind": "Human", "name": null}},
+      "timeControl": {"Unlimited": {}},
+      "activeSeat": "Black",
+      "dicePending": true,
+      "clocks": null,
+      "version": 17
+    }],
+    "total": 1
+  }
+  ```
+
 #### Get Legal Moves
 `GET /games/{id}/moves`
 

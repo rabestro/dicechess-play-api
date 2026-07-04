@@ -1,6 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
+import cats.syntax.all.*
 import dicechess.play.core.*
 import dicechess.play.game.GameRoom
 import dicechess.play.wire.Codecs.given
@@ -25,12 +26,31 @@ final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
   */
 final case class CreatedGame(gameId: String, commit: String, tokens: List[SeatToken]) derives Codec.AsObject
 
+/** One live game in the public listing — who plays and how far along it is; a watcher opens `GET /games/{id}` (or the
+  * tokenless spectator WebSocket) for the position itself. The legal-move tree is deliberately not carried here.
+  */
+final case class LiveGame(
+    gameId: String,
+    players: Option[Players],
+    timeControl: TimeControl,
+    activeSeat: Seat,
+    dicePending: Boolean,
+    clocks: Option[Clocks],
+    version: Long
+) derives Codec.AsObject
+
+/** The public games listing: up to the cap of live games (most action first) plus the uncapped total. */
+final case class LiveGames(games: List[LiveGame], total: Int) derives Codec.AsObject
+
 object PlayRoutes:
 
   /** WebSocket heartbeat interval — comfortably under Ember's 60s read-idle timeout so the client's pong keeps the
     * connection alive between game events.
     */
   val DefaultKeepAlive: FiniteDuration = 25.seconds
+
+  /** Cap on the public games listing: bounds the payload of an unauthenticated, poll-heavy endpoint. */
+  private val MaxListedGames = 50
 
   private object TokenParam extends OptionalQueryParamDecoderMatcher[String]("token")
 
@@ -59,6 +79,22 @@ object PlayRoutes:
                   case Right((id, room)) =>
                     val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
                     room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
+
+      // Public like the per-game snapshot: everything here is already public information. Feeds the Watch page, the
+      // lobby's "top game" preview, and the live-games counter; sorted by version (most action first) and capped —
+      // nobody scrolls past MaxListedGames boards, and `total` still carries the real count.
+      case GET -> Root / "games" =>
+        registry.list
+          .flatMap(_.traverse { (id, room) =>
+            room.snapshot.map { s =>
+              Option.when(s.status == GameStatus.Active):
+                LiveGame(id.value, s.players, s.timeControl, s.activeSeat, s.dicePending, s.clocks, s.version)
+            }
+          })
+          .flatMap { entries =>
+            val live = entries.flatten.sortBy(-_.version)
+            Ok(LiveGames(live.take(MaxListedGames), live.size))
+          }
 
       case GET -> Root / "games" / id =>
         registry
