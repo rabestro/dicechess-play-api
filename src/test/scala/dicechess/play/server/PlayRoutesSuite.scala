@@ -118,6 +118,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           Some(Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Human, None)))
         )
         _ = assertEquals(listed.total, listed.games.size) // under the cap the total IS the page
+        _ = assert(entry.dfen.startsWith("rnbqkbnr/"), "the listing carries the position for mini-boards")
         // End the game over the wire; the room is evicted and the listing must drop it.
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
         _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)

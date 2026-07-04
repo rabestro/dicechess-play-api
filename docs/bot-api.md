@@ -383,7 +383,8 @@ entries; `total` carries the real count. The legal-move tree is not included —
       "activeSeat": "Black",
       "dicePending": true,
       "clocks": null,
-      "version": 17
+      "version": 17,
+      "dfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1 nk"
     }],
     "total": 1
   }

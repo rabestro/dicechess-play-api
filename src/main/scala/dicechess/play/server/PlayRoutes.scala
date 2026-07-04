@@ -26,8 +26,8 @@ final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
   */
 final case class CreatedGame(gameId: String, commit: String, tokens: List[SeatToken]) derives Codec.AsObject
 
-/** One live game in the public listing — who plays and how far along it is; a watcher opens `GET /games/{id}` (or the
-  * tokenless spectator WebSocket) for the position itself. The legal-move tree is deliberately not carried here.
+/** One live game in the public listing — who plays, how far along it is, and the position itself (`dfen`, so a lobby
+  * can render live mini-boards without a per-game round trip). The legal-move tree is deliberately not carried here.
   */
 final case class LiveGame(
     gameId: String,
@@ -36,7 +36,8 @@ final case class LiveGame(
     activeSeat: Seat,
     dicePending: Boolean,
     clocks: Option[Clocks],
-    version: Long
+    version: Long,
+    dfen: String
 ) derives Codec.AsObject
 
 /** The public games listing: up to the cap of live games (most action first) plus the uncapped total. */
@@ -88,7 +89,7 @@ object PlayRoutes:
           .flatMap(_.traverse { (id, room) =>
             room.snapshot.map { s =>
               Option.when(s.status == GameStatus.Active):
-                LiveGame(id.value, s.players, s.timeControl, s.activeSeat, s.dicePending, s.clocks, s.version)
+                LiveGame(id.value, s.players, s.timeControl, s.activeSeat, s.dicePending, s.clocks, s.version, s.dfen)
             }
           })
           .flatMap { entries =>
