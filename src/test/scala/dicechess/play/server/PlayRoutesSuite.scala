@@ -53,8 +53,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
-        ws   <- Resource.eval(JdkWSClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
+        ws   <- JdkWSClient.simple[IO]
       yield (port, http, ws)
 
     resources.use: bundle =>
@@ -80,7 +80,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
       yield (port, http)
 
     resources.use: (port, http) =>
@@ -98,8 +98,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
-        ws   <- Resource.eval(JdkWSClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
+        ws   <- JdkWSClient.simple[IO]
       yield (port, http, ws)
 
     resources.use: (port, http, ws) =>
@@ -131,7 +131,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
       yield (port, http)
 
     resources.use: (port, http) =>
@@ -151,8 +151,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
-        ws   <- Resource.eval(JdkWSClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
+        ws   <- JdkWSClient.simple[IO]
       yield (port, http, ws)
 
     resources.use: (port, http, ws) =>
@@ -193,7 +193,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
       yield (port, http)
 
     resources.use: (port, http) =>
@@ -209,7 +209,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
       yield (port, http)
 
     resources.use: (port, http) =>
@@ -225,8 +225,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
-        ws   <- Resource.eval(JdkWSClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
+        ws   <- JdkWSClient.simple[IO]
       yield (port, http, ws)
 
     resources.use: (port, http, ws) =>
@@ -250,8 +250,8 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     val resources =
       for
         port <- server
-        http <- Resource.eval(JdkHttpClient.simple[IO])
-        ws   <- Resource.eval(JdkWSClient.simple[IO])
+        http <- JdkHttpClient.simple[IO]
+        ws   <- JdkWSClient.simple[IO]
       yield (port, http, ws)
 
     resources.use: (port, http, ws) =>
