@@ -84,8 +84,8 @@ The Project Owner is under no obligation to accept, use, or retain any Contribut
 Signing is self-service and happens in Your first pull request:
 
 1. Read this Agreement.
-2. Add an entry for yourself to [`.github/cla-signatures.json`](.github/cla-signatures.json)
-   in the same pull request as your first contribution:
+2. Append an entry for yourself to the `signatures` array in
+   [`.github/cla-signatures.json`](.github/cla-signatures.json) in the same pull request as your first contribution:
 
    ```json
    { "github": "your-github-username", "name": "Your Full Name", "date": "YYYY-MM-DD", "claVersion": "1.0" }

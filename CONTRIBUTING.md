@@ -6,8 +6,8 @@ as `dicechess-engine-scala` and `dicechess-analytics`.
 ## Contributor License Agreement
 
 Before your first pull request can be accepted, you must sign the project's
-[Contributor License Agreement](CLA.md). Signing is self-service: add yourself to
-[`.github/cla-signatures.json`](.github/cla-signatures.json) in the same pull request
+[Contributor License Agreement](CLA.md). Signing is self-service: append yourself to the `signatures`
+array in [`.github/cla-signatures.json`](.github/cla-signatures.json) in the same pull request
 (see [CLA.md](CLA.md), "How to Sign"). The `CI: CLA` status check fails until the
 entry is present. Repository-owner and bot pull requests are exempt.
 
