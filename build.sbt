@@ -38,7 +38,7 @@ val MunitCatsEffectVersion = "2.1.0"
 // Persistence stack — kept in lockstep with dicechess-analytics so both backends
 // share one operational profile (same driver, migrations, test harness).
 val DoobieVersion             = "1.0.0-RC9"
-val FlywayVersion             = "12.8.1"
+val FlywayVersion             = "12.10.0"
 val PostgresDriverVersion     = "42.7.7"
 val TestcontainersVersion     = "0.43.0"
 val TestcontainersJavaVersion = "1.21.3"
