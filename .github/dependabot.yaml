@@ -9,8 +9,6 @@ updates:
     open-pull-requests-limit: 5
     assignees:
       - "rabestro"
-    reviewers:
-      - "rabestro"
     labels:
       - "dependencies"
       - "ci-cd"
@@ -31,8 +29,6 @@ updates:
       time: "08:00"
     open-pull-requests-limit: 5
     assignees:
-      - "rabestro"
-    reviewers:
       - "rabestro"
     labels:
       - "ci-cd"
