@@ -18,7 +18,6 @@ dependencies:
       - any-glob-to-any-file:
           - 'build.sbt'
           - 'project/**'
-          - '.scala-steward.conf'
 
 # Type labels from the branch naming convention: (task|feat|bug)/<id>-<desc>
 enhancement:
