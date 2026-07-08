@@ -106,28 +106,30 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
 
-      def listing: IO[LiveGames] = http.expect[LiveGames](httpBase / "games")
+       def listing: IO[LiveGames] = http.expect[LiveGames](httpBase / "games")
 
-      for
-        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
-        listed  <- listing
-        entry = listed.games.find(_.gameId == created.gameId).getOrElse(fail("created game not listed"))
-        // Who plays is public: two anonymous humans here (bots would carry their names).
-        _ = assertEquals(
-          entry.players,
-          Some(Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Human, None)))
-        )
-        _ = assertEquals(listed.total, listed.games.size) // under the cap the total IS the page
-        _ = assert(entry.dfen.startsWith("rnbqkbnr/"), "the listing carries the position for mini-boards")
-        // End the game over the wire; the room is evicted and the listing must drop it.
-        whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
-        _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)
-        _ <- listing
-          .iterateUntil(_.games.forall(_.gameId != created.gameId))
-          .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
-          .last
-          .void
-      yield ()
+       for
+         created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+         listed  <- listing
+         entry = listed.games.find(_.gameId == created.gameId).getOrElse(fail("created game not listed"))
+         // Who plays is public: two anonymous humans here (bots would carry their names).
+         _ = assertEquals(
+           entry.players,
+           Some(Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Human, None)))
+         )
+         _ = assertEquals(listed.total, listed.games.size) // under the cap the total IS the page
+         _ = assert(entry.dfen.startsWith("rnbqkbnr/"), "the listing carries the position for mini-boards")
+         // End the game over the wire; the room is evicted and the listing must drop it.
+         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
+         _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)
+         _ <- fs2.Stream
+           .repeatEval(listing)
+           .iterateUntil(_.games.forall(_.gameId != created.gameId))
+           .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
+           .compile
+           .last
+           .void
+       yield ()
 
   test("GET /games/{id}/moves serves the full legal-move tree for the pending roll"):
     val resources =
