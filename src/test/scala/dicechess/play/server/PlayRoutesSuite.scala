@@ -121,7 +121,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         _ = assert(entry.dfen.startsWith("rnbqkbnr/"), "the listing carries the position for mini-boards")
         // End the game over the wire; the room is evicted and the listing must drop it.
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
-        _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)
+        _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalOver(conn).void)
         _ <- listing
           .iterateUntil(_.games.forall(_.gameId != created.gameId))
           .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
