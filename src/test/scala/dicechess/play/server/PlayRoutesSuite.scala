@@ -122,11 +122,11 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         // End the game over the wire; the room is evicted and the listing must drop it.
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
         _ <- ws.connectHighLevel(WSRequest(whiteUri)).use(conn => resign(conn) *> terminalGameEnded(conn).void)
-         _ <- listing
-           .iterateUntil(_.games.forall(_.gameId != created.gameId))
-           .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
-           .last
-           .void
+        _ <- listing
+          .iterateUntil(_.games.forall(_.gameId != created.gameId))
+          .timeoutTo(10.seconds, IO.raiseError(RuntimeException("the finished game never left the listing")))
+          .last
+          .void
       yield ()
 
   test("GET /games/{id}/moves serves the full legal-move tree for the pending roll"):
