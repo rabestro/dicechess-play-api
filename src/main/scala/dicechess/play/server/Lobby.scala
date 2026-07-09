@@ -56,18 +56,20 @@ final class Lobby private (
             (current.updated(id, e.copy(lastSeenAt = now)), Some(status))
           case _ => (current, None)
 
-  /** Accept an open seek: seat a game (creator = White, accepter = Black) and return the accepter's game + seat token.
+  /** Accept an open seek: seat a game (assign creator and accepter randomly to White/Black) and return the accepter's
+    * game + seat token.
     */
   def accept(id: String, accepter: Principal): IO[Either[Rejected, Match]] =
-    claim(id, accepter).flatMap {
-      case Left(rejected)       => IO.pure(Left(rejected))
-      case Right((creator, tc)) =>
-        registry.create(creator, accepter, tc).flatMap {
+    (claim(id, accepter), randomBoolean).flatMapN {
+      case (Left(rejected), _)               => IO.pure(Left(rejected))
+      case (Right((creator, tc)), swapColor) =>
+        val (white, black) = if swapColor then (accepter, creator) else (creator, accepter)
+        registry.create(white, black, tc).flatMap {
           case Left(error)           => seeks.update(_.removed(id)).as(Left(Rejected.Failed(error)))
           case Right((gameId, room)) =>
-            val tokens = room.joinTokens
-            // Both seat tokens must exist; never deliver an empty (invalid) capability token.
-            (tokens.get(Seat.White), tokens.get(Seat.Black)) match
+            val tokens                      = room.joinTokens
+            val (creatorSeat, accepterSeat) = if swapColor then (Seat.Black, Seat.White) else (Seat.White, Seat.Black)
+            (tokens.get(creatorSeat), tokens.get(accepterSeat)) match
               case (Some(creatorToken), Some(accepterToken)) =>
                 seeks
                   .update(
@@ -174,3 +176,5 @@ object Lobby:
     val bytes = new Array[Byte](16)
     SecureRandom().nextBytes(bytes)
     bytes.map("%02x".format(_)).mkString
+
+  private def randomBoolean: IO[Boolean] = IO(SecureRandom().nextBoolean())
