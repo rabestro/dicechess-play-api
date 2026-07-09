@@ -284,10 +284,10 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
           val botGame = games.games.head
           assertEquals(botGame.gameId, matched.gameId)
           assert(botGame.seat == Seat.White || botGame.seat == Seat.Black)
-          assertEquals(
-            players,
-            Some(Players(PublicPlayer(PlayerKind.Bot, Some("acme alice")), PublicPlayer(PlayerKind.Human, None)))
-          )
+          val expectedPlayers = if botGame.seat == Seat.White then
+            Players(PublicPlayer(PlayerKind.Bot, Some("acme alice")), PublicPlayer(PlayerKind.Human, None))
+          else Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Bot, Some("acme alice")))
+          assertEquals(players, Some(expectedPlayers))
 
   test("a bot accepts a guest seek; the guest's status poll delivers its token"):
     app.flatMap: service =>
