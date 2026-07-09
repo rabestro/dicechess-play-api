@@ -1,7 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{PlayerKind, Principal, Seek, TimeControl}
+import cats.syntax.all.*
+import dicechess.play.core.{PlayerKind, Principal, Seat, Seek, TimeControl}
 
 import scala.concurrent.duration.*
 
@@ -153,3 +154,25 @@ class LobbySuite extends munit.CatsEffectSuite:
     yield
       // The quiet guest's seek is swept; the bot's standing offer survives its longer TTL.
       assertEquals(left.map(_.kind), List(PlayerKind.Bot))
+
+  test("accepting open seeks results in random color assignment"):
+    val trials = 20
+    for
+      reg     <- GameRegistry.create()
+      results <- List.fill(trials)(()).traverse { _ =>
+        for
+          l         <- Lobby.create(reg)
+          (seek, _) <- mustCreate(l, alice, TimeControl.Unlimited)
+          accepted  <- l.accept(seek.id, bob)
+          gameId = accepted.toOption.get.gameId
+          games <- reg.gamesFor(alice)
+          room = games.find(_._1.value == gameId).get._2
+          seating <- room.seating
+          aliceSeat = seating.find(_._2 == alice).get._1
+        yield aliceSeat
+      }
+    yield
+      val hasWhite = results.contains(Seat.White)
+      val hasBlack = results.contains(Seat.Black)
+      assert(hasWhite, "Should assign creator to White in at least one trial")
+      assert(hasBlack, "Should assign creator to Black in at least one trial")

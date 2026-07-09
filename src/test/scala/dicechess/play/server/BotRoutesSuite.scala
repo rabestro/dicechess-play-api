@@ -281,7 +281,9 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
             .map(_.players)
         yield
           assert(matched.token.nonEmpty)
-          assertEquals(games.games.map(g => (g.gameId, g.seat)), List((matched.gameId, Seat.White)))
+          val botGame = games.games.head
+          assertEquals(botGame.gameId, matched.gameId)
+          assert(botGame.seat == Seat.White || botGame.seat == Seat.Black)
           assertEquals(
             players,
             Some(Players(PublicPlayer(PlayerKind.Bot, Some("acme alice")), PublicPlayer(PlayerKind.Human, None)))
