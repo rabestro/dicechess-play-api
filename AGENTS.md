@@ -160,11 +160,10 @@ unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpo
 - Split large work into small, reviewable PRs.
 
 ## Security & boundaries
-<!-- dc-shared:security v1 — keep identical across dicechess repos -->
+<!-- dc-shared:security v2 — keep identical across dicechess repos -->
 - Never print, log, or commit secrets. Local secrets live only in gitignored files
   (e.g. `.env.local`, `mise.local.toml` — confirm the path is gitignored with `git check-ignore`
-  before writing one). A betterleaks pre-commit hook scans staged changes;
-  bypassing hooks (`--no-verify`) is forbidden.
+  before writing one). Never bypass Git hooks (`--no-verify`).
 - Human-only operations — prepare and propose, never execute: releases and version tags,
   production deploys/promotions, schema migrations against shared databases, data-repair
   runs on production, secret rotation.
@@ -173,6 +172,8 @@ unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpo
 
 Repo-specific additions:
 
+- lefthook pre-commit runs a betterleaks secret scan on staged files — keep hooks
+  installed (`mise run hook:install`).
 - The dice-fairness path (`dice/DiceSource.scala`) is part of a public verification promise —
   never change it without golden test vectors and a matching `docs/bot-api.md` update.
 - Never weaken server authority: no code path may accept client-supplied FEN, dice, clocks,
