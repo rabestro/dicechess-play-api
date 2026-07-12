@@ -70,7 +70,7 @@ jobs:
                 "fileName": ["AGENTS.md", "GEMINI.md"]
               },
               "model": {
-                "maxSessionTurns": 25
+                "maxSessionTurns": 50
               },
               "mcpServers": {
                 "github": {
