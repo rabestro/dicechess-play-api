@@ -1,0 +1,107 @@
+name: 'CI: Gemini Review'
+
+# Automated PR review via the official run-gemini-cli action (replaces the
+# consumer Gemini Code Assist GitHub app, sunset 2026-07-17).
+# - Reviews every non-fork PR on open; re-review on demand with a
+#   "@gemini-cli /review" comment from the owner or collaborators.
+# - Auth: GEMINI_API_KEY repo secret (AI Studio). Model: GEMINI_MODEL repo
+#   variable — flip it without commits (free-tier Flash by default).
+# - The review follows repo conventions: the CLI loads AGENTS.md via the
+#   context.fileName setting below.
+# Adapted from the official example:
+# https://github.com/google-github-actions/run-gemini-cli/tree/main/examples/workflows/pr-review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}'
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Fork PRs are excluded (no secrets there); comment-trigger is restricted
+    # to owner/members/collaborators to keep untrusted users from spending quota.
+    if: |-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+       startsWith(github.event.comment.body, '@gemini-cli /review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Prepare prompt context
+        run: |-
+          mkdir -p .gemini
+          jq -n \
+            --arg repo "${REPOSITORY}" \
+            --arg pr "${PULL_REQUEST_NUMBER}" \
+            --arg context "" \
+            '{repository: $repo, pull_request_number: $pr, additional_context: $context}' > .gemini/context.json
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+
+      - name: Run Gemini pull request review
+        uses: google-github-actions/run-gemini-cli@v0
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ vars.GEMINI_MODEL }}
+          workflow_name: gemini-review
+          github_pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # NOTE: this settings block is written to .gemini/settings.json for the
+          # run and REPLACES the committed one — keep context.fileName in sync
+          # with the repo convention (AGENTS.md is canonical).
+          settings: |-
+            {
+              "context": {
+                "fileName": ["AGENTS.md", "GEMINI.md"]
+              },
+              "model": {
+                "maxSessionTurns": 25
+              },
+              "mcpServers": {
+                "github": {
+                  "command": "docker",
+                  "args": [
+                    "run",
+                    "-i",
+                    "--rm",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server:v0.27.0"
+                  ],
+                  "includeTools": [
+                    "add_comment_to_pending_review",
+                    "pull_request_read",
+                    "pull_request_review_write"
+                  ],
+                  "env": {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+                  }
+                }
+              },
+              "tools": {
+                "core": []
+              }
+            }
+          extensions: |
+            ["https://github.com/gemini-cli-extensions/code-review"]
+          prompt: '/pr-code-review'
