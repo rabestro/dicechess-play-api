@@ -2,13 +2,14 @@ name: 'CI: Gemini Review'
 
 # Automated PR review via the official run-gemini-cli action (replaces the
 # consumer Gemini Code Assist GitHub app, sunset 2026-07-17).
-# - Reviews every non-fork PR on open, on new pushes (synchronize), and when a
-#   draft is marked ready. Fork PRs are excluded for security (see the job `if`).
+# - Reviews every non-fork PR on open, reopen, new pushes (synchronize), and
+#   when a draft is marked ready. Fork PRs are excluded (see the job `if`).
 # - Auth: Vertex AI via Workload Identity Federation (keyless). Usage bills to
 #   the Google Cloud project's billing account (trial + GDP credits) — the
 #   AI Studio API-key path cannot use those credits (prepay-only), so we use
-#   Vertex AI instead. Provider/SA/project/location come from repo variables
-#   set once by scripts/setup: GCP_WIF_PROVIDER, SERVICE_ACCOUNT_EMAIL,
+#   Vertex AI instead. Provider/SA/project/location come from these repo
+#   variables, set once by an operator via a Vertex+WIF setup step kept
+#   outside the repo: GCP_WIF_PROVIDER, SERVICE_ACCOUNT_EMAIL,
 #   GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, GOOGLE_GENAI_USE_VERTEXAI.
 # - Model: GEMINI_MODEL repo variable. Debug: GEMINI_DEBUG=true streams logs
 #   and uploads stdout/stderr artifacts.
@@ -19,7 +20,7 @@ name: 'CI: Gemini Review'
 
 on:
   pull_request:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize]
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.event.pull_request.number }}'
