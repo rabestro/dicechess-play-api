@@ -1,29 +1,38 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{Principal, TimeControl}
+import dicechess.play.core.{Principal, Seat, TimeControl}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
 
-/** Create an open seek. `creator` is the guest id seated on White when accepted. */
+/** Create an open seek. `creator`'s eventual seat (White or Black) is decided at accept time, not here — see
+  * `Lobby.accept`.
+  */
 final case class CreateSeek(creator: String, timeControl: Option[TimeControl] = None) derives Codec.AsObject
 
 /** The created seek's public id plus the creator's capability secret (poll status / cancel with it). */
 final case class CreatedSeek(seekId: String, secret: String) derives Codec.AsObject
 
-/** Accept an open seek. `accepter` is the guest id seated on Black. */
+/** Accept an open seek. `accepter`'s seat (White or Black) is randomly assigned — see `Lobby.accept`. */
 final case class AcceptSeek(accepter: String) derives Codec.AsObject
 
-/** A creator's status poll: `matched` false while open; once matched it carries the game id and the creator's seat
-  * token.
+/** A creator's status poll: `matched` false while open; once matched it carries the game id, the creator's seat token,
+  * and the seat that token names (randomly assigned at accept time — see `Lobby.accept`).
   */
-final case class SeekState(matched: Boolean, gameId: Option[String], token: Option[String]) derives Codec.AsObject
+final case class SeekState(
+    matched: Boolean,
+    gameId: Option[String],
+    token: Option[String],
+    seat: Option[Seat]
+) derives Codec.AsObject
 
-/** The accept response: the seated game id plus the accepter's seat token. */
-final case class SeekMatch(gameId: String, token: String) derives Codec.AsObject
+/** The accept response: the seated game id, the accepter's seat token, and the seat it names (randomly assigned — see
+  * `Lobby.accept`).
+  */
+final case class SeekMatch(gameId: String, token: String, seat: Seat) derives Codec.AsObject
 
 /** Lobby REST (polling): list open seeks, post one, poll its status (creator only, via the secret), accept one, cancel
   * one. A seat token is delivered to each player out-of-band: the accepter here, the creator on its next status poll.
@@ -58,9 +67,10 @@ object LobbyRoutes:
             lobby
               .status(id, s)
               .flatMap:
-                case None                                 => NotFound()
-                case Some(Lobby.SeekStatus.Open)          => Ok(SeekState(matched = false, None, None))
-                case Some(Lobby.SeekStatus.Matched(g, t)) => Ok(SeekState(matched = true, Some(g), Some(t)))
+                case None                                       => NotFound()
+                case Some(Lobby.SeekStatus.Open)                => Ok(SeekState(matched = false, None, None, None))
+                case Some(Lobby.SeekStatus.Matched(g, t, seat)) =>
+                  Ok(SeekState(matched = true, Some(g), Some(t), Some(seat)))
 
       case req @ POST -> Root / "lobby" / "seeks" / id / "accept" =>
         req
@@ -72,7 +82,7 @@ object LobbyRoutes:
               lobby
                 .accept(id, Principal.Guest(body.accepter))
                 .flatMap:
-                  case Right(m)                           => Created(SeekMatch(m.gameId, m.token))
+                  case Right(m)                           => Created(SeekMatch(m.gameId, m.token, m.seat))
                   case Left(Lobby.Rejected.NotFound)      => NotFound()
                   case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
                   case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")

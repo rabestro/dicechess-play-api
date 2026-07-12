@@ -284,6 +284,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
           val botGame = games.games.head
           assertEquals(botGame.gameId, matched.gameId)
           assert(botGame.seat == Seat.White || botGame.seat == Seat.Black)
+          assertNotEquals(matched.seat, botGame.seat, "the accepting guest and the bot must hold opposite seats")
           val expectedPlayers = if botGame.seat == Seat.White then
             Players(PublicPlayer(PlayerKind.Bot, Some("acme alice")), PublicPlayer(PlayerKind.Human, None))
           else Players(PublicPlayer(PlayerKind.Human, None), PublicPlayer(PlayerKind.Bot, Some("acme alice")))
@@ -300,12 +301,21 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         status   <- service
           .run(Request[IO](Method.GET, uri"/lobby/seeks" / created.seekId +? ("secret" -> created.secret)))
           .flatMap(_.as[SeekState])
+        // The direct accept response (BotGame) carries no seat — the bot reads it from its games listing.
+        botGames <- service.run(request(Method.GET, uri"/bot/games", Some("tok-bob"))).flatMap(_.as[BotGames])
       yield
         assertEquals(accepted.status, Status.Created)
         assert(game.gameId.nonEmpty)
         assertEquals(status.matched, true)
         assertEquals(status.gameId, Some(game.gameId))
         assert(status.token.exists(_.nonEmpty), "the guest creator must get its seat token via the poll")
+        val botSeat           = botGames.games.find(_.gameId == game.gameId).get.seat
+        val expectedGuestSeat = if botSeat == Seat.White then Seat.Black else Seat.White
+        assertEquals(
+          status.seat,
+          Some(expectedGuestSeat),
+          "the guest creator and the accepting bot must hold opposite seats"
+        )
 
   test("a bot cannot accept its own seek, and its open seeks are capped"):
     app.flatMap: service =>

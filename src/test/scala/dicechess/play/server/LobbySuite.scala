@@ -60,10 +60,11 @@ class LobbySuite extends munit.CatsEffectSuite:
       assert(accepterMatch.gameId.nonEmpty)
       assert(accepterMatch.token.nonEmpty)
       creatorStatus match
-        case Some(Lobby.SeekStatus.Matched(gameId, creatorToken)) =>
+        case Some(Lobby.SeekStatus.Matched(gameId, creatorToken, creatorSeat)) =>
           assertEquals(gameId, accepterMatch.gameId) // both players join the same game
           assert(creatorToken.nonEmpty)
           assertNotEquals(creatorToken, accepterMatch.token) // but hold different seats
+          assertNotEquals(creatorSeat, accepterMatch.seat)   // opposite seats, whichever way the coin fell
         case other => fail(s"expected Matched, got $other")
       assertEquals(open, Nil)
 
@@ -128,8 +129,8 @@ class LobbySuite extends munit.CatsEffectSuite:
     yield
       assertEquals(cancelled, false)
       assert(status.exists {
-        case Lobby.SeekStatus.Matched(_, _) => true
-        case _                              => false
+        case Lobby.SeekStatus.Matched(_, _, _) => true
+        case _                                 => false
       })
 
   test("the sweep drops a seek whose creator has gone quiet past the TTL"):
@@ -155,7 +156,7 @@ class LobbySuite extends munit.CatsEffectSuite:
       // The quiet guest's seek is swept; the bot's standing offer survives its longer TTL.
       assertEquals(left.map(_.kind), List(PlayerKind.Bot))
 
-  test("accepting open seeks results in random color assignment"):
+  test("accepting open seeks results in random color assignment, correctly reported to the accepter"):
     val trials = 20
     for
       reg     <- GameRegistry.create()
@@ -164,15 +165,21 @@ class LobbySuite extends munit.CatsEffectSuite:
           l         <- Lobby.create(reg)
           (seek, _) <- mustCreate(l, alice, TimeControl.Unlimited)
           accepted  <- l.accept(seek.id, bob)
-          gameId = accepted.toOption.get.gameId
+          reportedAccepterSeat = accepted.toOption.get.seat
+          gameId               = accepted.toOption.get.gameId
           games <- reg.gamesFor(alice)
           room = games.find(_._1.value == gameId).get._2
           seating <- room.seating
           aliceSeat = seating.find(_._2 == alice).get._1
-        yield aliceSeat
+          bobSeat   = seating.find(_._2 == bob).get._1
+        yield (aliceSeat, reportedAccepterSeat, bobSeat)
       }
     yield
-      val hasWhite = results.contains(Seat.White)
-      val hasBlack = results.contains(Seat.Black)
-      assert(hasWhite, "Should assign creator to White in at least one trial")
-      assert(hasBlack, "Should assign creator to Black in at least one trial")
+      val aliceSeats = results.map(_._1)
+      assert(aliceSeats.contains(Seat.White), "Should assign creator to White in at least one trial")
+      assert(aliceSeats.contains(Seat.Black), "Should assign creator to Black in at least one trial")
+      // The seat named in the accept response must match the room's own seating, every trial —
+      // not just "sometimes White, sometimes Black" but correctly reported each specific time.
+      results.foreach { case (_, reported, bobSeat) =>
+        assertEquals(reported, bobSeat, "SeekMatch.seat must match the accepter's actual room seat")
+      }
