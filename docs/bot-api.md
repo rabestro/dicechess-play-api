@@ -289,8 +289,8 @@ the lobby renders the offer with your public name and a bot badge (`kind`/`name`
 #### Accept a Lobby Seek
 `POST /bot/seeks/{id}/accept`
 
-The mirror flow: accept an open seek (human- or bot-created) from the public `GET /lobby/seeks` list. The seek's
-creator takes White, you take Black.
+The mirror flow: accept an open seek (human- or bot-created) from the public `GET /lobby/seeks` list. Color is
+assigned randomly — the response doesn't carry it; read it off [`GET /bot/games`](#list-my-games) once matched.
 
 - **Response:** `201 Created`
 

@@ -12,9 +12,9 @@ import scala.concurrent.duration.*
   * refreshes the seek, and a background [[sweeper]] drops seeks whose creator has gone quiet — so an abandoned tab
   * never strands a seek.
   *
-  * Accepting is atomic (open → claimed) so two accepters can't both seat a game; the game is created with the creator
-  * on White and the accepter on Black, and each side's seat token reaches the right player (the accepter in the accept
-  * response, the creator on its next status poll).
+  * Accepting is atomic (open → claimed) so two accepters can't both seat a game; the game randomly assigns creator and
+  * accepter to White/Black (see `accept`), and each side's seat token — plus the seat it names — reaches the right
+  * player (the accepter in the accept response, the creator on its next status poll).
   */
 final class Lobby private (
     seeks: Ref[IO, Map[String, Lobby.Entry]],
@@ -51,7 +51,7 @@ final class Lobby private (
         current.get(id) match
           case Some(e) if e.secret == secret =>
             val status = e.state match
-              case EntryState.Matched(m) => SeekStatus.Matched(m.gameId, m.token)
+              case EntryState.Matched(m) => SeekStatus.Matched(m.gameId, m.token, m.seat)
               case _                     => SeekStatus.Open
             (current.updated(id, e.copy(lastSeenAt = now)), Some(status))
           case _ => (current, None)
@@ -73,9 +73,13 @@ final class Lobby private (
               case (Some(creatorToken), Some(accepterToken)) =>
                 seeks
                   .update(
-                    _.updatedWith(id)(_.map(_.copy(state = EntryState.Matched(Match(gameId.value, creatorToken)))))
+                    _.updatedWith(id)(
+                      _.map(
+                        _.copy(state = EntryState.Matched(Match(gameId.value, creatorToken, creatorSeat)))
+                      )
+                    )
                   )
-                  .as(Right(Match(gameId.value, accepterToken)))
+                  .as(Right(Match(gameId.value, accepterToken, accepterSeat)))
               case _ =>
                 seeks.update(_.removed(id)).as(Left(Rejected.Failed("missing seat token")))
         }
@@ -131,13 +135,13 @@ object Lobby:
   /** How often the background sweep runs. */
   val SweepInterval: FiniteDuration = 5.seconds
 
-  /** A game id plus the seat token for one side. */
-  final case class Match(gameId: String, token: String)
+  /** A game id plus the seat token and the seat it names, for one side. */
+  final case class Match(gameId: String, token: String, seat: Seat)
 
   /** Status a creator's poll reports back. */
   enum SeekStatus:
     case Open
-    case Matched(gameId: String, token: String)
+    case Matched(gameId: String, token: String, seat: Seat)
 
   /** Why a create was refused. */
   enum CreateRejected:
