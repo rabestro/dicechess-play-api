@@ -5,11 +5,13 @@ name: 'CI: Gemini Review'
 # - Reviews every non-fork PR on open; re-review on demand with a
 #   "@gemini-cli /review" comment from the owner or collaborators.
 # - Auth: GEMINI_API_KEY repo secret (AI Studio). Model: GEMINI_MODEL repo
-#   variable — flip it without commits (free-tier Flash by default).
+#   variable — flip it without commits. Debug: set repo variable
+#   GEMINI_DEBUG=true to stream CLI logs and upload stdout/stderr artifacts.
 # - The review follows repo conventions: the CLI loads AGENTS.md via the
 #   context.fileName setting below.
-# Adapted from the official example:
-# https://github.com/google-github-actions/run-gemini-cli/tree/main/examples/workflows/pr-review
+# - The review prompt drives the GitHub MCP server v0.27.0 tools directly
+#   (the gemini-cli-extensions/code-review extension referenced stale tool
+#   names and is deliberately NOT used).
 
 on:
   pull_request:
@@ -43,18 +45,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Prepare prompt context
-        run: |-
-          mkdir -p .gemini
-          jq -n \
-            --arg repo "${REPOSITORY}" \
-            --arg pr "${PULL_REQUEST_NUMBER}" \
-            --arg context "" \
-            '{repository: $repo, pull_request_number: $pr, additional_context: $context}' > .gemini/context.json
-        env:
-          REPOSITORY: ${{ github.repository }}
-          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-
       - name: Run Gemini pull request review
         uses: google-github-actions/run-gemini-cli@v0
         env:
@@ -64,6 +54,8 @@ jobs:
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: ${{ vars.GEMINI_MODEL }}
+          gemini_debug: ${{ fromJSON(vars.GEMINI_DEBUG || false) }}
+          upload_artifacts: ${{ vars.GEMINI_DEBUG || 'false' }}
           workflow_name: gemini-review
           github_pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}
           # NOTE: this settings block is written to .gemini/settings.json for the
@@ -89,9 +81,9 @@ jobs:
                     "ghcr.io/github/github-mcp-server:v0.27.0"
                   ],
                   "includeTools": [
-                    "add_comment_to_pending_review",
                     "pull_request_read",
-                    "pull_request_review_write"
+                    "pull_request_review_write",
+                    "add_comment_to_pending_review"
                   ],
                   "env": {
                     "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
@@ -102,6 +94,39 @@ jobs:
                 "core": []
               }
             }
-          extensions: |
-            ["https://github.com/gemini-cli-extensions/code-review"]
-          prompt: '/pr-code-review'
+          prompt: |-
+            You are reviewing a GitHub pull request.
+
+            Repository: ${{ github.repository }}
+            Pull request number: ${{ github.event.pull_request.number || github.event.issue.number }}
+
+            Your review criteria are this repository's conventions, already loaded
+            into your context from AGENTS.md: apply its code conventions, testing
+            conventions, gotchas, and security boundaries. Report only findings a
+            maintainer would act on: real bugs, contract or invariant violations,
+            security issues, missing tests for new behaviour, and documented-gotcha
+            violations. Do not comment on formatting the toolchain enforces, do not
+            restate the diff, and do not praise.
+
+            Follow EXACTLY this tool sequence (GitHub MCP server tools):
+            1. pull_request_read with method "get" — read the PR title and description.
+            2. pull_request_read with method "get_diff" — get the full diff.
+            3. Analyse the diff against the review criteria above.
+            4. pull_request_review_write with method "create" — open a pending review.
+            5. For EACH finding: add_comment_to_pending_review with:
+               - path: the file path from the diff
+               - line: the line number in the NEW file version; side "RIGHT"
+                 (use the OLD version line and side "LEFT" only for pure deletions)
+               - subjectType: "LINE"
+               - body: "[HIGH|MEDIUM|LOW] <concise finding>. <why it matters / what
+                 to do>" — add a fenced ```suggestion block only when you are
+                 certain of the exact replacement lines.
+            6. pull_request_review_write with method "submit_pending" with
+               event "COMMENT" (NEVER "APPROVE" or "REQUEST_CHANGES") and a body
+               containing a 2-4 sentence summary: overall verdict, main risks,
+               anything you could not verify. Submit this review even when you
+               have zero findings — then the summary is a short LGTM note.
+
+            Hard rules: never attempt shell commands or file edits; if a tool call
+            fails, retry once, then submit the pending review with what you have,
+            stating the failure in the summary. Write everything in English.
