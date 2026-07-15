@@ -37,11 +37,15 @@ final class GameRegistry private (
   /** Create and start a room for two players. Dice come from a fresh commit-reveal source whose server seed is
     * committed before any client connects; each player then folds in its own post-commit seed (see GameRoom's gate).
     * Errors (e.g. a bad initial position) are returned as a Left, never thrown.
+    *
+    * `requestedRated` is only a hint: the game is actually rated iff [[GameRegistry.isRated]] agrees, so an anonymous
+    * participant on either side silently forces a casual game regardless of what was requested.
     */
   def create(
       white: Principal,
       black: Principal,
-      timeControl: TimeControl = TimeControl.Unlimited
+      timeControl: TimeControl = TimeControl.Unlimited,
+      requestedRated: Boolean = false
   ): IO[Either[String, (GameId, GameRoom)]] =
     for
       id   <- GameId.random
@@ -51,6 +55,7 @@ final class GameRegistry private (
         dice,
         disconnectGrace = disconnectGrace,
         timeControl = timeControl,
+        rated = GameRegistry.isRated(white, black, requestedRated),
         persist = store.save(id, _)
       )
       result <- made.traverse(room => register(id, room) *> room.start.as((id, room)))
@@ -99,3 +104,16 @@ object GameRegistry:
   ): IO[GameRegistry] =
     (Ref.of[IO, Map[GameId, GameRoom]](Map.empty), Ref.of[IO, Map[Principal, Set[GameId]]](Map.empty))
       .mapN(GameRegistry(_, _, disconnectGrace, store))
+
+  /** Whether a game between these participants should count toward rating, given the caller's request. Anonymous
+    * participants — bot accounts on the `anon` team (`POST /bot/anon`), and human guests (there is no registered-human
+    * identity yet) — can't sustain a meaningful rating, so a game touching either side is always casual regardless of
+    * what was requested. Decided once, at creation; the result is carried verbatim into every snapshot afterward
+    * (`GameSnapshot.rated`), never recomputed mid-game.
+    */
+  private[server] def isRated(white: Principal, black: Principal, requested: Boolean): Boolean =
+    def anonymous(p: Principal): Boolean = p match
+      case Principal.Guest(_)     => true
+      case Principal.User(_)      => false
+      case Principal.Bot(team, _) => team == BotAuth.AnonTeam
+    requested && !anonymous(white) && !anonymous(black)

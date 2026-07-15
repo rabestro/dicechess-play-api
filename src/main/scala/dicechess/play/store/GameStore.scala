@@ -40,7 +40,11 @@ final case class GameSnapshot(
     turns: Vector[TurnRecord],
     // Wall-clock creation time — carried into the analytics handoff as `started_at`. Optional so snapshots written
     // before this field existed still decode.
-    createdAtEpochMs: Option[Long] = None
+    createdAtEpochMs: Option[Long] = None,
+    // Decided once at creation from both participants' identities (see GameRegistry.isRated); never recomputed.
+    // Defaulted so snapshots written before this field existed still decode — correctly, as unrated, since they
+    // predate the rated/casual distinction entirely.
+    rated: Boolean = false
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true
