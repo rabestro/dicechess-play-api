@@ -39,7 +39,7 @@ val MunitCatsEffectVersion = "2.1.0"
 // share one operational profile (same driver, migrations, test harness).
 val DoobieVersion             = "1.0.0-RC9"
 val FlywayVersion             = "12.11.0"
-val PostgresDriverVersion     = "42.7.7"
+val PostgresDriverVersion     = "42.7.13"
 val TestcontainersVersion     = "0.43.0"
 val TestcontainersJavaVersion = "1.21.3"
 val DockerJavaVersion         = "3.7.1"
