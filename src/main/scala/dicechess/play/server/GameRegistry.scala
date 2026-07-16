@@ -188,6 +188,12 @@ final class GameRegistry private (
     store.loadActive.flatMap { snapshots =>
       snapshots
         .traverse { case (id, snapshot) =>
+          // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted partner
+          // id. No partner (or an unpaired game): always eligible, exactly as before this feature. Computed once and
+          // carried alongside the restored room into phase 2 below — it's needed for BOTH `GameRoom.restore` (reveal
+          // gating) AND `register` (deregistration timing, #116 review); building it only for `restore` and letting
+          // `register` fall back to its own default was exactly the bug the review caught.
+          val partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
           DiceSource
             .fromHexSeed(snapshot.serverSeed)
             .flatTraverse(dice =>
@@ -196,23 +202,21 @@ final class GameRegistry private (
                 dice,
                 disconnectGrace = disconnectGrace,
                 persist = store.save(id, _),
-                // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted
-                // partner id. No partner (or an unpaired game): always eligible, exactly as before this feature.
-                partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
+                partnerEnded = partnerEnded
               )
             )
-            .map(id -> _)
+            .map(made => (id, partnerEnded, made))
         }
         .flatMap { restored =>
-          val failures  = restored.collect { case (id, Left(error)) => id -> error }
-          val successes = restored.collect { case (id, Right(room)) => id -> room }
+          val failures  = restored.collect { case (id, _, Left(error)) => id -> error }
+          val successes = restored.collect { case (id, partnerEnded, Right(room)) => (id, partnerEnded, room) }
           failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error")) *>
-            successes.traverse_(register(_, _)) *>
-            successes.traverse_((_, room) => room.start).as(successes.size)
+            successes.traverse_((id, partnerEnded, room) => register(id, room, partnerEnded)) *>
+            successes.traverse_((_, _, room) => room.start).as(successes.size)
         }
     }
 
-  private def register(id: GameId, room: GameRoom, partnerEnded: IO[Boolean] = IO.pure(true)): IO[Unit] =
+  private def register(id: GameId, room: GameRoom, partnerEnded: IO[Boolean]): IO[Unit] =
     room.seating.flatMap: seats =>
       val players = seats.values.toList
       rooms.update(_.updated(id, room)) *>

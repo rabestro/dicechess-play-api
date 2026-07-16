@@ -196,6 +196,15 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _      <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
           snapA1 <- roomA.snapshot
           _ = assertEquals(snapA1.seed, None, "a resumed paired game must still withhold its reveal while B is active")
+          // A FRESH lookup through the registry, not the held `roomA` reference: this is what actually exercises
+          // `register`'s own (separately threaded) partnerEnded check, not just GameRoom.restore's — the two are
+          // easy to fix one and forget the other (as review on #116 caught), and a held reference can't tell the
+          // difference, since it works identically whether or not the room is still in the registry's map.
+          stillThere <- registry2.get(pair.gameAWhite)
+          _ = assert(
+            stillThere.isDefined,
+            "a resumed paired game must stay registered (hence GET /games/{id}-reachable) while its partner is active"
+          )
 
           // End B too; both now reveal, proving the rebuilt checks correctly see each other post-restart.
           _      <- roomB.submit(Seat.White, GameCommand.Resign)
