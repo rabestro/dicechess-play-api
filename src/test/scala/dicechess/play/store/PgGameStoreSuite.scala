@@ -81,6 +81,27 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("bot rating state: fresh registration is provisional, on_ladder toggles atomically, unregistered is None"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _       <- db.register("dragons", "smaug", "hash-1")
+          initial <- db.ratingOf("dragons", "smaug")
+          joined  <- db.setOnLadder("dragons", "smaug", true)
+          reread  <- db.ratingOf("dragons", "smaug")
+          left    <- db.setOnLadder("dragons", "smaug", false)
+          ghost   <- db.setOnLadder("dragons", "nobody", true)
+          unknown <- db.ratingOf("dragons", "nobody")
+        yield
+          assertEquals(initial, Some(BotRating.initial))
+          assertEquals(joined, Some(BotRating.initial.copy(onLadder = true)))
+          assertEquals(reread, joined, "the RETURNING result must match a fresh read, not just the pre-update state")
+          assertEquals(left, Some(BotRating.initial))
+          assertEquals(ghost, None, "toggling an unregistered identity must report None")
+          assertEquals(unknown, None)
+      }
+    }
+
   test("ended games are not resumed"):
     withContainers { pg =>
       store(pg).use { db =>

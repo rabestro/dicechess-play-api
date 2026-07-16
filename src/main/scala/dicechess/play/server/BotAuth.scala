@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import dicechess.play.core.Principal
-import dicechess.play.store.BotStore
+import dicechess.play.store.{BotRating, BotStore}
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.{MessageDigest, SecureRandom}
@@ -80,6 +80,17 @@ final class BotAuth private (
   def rotate(bot: Principal.Bot): IO[Option[String]] =
     val token = randomToken()
     store.rotate(bot.team, bot.name, sha256Hex(token)).map(rotated => Option.when(rotated)(token))
+
+  /** The registered bot's current rating-ladder state. `None` for a static or anonymous caller — same "not a registered
+    * identity" meaning as `rotate`.
+    */
+  def ratingOf(bot: Principal.Bot): IO[Option[BotRating]] = store.ratingOf(bot.team, bot.name)
+
+  /** Opt a registered bot in or out of the rating ladder. `None` when the caller is not a registered identity — static
+    * (house) and anonymous bots have no row to opt in.
+    */
+  def setOnLadder(bot: Principal.Bot, onLadder: Boolean): IO[Option[BotRating]] =
+    store.setOnLadder(bot.team, bot.name, onLadder)
 
   /** Mint an ephemeral, unranked anonymous bot — `bot:team:anon:<uuid>`. An optional display label becomes a readable,
     * collision-proof prefix (the uuid suffix guarantees uniqueness and the slug keeps the externalId colon-free).

@@ -136,6 +136,27 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(anonNo, Status.Forbidden)
         assertEquals(staticNo, Status.Forbidden)
 
+  test("POST /bot/ladder/join and /leave toggle a registered bot; anon and static callers get 403"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        joined <- service
+          .run(request(Method.POST, uri"/bot/ladder/join", Some(created.token)))
+          .flatMap(_.as[LadderStatus])
+        left <- service
+          .run(request(Method.POST, uri"/bot/ladder/leave", Some(created.token)))
+          .flatMap(_.as[LadderStatus])
+        anon     <- service.run(Request[IO](Method.POST, uri"/bot/anon")).flatMap(_.as[AnonBot])
+        anonNo   <- service.run(request(Method.POST, uri"/bot/ladder/join", Some(anon.token))).map(_.status)
+        staticNo <- service.run(request(Method.POST, uri"/bot/ladder/join", Some("tok-alice"))).map(_.status)
+      yield
+        assertEquals(joined, LadderStatus(onLadder = true, glickoRating = 1500.0, glickoRd = 350.0))
+        assertEquals(left, LadderStatus(onLadder = false, glickoRating = 1500.0, glickoRd = 350.0))
+        assertEquals(anonNo, Status.Forbidden)
+        assertEquals(staticNo, Status.Forbidden)
+
   test("an unknown / no Bearer token is unauthorized"):
     app.flatMap: service =>
       for
