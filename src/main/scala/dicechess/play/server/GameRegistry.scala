@@ -67,6 +67,15 @@ final class GameRegistry private (
     * Both games are rated exactly when [[GameRegistry.isRated]] agrees (the ladder only ever pairs registered,
     * non-anonymous bots, so today this is always true — but the policy stays the single source of truth rather than
     * being assumed here too).
+    *
+    * '''Known gap — do not wire this into live play yet (tracked in #115):''' both games share one secret, and
+    * `GameEnded` reveals it (`seed`/`clientSeeds`, unconditionally, in the clear) the instant EITHER game ends — public
+    * reveal, since `GET /games/{id}` exposes it too. Once the faster game ends, that reveal hands anyone (not just the
+    * two bots) everything needed to compute every remaining roll of the slower game:
+    * `roll(ply, clientSeedWhite, clientSeedBlack)` is a pure function of exactly the now-public values. The two games
+    * must not both reveal independently at their own natural end — the reveal needs to wait for BOTH games in the pair
+    * to finish. No caller exists yet (that's #102's job), so the blast radius today is zero; do not call this from a
+    * real scheduler before that's fixed.
     */
   def createMirroredPair(
       botA: Principal.Bot,
@@ -96,6 +105,10 @@ final class GameRegistry private (
         Some(pairingId),
         fixedSeeds
       )
+    // No orphaned first game on a "partial" failure: createRoom's only error path is EngineOps.parse(initialDfen),
+    // and both calls above use the same default (always-valid) InitialDfen — parsing is a pure function of that
+    // string alone, unaffected by players/seeds/pairingId, so the two calls always succeed or fail together. If a
+    // future caller ever threads a custom initial position through here, that invariant would need revisiting.
     yield (gameAWhite, gameBWhite) match
       case (Right((idA, _)), Right((idB, _))) => Right(GameRegistry.MirroredPair(pairingId, idA, idB))
       case (Left(error), _)                   => Left(error)
