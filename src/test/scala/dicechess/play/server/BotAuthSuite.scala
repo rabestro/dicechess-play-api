@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.IO
 import dicechess.play.core.Principal
-import dicechess.play.store.BotStore
+import dicechess.play.store.{BotRating, BotStore}
 
 import scala.concurrent.duration.*
 
@@ -118,5 +118,32 @@ class BotAuthSuite extends munit.CatsEffectSuite:
           assert(rotated.isDefined, "a registered bot must be able to rotate")
           assertEquals(oldDead, None)
           assertEquals(newAlive, Some(bot: Principal))
+          assertEquals(staticNo, None)
+          assertEquals(anonNo, None)
+
+  test("a fresh registration starts at the provisional rating, off the ladder"):
+    fromSpec("")
+      .flatMap: auth =>
+        for
+          registered <- auth.register("dragons", "smaug")
+          (_, bot) = registered.toOption.get
+          rating <- auth.ratingOf(bot)
+        yield assertEquals(rating, Some(BotRating.initial))
+
+  test("joining and leaving the ladder persists, and is registered-only"):
+    fromSpec("acme|greedy|tok")
+      .flatMap: auth =>
+        for
+          registered <- auth.register("dragons", "smaug")
+          (_, bot) = registered.toOption.get
+          joined <- auth.setOnLadder(bot, onLadder = true)
+          left   <- auth.setOnLadder(bot, onLadder = false)
+          // Static and anon callers have no registered row to opt in, same gate as rotation.
+          staticNo <- auth.setOnLadder(Principal.Bot("acme", "greedy"), onLadder = true)
+          anon     <- auth.mintAnon(None)
+          anonNo   <- auth.setOnLadder(anon._2, onLadder = true)
+        yield
+          assert(joined.exists(_.onLadder), s"joining must persist onLadder=true, got $joined")
+          assert(left.exists(r => !r.onLadder), s"leaving must persist onLadder=false, got $left")
           assertEquals(staticNo, None)
           assertEquals(anonNo, None)

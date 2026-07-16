@@ -99,6 +99,27 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
       .timeout(SaveTimeout)
       .map(_ == 1)
 
+  def ratingOf(team: String, name: String): IO[Option[BotRating]] =
+    sql"""SELECT glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id
+          FROM play.bots WHERE team = $team AND name = $name"""
+      .query[(Double, Double, Double, Boolean, Option[String])]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
+
+  /** `RETURNING` in the same statement: the update and the read of its result are one round trip, so there's no window
+    * for a concurrent change to make the returned state stale.
+    */
+  def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]] =
+    sql"""UPDATE play.bots SET on_ladder = $onLadder WHERE team = $team AND name = $name
+          RETURNING glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id"""
+      .query[(Double, Double, Double, Boolean, Option[String])]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
+
   /** Every live game, decoded row by row: one corrupt snapshot is logged and skipped, never aborting the batch — a
     * single bad row must not stop every other game from resuming.
     */

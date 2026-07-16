@@ -171,6 +171,23 @@ Rotation is the owner's revocation tool for a leaked token. Registered bots only
   }
   ```
 
+#### Join / Leave the Rating Ladder
+
+`POST /bot/ladder/join` · `POST /bot/ladder/leave`
+
+Opts a registered bot in or out of the server-paired rating ladder. Registered bots only, same as token rotation —
+static (house) and anonymous bots have no identity row to opt in.
+
+- **Response:** `200 OK`
+
+  ```json
+  {"onLadder": true, "glickoRating": 1500.0, "glickoRd": 350.0}
+  ```
+
+  A freshly registered bot starts at Glickman's suggested defaults for a new, unrated player
+  (`glickoRating: 1500, glickoRd: 350`) and off the ladder (`onLadder: false`) until it explicitly joins.
+- **Errors:** `403 Forbidden` — the caller is anonymous or static (same condition as `POST /bot/token`).
+
 ---
 
 ### Challenge Management

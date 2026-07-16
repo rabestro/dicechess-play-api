@@ -1,6 +1,7 @@
 package dicechess.play.store
 
 import cats.effect.IO
+import cats.syntax.all.*
 import dicechess.play.core.*
 import io.circe.generic.semiauto.deriveCodec
 import io.circe.{Codec, Decoder, Encoder, KeyDecoder, KeyEncoder}
@@ -76,6 +77,24 @@ object GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = IO.unit
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
 
+/** A registered bot's rating-ladder state (#100): Glicko-2 parameters plus whether it has opted into the ladder, and a
+  * forward-looking owner slot for when human accounts arrive (always `None` today — nothing populates it yet; adding
+  * the column now avoids a later migration).
+  */
+final case class BotRating(
+    glickoRating: Double,
+    glickoRd: Double,
+    glickoVol: Double,
+    onLadder: Boolean,
+    ownerExternalId: Option[String]
+)
+
+object BotRating:
+  /** A freshly registered bot's starting state: Glickman's suggested defaults for a new, unrated player, opted out of
+    * the ladder until explicitly turned on.
+    */
+  val initial: BotRating = BotRating(glickoRating = 1500, glickoRd = 350, glickoVol = 0.06, onLadder = false, None)
+
 /** Persistence seam for durable self-service bot identities (#70). Only token *hashes* cross this boundary — hashing
   * (and token minting) is the caller's job, so the store stays a dumb map from hash to identity.
   */
@@ -91,27 +110,52 @@ trait BotStore:
     */
   def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]
 
+  /** The registered bot's current rating-ladder state, or `None` if no such registered identity exists. */
+  def ratingOf(team: String, name: String): IO[Option[BotRating]]
+
+  /** Opt a registered bot in or out of the rating ladder, returning its resulting state. `None` if no such registered
+    * identity exists — the caller distinguishes registered bots from static/anonymous ones by this, same as `rotate`.
+    */
+  def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]
+
 object BotStore:
   /** In-memory mode (no `PLAY_DB_URL`): registration works for the process's lifetime — durability, like game
-    * persistence, is what the database adds. Backed by a single Ref keyed by token hash.
+    * persistence, is what the database adds. Two refs: identity by token hash (as before), and rating state keyed by
+    * `(team, name)` so it survives a token rotation (which changes the hash but not the identity).
     */
   def inMemory: IO[BotStore] =
-    cats.effect.Ref.of[IO, Map[String, Principal.Bot]](Map.empty).map { ref =>
+    (
+      cats.effect.Ref.of[IO, Map[String, Principal.Bot]](Map.empty),
+      cats.effect.Ref.of[IO, Map[(String, String), BotRating]](Map.empty)
+    ).mapN { (byHash, ratings) =>
       new BotStore:
         def register(team: String, name: String, tokenHash: String): IO[Boolean] =
-          ref.modify { bots =>
-            if bots.values.exists(b => b.team == team && b.name == name) then (bots, false)
-            else (bots.updated(tokenHash, Principal.Bot(team, name)), true)
-          }
+          byHash
+            .modify { bots =>
+              if bots.values.exists(b => b.team == team && b.name == name) then (bots, false)
+              else (bots.updated(tokenHash, Principal.Bot(team, name)), true)
+            }
+            .flatTap(claimed => ratings.update(_.updated((team, name), BotRating.initial)).whenA(claimed))
 
-        def authenticate(tokenHash: String): IO[Option[Principal.Bot]] = ref.get.map(_.get(tokenHash))
+        def authenticate(tokenHash: String): IO[Option[Principal.Bot]] = byHash.get.map(_.get(tokenHash))
 
         def rotate(team: String, name: String, newTokenHash: String): IO[Boolean] =
-          ref.modify { bots =>
+          byHash.modify { bots =>
             if bots.values.exists(b => b.team == team && b.name == name) then
               val cleared = bots.filterNot((_, b) => b.team == team && b.name == name)
               (cleared.updated(newTokenHash, Principal.Bot(team, name)), true)
             else (bots, false)
+          }
+
+        def ratingOf(team: String, name: String): IO[Option[BotRating]] = ratings.get.map(_.get((team, name)))
+
+        def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]] =
+          ratings.modify { current =>
+            current.get((team, name)) match
+              case Some(r) =>
+                val updated = r.copy(onLadder = onLadder)
+                (current.updated((team, name), updated), Some(updated))
+              case None => (current, None)
           }
     }
 

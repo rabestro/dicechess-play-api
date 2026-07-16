@@ -37,6 +37,9 @@ final case class BotRegistered(token: String, team: String, name: String, id: St
 /** The fresh token from `POST /bot/token` (rotation). Shown exactly once; the old token is already invalid. */
 final case class RotatedToken(token: String) derives Codec.AsObject
 
+/** The caller's rating-ladder state after `POST /bot/ladder/join` or `/leave`. */
+final case class LadderStatus(onLadder: Boolean, glickoRating: Double, glickoRd: Double) derives Codec.AsObject
+
 /** A bot's open-seek offer: just the time control — the identity comes from the Bearer token. */
 final case class BotCreateSeek(timeControl: Option[TimeControl] = None) derives Codec.AsObject
 
@@ -158,6 +161,14 @@ object BotRoutes:
 
       case req @ GET -> Root / "bot" / "account" =>
         withBot(auth, req)(bot => Ok(BotAccount(bot.team, bot.name, bot.externalId)))
+
+      // Join/leave the rating ladder (#100). Registered bots only — static (house) and anonymous bots have no row
+      // to opt in; same "not a registered identity" gate as token rotation.
+      case req @ POST -> Root / "bot" / "ladder" / "join" =>
+        withBot(auth, req)(bot => setLadder(auth, bot, onLadder = true))
+
+      case req @ POST -> Root / "bot" / "ladder" / "leave" =>
+        withBot(auth, req)(bot => setLadder(auth, bot, onLadder = false))
 
       case req @ GET -> Root / "bot" / "stream" / "event" =>
         withBot(auth, req): bot =>
@@ -319,6 +330,13 @@ object BotRoutes:
 
   private def seatOf(room: GameRoom, bot: Principal): IO[Option[Seat]] =
     room.seating.map(_.collectFirst { case (seat, principal) if principal == bot => seat })
+
+  private def setLadder(auth: BotAuth, bot: Principal.Bot, onLadder: Boolean): IO[Response[IO]] =
+    auth
+      .setOnLadder(bot, onLadder)
+      .flatMap:
+        case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
+        case None         => Forbidden("only a registered bot can join the rating ladder")
 
   /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. */
   private def withBot(auth: BotAuth, req: Request[IO])(f: Principal.Bot => IO[Response[IO]]): IO[Response[IO]] =
