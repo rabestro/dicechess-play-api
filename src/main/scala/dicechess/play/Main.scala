@@ -12,6 +12,7 @@ import dicechess.play.server.{
   Cors,
   GameRegistry,
   HealthRoutes,
+  LadderScheduler,
   Lobby,
   LobbyRoutes,
   PlayRoutes
@@ -68,9 +69,23 @@ object Main extends IOApp.Simple:
       registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       lobby         <- Lobby.create(registry)
       cors          <- Cors.fromEnv
-      // The sweepers (seeks, pending challenges) and the ingest deliverer are scoped to the server: they run while it
-      // runs and are cancelled with it, so a failure surfaces instead of being silently dropped by a detached fiber.
-      _ <- (deliverer.background, lobby.sweeper().background, challenges.sweeper().background).tupled
+      // The ladder scheduler is opt-in by env (LADDER_INTERVAL_SECONDS) — same "absence disables" idiom as
+      // persistence/ingest above. Unset, the ladder never starts games on its own even if bots are on_ladder.
+      ladderLoop <- LadderScheduler.configFromEnv match
+        case None =>
+          IO.println("[play][ladder] LADDER_INTERVAL_SECONDS unset: no automatic ladder pairings")
+            .as(IO.never: IO[Unit])
+        case Some(ladderConfig) =>
+          LadderScheduler.create(botStore, registry, botEvents, ladderConfig).map(_.scheduler())
+      // The sweepers (seeks, pending challenges), the ladder scheduler, and the ingest deliverer are scoped to the
+      // server: they run while it runs and are cancelled with it, so a failure surfaces instead of being silently
+      // dropped by a detached fiber.
+      _ <- (
+        deliverer.background,
+        lobby.sweeper().background,
+        challenges.sweeper().background,
+        ladderLoop.background
+      ).tupled
         .surround:
           EmberServerBuilder
             .default[IO]

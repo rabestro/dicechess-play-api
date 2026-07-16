@@ -120,6 +120,14 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
       .timeout(SaveTimeout)
       .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
 
+  def onLadderBots: IO[List[Principal.Bot]] =
+    sql"""SELECT team, name FROM play.bots WHERE on_ladder = true"""
+      .query[(String, String)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(Principal.Bot(_, _)))
+
   /** Every live game, decoded row by row: one corrupt snapshot is logged and skipped, never aborting the batch — a
     * single bad row must not stop every other game from resuming.
     */
