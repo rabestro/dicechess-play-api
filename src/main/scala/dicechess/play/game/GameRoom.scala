@@ -348,6 +348,7 @@ final class GameRoom private (
       status = s.status,
       timeControl = s.timeControl,
       rated = Some(s.rated), // always written going forward; only pre-existing rows lack the key (see GameSnapshot)
+      pairingId = s.pairingId,
       remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
       lastRoll = s.lastRoll,
       turns = s.turns,
@@ -554,6 +555,8 @@ object GameRoom:
       // Decided once at creation (`GameRegistry.isRated`) and carried verbatim into every snapshot; never
       // recomputed mid-game.
       rated: Boolean = false,
+      // Ties two CRN mirror games together (#101). `None` outside the ladder — see GameSnapshot.pairingId.
+      pairingId: Option[String] = None,
       remaining: Map[Seat, FiniteDuration] = Map.empty,
       turnStartedAt: Option[FiniteDuration] = None,
       // Provably-fair dice gate: `started` flips on the first Begin; `startedAt` stamps it (to measure the seed grace);
@@ -627,6 +630,13 @@ object GameRoom:
       // Whether this game should count toward rating — decided by the caller (see `GameRegistry.isRated`) before
       // the room exists; the room itself never judges anonymity, it just carries the flag into every snapshot.
       rated: Boolean = false,
+      // Ties this room to its CRN mirror (#101) — see `Session.pairingId`. `None` outside the ladder.
+      pairingId: Option[String] = None,
+      // Fixed per-seat dice-seed entropy, set at creation instead of arriving via `SubmitSeed` (#101's mirrored
+      // pairs need the SAME (white, black) seed pair in both games regardless of which bot sits in which seat — a
+      // per-player seed would change the dice on a colour swap). Empty for an ordinary game: seats fill in their own
+      // seed the normal way, through the gate below.
+      presetClientSeeds: Map[Seat, String] = Map.empty,
       seedGrace: FiniteDuration = DefaultSeedGrace,
       maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
       persist: GameSnapshot => IO[Unit] = _ => IO.unit
@@ -646,6 +656,8 @@ object GameRoom:
             GameStatus.Active,
             timeControl,
             rated = rated,
+            pairingId = pairingId,
+            clientSeeds = presetClientSeeds,
             remaining = initialRemaining(timeControl, players.keys),
             createdAtEpochMs = Some(createdAt.toMillis)
           )
@@ -700,6 +712,7 @@ object GameRoom:
             // A pre-existing row from before this field existed has no key at all (see GameSnapshot.rated) —
             // resolve that to unrated, exactly like createdAtEpochMs's own absent-key story.
             rated = snapshot.rated.getOrElse(false),
+            pairingId = snapshot.pairingId,
             remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
             // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
             // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.

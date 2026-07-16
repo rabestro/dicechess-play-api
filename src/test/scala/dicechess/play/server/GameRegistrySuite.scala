@@ -1,8 +1,13 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
+import dicechess.engine.search.{BotRegistry, SearchAlgorithm}
 import dicechess.play.core.*
+import dicechess.play.game.{BotConnection, GameRoom}
 import dicechess.play.store.{GameSnapshot, GameStore}
+
+import scala.concurrent.duration.*
 
 /** The rated/casual policy (#97): a game is rated only when both requested AND every participant is non-anonymous.
   * `isRated` itself is checked directly as a pure matrix; the `create` tests confirm the policy actually reaches the
@@ -10,12 +15,30 @@ import dicechess.play.store.{GameSnapshot, GameStore}
   */
 class GameRegistrySuite extends munit.CatsEffectSuite:
 
-  private val alice = Principal.Bot("acme", "alice")
-  private val bob   = Principal.Bot("acme", "bob")
+  private val alice: Principal.Bot = Principal.Bot("acme", "alice")
+  private val bob: Principal.Bot   = Principal.Bot("acme", "bob")
 
   private def capturingStore(written: Ref[IO, Vector[GameSnapshot]]): GameStore = new GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = written.update(_ :+ snapshot)
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
+
+  /** Keyed by game id, since a mirrored pair writes two independent games through the same store. */
+  private def capturingStoreById(written: Ref[IO, Map[GameId, GameSnapshot]]): GameStore = new GameStore:
+    def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = written.update(_.updated(id, snapshot))
+    def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
+
+  /** Drive a room to completion with a bot on each seat — same idiom as `GameRoomPersistenceSuite`'s full-game test.
+    * `BotConnection.run` submits its own dice seed first, but the mirrored pair has already preset both seats' seeds,
+    * and the room's own `SubmitSeed` gate is idempotent-per-seat — so the bot's seed is silently a no-op and the fixed
+    * seed stands.
+    */
+  private def playToEnd(room: GameRoom, white: Principal, black: Principal, algorithm: SearchAlgorithm): IO[Unit] =
+    val whiteConn = BotConnection(white, Seat.White, algorithm)
+    val blackConn = BotConnection(black, Seat.Black, algorithm)
+    (whiteConn.run(room).background, blackConn.run(room).background).tupled
+      .use(_ => room.start *> room.result)
+      .void
+      .timeoutTo(20.seconds, IO.raiseError(RuntimeException("mirrored game did not finish in time")))
 
   // ── isRated: the pure policy matrix ──────────────────────────────────────────
 
@@ -86,6 +109,39 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
                 "omitting requestedRated must default to casual"
               )
             }
+        }
+      }
+    }
+
+  // ── createMirroredPair: CRN (#101) ───────────────────────────────────────────
+
+  test("createMirroredPair: identical dice sequence per ply, colours swapped, sharing one pairing id"):
+    val greedy = BotRegistry.getAlgorithm("greedy").get
+    Ref.of[IO, Map[GameId, GameSnapshot]](Map.empty).flatMap { written =>
+      GameRegistry.create(store = capturingStoreById(written)).flatMap { registry =>
+        registry.createMirroredPair(alice, bob, TimeControl.Unlimited).flatMap {
+          case Left(error) => IO.raiseError(RuntimeException(s"createMirroredPair failed: $error"))
+          case Right(pair) =>
+            for
+              roomA <- registry.get(pair.gameAWhite).map(_.getOrElse(fail("game A not registered")))
+              roomB <- registry.get(pair.gameBWhite).map(_.getOrElse(fail("game B not registered")))
+              _     <- playToEnd(roomA, alice, bob, greedy) // A = White, B = Black
+              _     <- playToEnd(roomB, bob, alice, greedy) // mirror: B = White, A = Black
+              snaps <- written.get
+            yield
+              val snapA = snaps.getOrElse(pair.gameAWhite, fail("game A snapshot missing"))
+              val snapB = snaps.getOrElse(pair.gameBWhite, fail("game B snapshot missing"))
+              assertEquals(snapA.pairingId, Some(pair.pairingId))
+              assertEquals(snapB.pairingId, Some(pair.pairingId))
+              val diceA     = snapA.turns.map(_.dice)
+              val diceB     = snapB.turns.map(_.dice)
+              val commonLen = math.min(diceA.size, diceB.size)
+              assert(commonLen > 0, s"expected at least one completed turn in both games, got $diceA / $diceB")
+              assertEquals(
+                diceA.take(commonLen),
+                diceB.take(commonLen),
+                "dice must be identical ply-for-ply once colours are swapped"
+              )
         }
       }
     }
