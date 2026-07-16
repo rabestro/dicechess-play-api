@@ -48,7 +48,11 @@ final case class GameSnapshot(
     // to decode with "Missing required field" when the key is absent, which would have discarded every
     // pre-existing active game as corrupt on the next resume. Callers resolve this to a definite Boolean
     // (`GameRoom.restore`), defaulting a missing value to `false` — correct, since it predates the concept.
-    rated: Option[Boolean] = None
+    rated: Option[Boolean] = None,
+    // Ties two CRN mirror games together (#101): same two participants, colours swapped, identical dice sequence.
+    // `None` for every non-ladder game — most games have no pair, so unlike `rated` there is no "resolve to a
+    // definite value" story; this stays `Option` all the way through (Session included), not just at rest.
+    pairingId: Option[String] = None
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true
