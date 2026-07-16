@@ -11,6 +11,7 @@ import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
 import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat, Termination}
 import dicechess.play.ingest.PlaysiteIngest
+import dicechess.play.rating.Glicko
 import io.circe.Json
 import io.circe.syntax.*
 import org.flywaydb.core.Flyway
@@ -30,7 +31,8 @@ final class PgGameStore private (xa: Transactor[IO])
     extends GameStore
     with OutboxStore
     with BotStore
-    with GameResultsStore:
+    with GameResultsStore
+    with RatingStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
@@ -233,6 +235,44 @@ final class PgGameStore private (xa: Transactor[IO])
           .transact(xa)
           .timeout(SaveTimeout)
           .map(_.map(PgGameStore.toRow))
+
+  // ── RatingStore (#119) ────────────────────────────────────────────────────
+
+  def unappliedRatedGames(limit: Int): IO[List[GameResultRow]] =
+    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id::text, finished_at
+          FROM play.game_results
+          WHERE rated = true AND rating_applied_at IS NULL
+          ORDER BY finished_at ASC
+          LIMIT $limit"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
+  def applyRatingUpdate(
+      gameId: GameId,
+      white: Principal.Bot,
+      whiteGlicko: Glicko,
+      black: Principal.Bot,
+      blackGlicko: Glicko
+  ): IO[Unit] =
+    (updateGlicko(white, whiteGlicko) *> updateGlicko(black, blackGlicko) *> stampApplied(gameId))
+      .transact(xa)
+      .timeout(SaveTimeout)
+
+  def markRatingApplied(gameId: GameId): IO[Unit] =
+    stampApplied(gameId).transact(xa).timeout(SaveTimeout)
+
+  private def updateGlicko(bot: Principal.Bot, glicko: Glicko): ConnectionIO[Unit] =
+    sql"""UPDATE play.bots
+          SET glicko_rating = ${glicko.rating}, glicko_rd = ${glicko.deviation}, glicko_vol = ${glicko.volatility}
+          WHERE team = ${bot.team} AND name = ${bot.name}""".update.run.void
+
+  private def stampApplied(gameId: GameId): ConnectionIO[Unit] =
+    sql"""UPDATE play.game_results SET rating_applied_at = now()
+          WHERE game_id = ${gameId.value}::uuid""".update.run.void
 
 object PgGameStore:
 

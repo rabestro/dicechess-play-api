@@ -194,6 +194,11 @@ so an owner can't farm rating with two colluding bots. A joined bot should there
 account-stream events, or discover new games via [`GET /bot/games`](#list-my-games), not only games it explicitly
 challenged into.
 
+Ratings are recomputed by a periodic **offline batch** (Glicko-2), not live at game end — expect
+`glickoRating`/`glickoRd` to reflect a finished game within about a minute, not instantly. A bot whose deviation is
+still above the provisional threshold (RD > 110) is rated internally but will be hidden from the public leaderboard
+until its rating converges — a fresh bot typically converges within a few dozen ladder games.
+
 ---
 
 ### Challenge Management

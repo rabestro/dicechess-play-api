@@ -18,7 +18,8 @@ import dicechess.play.server.{
   PlayRoutes
 }
 import dicechess.play.ingest.IngestDeliverer
-import dicechess.play.store.{BotStore, GameStore, PgGameStore}
+import dicechess.play.rating.RatingBatch
+import dicechess.play.store.{BotStore, GameStore, PgGameStore, RatingStore}
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
@@ -34,9 +35,9 @@ object Main extends IOApp.Simple:
   // and registered bot identities are durable; with INGEST_URL/INGEST_TOKEN also set, finished games are delivered to
   // analytics from the durable outbox. Without PLAY_DB_URL the server runs in-memory exactly as before (games and
   // registered bots die with the process).
-  private def appResources: Resource[IO, (GameStore, BotStore, IO[Unit])] =
+  private def appResources: Resource[IO, (GameStore, BotStore, Option[RatingStore], IO[Unit])] =
     PgGameStore.configFromEnv match
-      case None           => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, IO.never))
+      case None           => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, None, IO.never))
       case Some(dbConfig) =>
         PgGameStore.resource(dbConfig).flatMap { store =>
           IngestDeliverer.configFromEnv match
@@ -44,18 +45,18 @@ object Main extends IOApp.Simple:
               val warn = cats.effect.std
                 .Console[IO]
                 .errorln("[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games accumulate in the outbox")
-              Resource.pure((store, store, warn *> IO.never))
+              Resource.pure((store, store, Some(store), warn *> IO.never))
             case Some(ingestConfig) =>
               EmberClientBuilder
                 .default[IO]
                 .build
-                .map(http => (store, store, IngestDeliverer(store, http, ingestConfig).loop.void))
+                .map(http => (store, store, Some(store), IngestDeliverer(store, http, ingestConfig).loop.void))
         }
 
   def run: IO[Unit] = appResources.use(serve)
 
-  private def serve(resources: (GameStore, BotStore, IO[Unit])): IO[Unit] =
-    val (store, botStore, deliverer) = resources
+  private def serve(resources: (GameStore, BotStore, Option[RatingStore], IO[Unit])): IO[Unit] =
+    val (store, botStore, ratingStore, deliverer) = resources
     for
       registry   <- GameRegistry.create(store = store)
       resumed    <- registry.resume
@@ -77,14 +78,29 @@ object Main extends IOApp.Simple:
             .as(IO.never: IO[Unit])
         case Some(ladderConfig) =>
           LadderScheduler.create(botStore, registry, botEvents, ladderConfig).map(_.scheduler())
-      // The sweepers (seeks, pending challenges), the ladder scheduler, and the ingest deliverer are scoped to the
-      // server: they run while it runs and are cancelled with it, so a failure surfaces instead of being silently
-      // dropped by a detached fiber.
+      // The rating batch (#119) is opt-in the same way (RATING_INTERVAL_SECONDS) — and additionally needs the
+      // database: without PLAY_DB_URL there is no game_results queue to drain, so a set-but-useless env var gets a
+      // loud warning instead of a silent no-op.
+      ratingLoop <- (RatingBatch.configFromEnv, ratingStore) match
+        case (None, _) =>
+          IO.println("[play][rating] RATING_INTERVAL_SECONDS unset: no automatic rating updates")
+            .as(IO.never: IO[Unit])
+        case (Some(_), None) =>
+          cats.effect.std
+            .Console[IO]
+            .errorln("[play][rating] RATING_INTERVAL_SECONDS set but PLAY_DB_URL unset: rating batch disabled")
+            .as(IO.never: IO[Unit])
+        case (Some(ratingConfig), Some(rs)) =>
+          IO.pure(new RatingBatch(botStore, rs, ratingConfig).scheduler())
+      // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, and the ingest deliverer
+      // are scoped to the server: they run while it runs and are cancelled with it, so a failure surfaces instead of
+      // being silently dropped by a detached fiber.
       _ <- (
         deliverer.background,
         lobby.sweeper().background,
         challenges.sweeper().background,
-        ladderLoop.background
+        ladderLoop.background,
+        ratingLoop.background
       ).tupled
         .surround:
           EmberServerBuilder
