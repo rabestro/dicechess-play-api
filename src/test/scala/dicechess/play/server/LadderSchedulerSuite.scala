@@ -141,3 +141,61 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
             "rather than an immediate repeat"
         )
       }
+
+  test("anti-repeat is symmetric: no two adjacent ticks ever re-form the identical pair (#117 review)"):
+    // With exactly 3 bots, `recent` (one entry per bot) can never have all three pairwise combinations excluded at
+    // once — proof: excluding all of {A,B},{A,C},{B,C} needs recent(A)=B (or recent(B)=A), recent(A)=C (or
+    // recent(C)=A), and recent(B)=C (or recent(C)=B); recent(A) can't simultaneously be B and C, and whichever
+    // pairing set recent(C)=A also sets recent(A)=C, contradicting the first — so at least one combination always
+    // survives the filter, making "no adjacent repeat" a hard guarantee here, not just a probability.
+    // Cap comfortably above the 6 ticks below: none of these pairs is ever played to completion, so the cap must
+    // never bind here — that concurrency behavior has its own dedicated test above.
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentPairs = 10, timeControl = TimeControl.Unlimited))
+      .flatMap { case (botStore, registry, _, scheduler) =>
+        def newPair(beforeIds: Set[GameId]): IO[Set[Principal]] =
+          registry.list.flatMap { after =>
+            after.collectFirst { case (id, room) if !beforeIds.contains(id) => room } match
+              case Some(room) => room.seating.map(_.values.toSet)
+              case None       => IO.raiseError(RuntimeException("tick did not start a new pair"))
+          }
+
+        for
+          _     <- joinLadder(botStore, List(alice, bob, carol))
+          pairs <- (1 to 6).toList.foldLeftM(List.empty[Set[Principal]]) { (acc, _) =>
+            for
+              before <- registry.list.map(_.map(_._1).toSet)
+              _      <- scheduler.tick
+              pair   <- newPair(before)
+            yield acc :+ pair
+          }
+        yield
+          val repeats = pairs.sliding(2).count(w => w.size == 2 && w.head == w(1))
+          assertEquals(repeats, 0, s"a pair repeated on two adjacent ticks: $pairs")
+      }
+
+  // ── Config.fromValues: env-var validation (#117 review) ──────────────────────
+
+  test("a non-positive or unparseable interval disables the scheduler regardless of the cap"):
+    assertEquals(LadderScheduler.Config.fromValues(Some("0"), None), None)
+    assertEquals(LadderScheduler.Config.fromValues(Some("-5"), None), None)
+    assertEquals(LadderScheduler.Config.fromValues(Some("not-a-number"), None), None)
+    assertEquals(LadderScheduler.Config.fromValues(Some(""), None), None)
+    assertEquals(LadderScheduler.Config.fromValues(None, Some("2")), None)
+
+  test("a non-positive or unparseable cap falls back to the default rather than disabling the scheduler"):
+    val withZeroCap     = LadderScheduler.Config.fromValues(Some("60"), Some("0"))
+    val withNegativeCap = LadderScheduler.Config.fromValues(Some("60"), Some("-3"))
+    val withJunkCap     = LadderScheduler.Config.fromValues(Some("60"), Some("nope"))
+    val withNoCap       = LadderScheduler.Config.fromValues(Some("60"), None)
+    List(withZeroCap, withNegativeCap, withJunkCap, withNoCap).foreach { config =>
+      assertEquals(
+        config.map(_.maxConcurrentPairs),
+        Some(LadderScheduler.Config.DefaultMaxConcurrentPairs)
+      )
+    }
+
+  test("valid positive values parse through unchanged"):
+    val config = LadderScheduler.Config.fromValues(Some("45"), Some("7"))
+    assertEquals(config.map(_.interval), Some(45.seconds))
+    assertEquals(config.map(_.maxConcurrentPairs), Some(7))
+    assertEquals(config.map(_.timeControl), Some(LadderScheduler.Config.DefaultTimeControl))

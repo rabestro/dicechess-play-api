@@ -42,7 +42,13 @@ final class LadderScheduler private (
     else
       (shuffled(pool), lastPairedWith.get).mapN: (shuffledPool, recent) =>
         val candidates = shuffledPool.combinations(2).map(l => (l(0), l(1))).toList
-        candidates.find((a, b) => recent.get(a).forall(_ != b)).orElse(candidates.headOption)
+        // Checked both ways round: `recent` holds one entry per bot (its single most recent partner), so once a
+        // third bot has been paired, one side of a candidate pair can go stale relative to the other (#117 review)
+        // — e.g. after A-B then A-C, recent = {A:C, B:A, C:A}; checking only recent(a) would let {A,B} or {B,A}
+        // through depending on which happened to land in slot a of this tick's shuffle.
+        candidates
+          .find((a, b) => recent.get(a).forall(_ != b) && recent.get(b).forall(_ != a))
+          .orElse(candidates.headOption)
 
   private def startPair(botA: Principal.Bot, botB: Principal.Bot): IO[Unit] =
     registry
@@ -50,13 +56,15 @@ final class LadderScheduler private (
       .flatMap:
         case Left(error) => Console[IO].errorln(s"[play][ladder] pairing failed: $error")
         case Right(pair) =>
-          // inFlight is incremented only once we actually have a pair, and the WHOLE post-creation sequence — not
-          // just awaitBothEnded — is under the guarantee: a throw from lastPairedWith.update/notifyBoth would
-          // otherwise leak the slot forever, since nothing later would ever decrement it (#117 review).
-          inFlight.update(_ + 1) *>
-            (lastPairedWith.update(current => current + (botA -> botB) + (botB -> botA)) *>
-              notifyBoth(botA, botB, pair) *>
-              awaitBothEnded(pair))
+          // lastPairedWith is updated synchronously, before this method (hence tick) returns: the very next tick's
+          // anti-repeat check depends on seeing this pairing immediately, not whenever a forked fiber happens to be
+          // scheduled. An earlier version of the #117 inFlight-leak fix moved this update into the forked block
+          // below (to close a different gap), which raced it against the next tick and silently broke anti-repeat
+          // — caught by a dedicated regression test. Only notifyBoth/awaitBothEnded — the parts that can genuinely
+          // take a while or, for notifyBoth, throw — are forked and guaranteed.
+          lastPairedWith.update(current => current + (botA -> botB) + (botB -> botA)) *>
+            inFlight.update(_ + 1) *>
+            (notifyBoth(botA, botB, pair) *> awaitBothEnded(pair))
               .guarantee(inFlight.update(_ - 1))
               .start
               .void
@@ -98,15 +106,24 @@ object LadderScheduler:
     val DefaultTimeControl: TimeControl = TimeControl.Fischer(300, 3)
     val Default: Config                 = Config(DefaultInterval, DefaultMaxConcurrentPairs, DefaultTimeControl)
 
+    /** Parse from explicit optional raw values (also used by tests — same split as `BotAuth.fromSpec`/`fromEnv`). Both
+      * are filtered to strictly positive: a non-positive interval makes `IO.sleep` resolve immediately, busy-spinning
+      * `tick` at 100% CPU forever, and a non-positive cap wedges the scheduler at zero throughput with no error
+      * surfaced (#117 review) — either is treated the same as an absent/unparseable value. An invalid interval falls
+      * through to `None` (scheduler not built at all); an invalid cap falls back to the default instead, since it's a
+      * secondary tuning knob rather than the feature's own on/off switch.
+      */
+    def fromValues(intervalSecondsRaw: Option[String], maxConcurrentPairsRaw: Option[String]): Option[Config] =
+      intervalSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map { seconds =>
+        val cap = maxConcurrentPairsRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultMaxConcurrentPairs)
+        Config(seconds.seconds, cap, DefaultTimeControl)
+      }
+
   /** Opt-in by env, same "absence disables" idiom as `PgGameStore.configFromEnv`/`IngestDeliverer.configFromEnv`: with
     * `LADDER_INTERVAL_SECONDS` unset, the scheduler is never built and no ladder games start automatically.
     */
   def configFromEnv: Option[Config] =
-    sys.env.get("LADDER_INTERVAL_SECONDS").filter(_.nonEmpty).flatMap(_.toIntOption).map { seconds =>
-      val cap =
-        sys.env.get("LADDER_MAX_CONCURRENT_PAIRS").flatMap(_.toIntOption).getOrElse(Config.DefaultMaxConcurrentPairs)
-      Config(seconds.seconds, cap, Config.DefaultTimeControl)
-    }
+    Config.fromValues(sys.env.get("LADDER_INTERVAL_SECONDS"), sys.env.get("LADDER_MAX_CONCURRENT_PAIRS"))
 
   def create(
       botStore: BotStore,
