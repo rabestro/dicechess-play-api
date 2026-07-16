@@ -45,16 +45,21 @@ final class LadderScheduler private (
         candidates.find((a, b) => recent.get(a).forall(_ != b)).orElse(candidates.headOption)
 
   private def startPair(botA: Principal.Bot, botB: Principal.Bot): IO[Unit] =
-    inFlight.update(_ + 1) *>
-      registry
-        .createMirroredPair(botA, botB, config.timeControl)
-        .flatMap:
-          case Left(error) =>
-            inFlight.update(_ - 1) *> Console[IO].errorln(s"[play][ladder] pairing failed: $error")
-          case Right(pair) =>
-            lastPairedWith.update(current => current + (botA -> botB) + (botB -> botA)) *>
+    registry
+      .createMirroredPair(botA, botB, config.timeControl)
+      .flatMap:
+        case Left(error) => Console[IO].errorln(s"[play][ladder] pairing failed: $error")
+        case Right(pair) =>
+          // inFlight is incremented only once we actually have a pair, and the WHOLE post-creation sequence — not
+          // just awaitBothEnded — is under the guarantee: a throw from lastPairedWith.update/notifyBoth would
+          // otherwise leak the slot forever, since nothing later would ever decrement it (#117 review).
+          inFlight.update(_ + 1) *>
+            (lastPairedWith.update(current => current + (botA -> botB) + (botB -> botA)) *>
               notifyBoth(botA, botB, pair) *>
-              awaitBothEnded(pair).guarantee(inFlight.update(_ - 1)).start.void
+              awaitBothEnded(pair))
+              .guarantee(inFlight.update(_ - 1))
+              .start
+              .void
 
   /** Push `gameStart` for both games of the pair to both bots — same advisory-push idiom as `Challenges.accept` — so a
     * listening bot learns immediately; a poll-only bot still discovers both games via `GET /bot/games`.
