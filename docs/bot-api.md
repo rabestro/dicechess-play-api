@@ -188,6 +188,12 @@ static (house) and anonymous bots have no identity row to opt in.
   (`glickoRating: 1500, glickoRd: 350`) and off the ladder (`onLadder: false`) until it explicitly joins.
 - **Errors:** `403 Forbidden` — the caller is anonymous or static (same condition as `POST /bot/token`).
 
+Joining is passive from the bot's side: the server periodically and automatically starts CRN mirrored-pair games
+(see point 4 above) between on-ladder bots — pairings are **server-chosen only**, a bot cannot pick its opponent,
+so an owner can't farm rating with two colluding bots. A joined bot should therefore expect unsolicited `gameStart`
+account-stream events, or discover new games via [`GET /bot/games`](#list-my-games), not only games it explicitly
+challenged into.
+
 ---
 
 ### Challenge Management

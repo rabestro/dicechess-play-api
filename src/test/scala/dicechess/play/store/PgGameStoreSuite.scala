@@ -102,6 +102,27 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("onLadderBots lists only registered bots currently opted in (#102)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        // A dedicated team/hash namespace: this suite shares one database across all tests (TestContainerForAll,
+        // no per-test reset), so a name or token hash reused from another test in this file would collide on the
+        // token_hash unique constraint — and a plain equality assertion on onLadderBots would be fragile against
+        // whatever else in the file happens to be on_ladder. Both are avoided here.
+        for
+          _        <- db.register("ladder-suite", "on-bot", "hash-ladder-on")
+          _        <- db.register("ladder-suite", "off-bot", "hash-ladder-off")
+          _        <- db.setOnLadder("ladder-suite", "on-bot", true)
+          onLadder <- db.onLadderBots
+        yield
+          assert(onLadder.contains(Principal.Bot("ladder-suite", "on-bot")), s"expected on-bot in $onLadder")
+          assert(
+            !onLadder.contains(Principal.Bot("ladder-suite", "off-bot")),
+            s"expected off-bot absent from $onLadder"
+          )
+      }
+    }
+
   test("ended games are not resumed"):
     withContainers { pg =>
       store(pg).use { db =>

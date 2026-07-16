@@ -126,6 +126,9 @@ trait BotStore:
     */
   def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]
 
+  /** Every registered bot currently opted into the rating ladder — the pairing scheduler's candidate pool (#102). */
+  def onLadderBots: IO[List[Principal.Bot]]
+
 object BotStore:
   /** In-memory mode (no `PLAY_DB_URL`): registration works for the process's lifetime — durability, like game
     * persistence, is what the database adds. Two refs: identity by token hash (as before), and rating state keyed by
@@ -165,6 +168,9 @@ object BotStore:
                 (current.updated((team, name), updated), Some(updated))
               case None => (current, None)
           }
+
+        def onLadderBots: IO[List[Principal.Bot]] =
+          ratings.get.map(_.toList.collect { case ((team, name), r) if r.onLadder => Principal.Bot(team, name) })
     }
 
 /** An undelivered analytics handoff: the game's `GameIngest` payload plus its retry bookkeeping. */
