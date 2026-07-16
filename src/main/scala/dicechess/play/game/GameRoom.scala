@@ -347,6 +347,7 @@ final class GameRoom private (
       pending = s.pending,
       status = s.status,
       timeControl = s.timeControl,
+      rated = Some(s.rated), // always written going forward; only pre-existing rows lack the key (see GameSnapshot)
       remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
       lastRoll = s.lastRoll,
       turns = s.turns,
@@ -550,6 +551,9 @@ object GameRoom:
       pending: Boolean,
       status: GameStatus,
       timeControl: TimeControl,
+      // Decided once at creation (`GameRegistry.isRated`) and carried verbatim into every snapshot; never
+      // recomputed mid-game.
+      rated: Boolean = false,
       remaining: Map[Seat, FiniteDuration] = Map.empty,
       turnStartedAt: Option[FiniteDuration] = None,
       // Provably-fair dice gate: `started` flips on the first Begin; `startedAt` stamps it (to measure the seed grace);
@@ -620,6 +624,9 @@ object GameRoom:
       idleCheck: FiniteDuration = DefaultIdleCheck,
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
       timeControl: TimeControl = TimeControl.Unlimited,
+      // Whether this game should count toward rating — decided by the caller (see `GameRegistry.isRated`) before
+      // the room exists; the room itself never judges anonymity, it just carries the flag into every snapshot.
+      rated: Boolean = false,
       seedGrace: FiniteDuration = DefaultSeedGrace,
       maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
       persist: GameSnapshot => IO[Unit] = _ => IO.unit
@@ -638,6 +645,7 @@ object GameRoom:
             pending = false,
             GameStatus.Active,
             timeControl,
+            rated = rated,
             remaining = initialRemaining(timeControl, players.keys),
             createdAtEpochMs = Some(createdAt.toMillis)
           )
@@ -689,6 +697,9 @@ object GameRoom:
             snapshot.pending,
             snapshot.status,
             snapshot.timeControl,
+            // A pre-existing row from before this field existed has no key at all (see GameSnapshot.rated) —
+            // resolve that to unrated, exactly like createdAtEpochMs's own absent-key story.
+            rated = snapshot.rated.getOrElse(false),
             remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
             // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
             // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.

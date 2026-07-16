@@ -94,3 +94,57 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
           assert(turns.forall(_.fenAfter.nonEmpty))
         }
     }
+
+  test("create with rated=true persists a rated creation snapshot"):
+    Ref.of[IO, Vector[GameSnapshot]](Vector.empty).flatMap { written =>
+      GameRoom
+        .create(seats, dice, rated = true, persist = snap => written.update(_ :+ snap))
+        .flatMap {
+          case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+          case Right(_)    =>
+            written.get.map { snaps =>
+              assert(snaps.headOption.exists(_.rated.contains(true)), "the creation snapshot must be marked rated")
+            }
+        }
+    }
+
+  test("create without rated defaults to a casual creation snapshot"):
+    Ref.of[IO, Vector[GameSnapshot]](Vector.empty).flatMap { written =>
+      GameRoom
+        .create(seats, dice, persist = snap => written.update(_ :+ snap))
+        .flatMap {
+          case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+          case Right(_)    =>
+            written.get.map { snaps =>
+              assert(
+                snaps.headOption.exists(_.rated.contains(false)),
+                "omitting rated must default the snapshot to casual"
+              )
+            }
+        }
+    }
+
+  test("restore carries the rated flag from a persisted snapshot into the rebuilt room"):
+    Ref.of[IO, Vector[GameSnapshot]](Vector.empty).flatMap { written =>
+      GameRoom
+        .create(seats, dice, rated = true, seedGrace = 50.millis, persist = snap => written.update(_ :+ snap))
+        .flatMap {
+          case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+          case Right(room) =>
+            for
+              _       <- room.start
+              pending <- awaitWritten(written)(_.exists(_.pending))
+              snap = pending.filter(_.pending).last
+              restoredDice <- IO.fromEither(DiceSource.fromHexSeed(snap.serverSeed).left.map(RuntimeException(_)))
+              afterRestore <- Ref.of[IO, Vector[GameSnapshot]](Vector.empty)
+              restored     <- GameRoom
+                .restore(snap, restoredDice, persist = snap2 => afterRestore.update(_ :+ snap2))
+                .flatMap {
+                  case Left(error) => IO.raiseError(RuntimeException(s"restore failed: $error"))
+                  case Right(r)    => IO.pure(r)
+                }
+              _     <- restored.submit(Seat.White, GameCommand.Resign)
+              ended <- awaitWritten(afterRestore)(_.lastOption.exists(_.ended))
+            yield assert(ended.last.rated.contains(true), "the restored room's terminal snapshot must still be rated")
+        }
+    }

@@ -40,7 +40,14 @@ final case class GameSnapshot(
     turns: Vector[TurnRecord],
     // Wall-clock creation time — carried into the analytics handoff as `started_at`. Optional so snapshots written
     // before this field existed still decode.
-    createdAtEpochMs: Option[Long] = None
+    createdAtEpochMs: Option[Long] = None,
+    // Decided once at creation from both participants' identities (see GameRegistry.isRated); never recomputed.
+    // Option, NOT a bare `Boolean = false` default: circe's generic derivation only falls back to `None` for a
+    // MISSING key on an Option field (decodeOption's own special case) — a defaulted non-Option field still fails
+    // to decode with "Missing required field" when the key is absent, which would have discarded every
+    // pre-existing active game as corrupt on the next resume. Callers resolve this to a definite Boolean
+    // (`GameRoom.restore`), defaulting a missing value to `false` — correct, since it predates the concept.
+    rated: Option[Boolean] = None
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true
