@@ -95,7 +95,10 @@ final case class BotRating(
     glickoVol: Double,
     onLadder: Boolean,
     ownerExternalId: Option[String]
-)
+):
+  /** The pure-math view of this state, as `Glicko2.update` consumes and produces it. */
+  def glicko: dicechess.play.rating.Glicko =
+    dicechess.play.rating.Glicko(rating = glickoRating, deviation = glickoRd, volatility = glickoVol)
 
 object BotRating:
   /** A freshly registered bot's starting state: Glickman's suggested defaults for a new, unrated player, opted out of
@@ -212,8 +215,9 @@ final case class GameResultRow(
 /** Persistence seam for the queryable `game_results` projection (#98): the games table's own snapshot is opaque JSONB
   * (only `status` is indexed), so the ladder scheduler and rating batch need this to enumerate finished games by
   * participant / result / rated / pairing without decoding JSON. One row per finished game, written once (in the same
-  * transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — Postgres only,
-  * since `GameStore.noop`'s in-memory mode has nothing to project.
+  * transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — with one
+  * bookkeeping exception, the `rating_applied_at` stamp (V6, see [[RatingStore]]) — Postgres only, since
+  * `GameStore.noop`'s in-memory mode has nothing to project.
   */
 trait GameResultsStore:
   /** Most recent results `externalId` played (either seat), newest first. */
@@ -241,3 +245,30 @@ object GameResultsStore:
     * entire lifetime.
     */
   val DefaultRecentLimit: Int = 50
+
+/** Persistence seam for the Glicko-2 rating batch (#119). The work queue is claim-based: a rated `game_results` row
+  * with no `rating_applied_at` stamp is pending, and applying it stamps it in the SAME transaction as the rating write
+  * — chosen over a `finished_at` cursor because rating updates are NOT idempotent (a cursor with overlap would re-apply
+  * games; a cursor without overlap loses games to the commit-order race documented on
+  * `GameResultsStore.finishedRatedSince`). Postgres only, like [[GameResultsStore]].
+  */
+trait RatingStore:
+  /** Rated games not yet applied to any rating, oldest `finished_at` first — the head of the claim queue. */
+  def unappliedRatedGames(limit: Int): IO[List[GameResultRow]]
+
+  /** Atomically write both bots' post-game Glicko state AND stamp the game as applied — one transaction, so a crash
+    * between the two can neither double-apply a game nor lose one side's update.
+    */
+  def applyRatingUpdate(
+      gameId: GameId,
+      white: Principal.Bot,
+      whiteGlicko: dicechess.play.rating.Glicko,
+      black: Principal.Bot,
+      blackGlicko: dicechess.play.rating.Glicko
+  ): IO[Unit]
+
+  /** Stamp a game as applied WITHOUT touching any rating — for games the batch must skip permanently (a non-bot or
+    * unregistered participant, a missing result, self-play): left unstamped they would clog the head of the queue
+    * forever.
+    */
+  def markRatingApplied(gameId: GameId): IO[Unit]
