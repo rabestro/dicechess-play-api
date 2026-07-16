@@ -257,6 +257,26 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("pairFor returns an empty list for a malformed pairing id, instead of a database error (#98)"):
+    withContainers { pg =>
+      store(pg).use(db => db.pairFor("not-a-uuid").map(assertEquals(_, Nil)))
+    }
+
+  test("recentResultsFor does not double-count a self-played game (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        // GameRegistry.create itself doesn't forbid seating the same principal on both sides (only its
+        // Lobby/Challenges callers do) — a UNION ALL of the white/black subqueries would otherwise return this
+        // game twice.
+        val soloPlayer = Principal.Guest("b2-self-play")
+        for
+          id   <- GameId.random
+          _    <- db.save(id, endedResultFixture(soloPlayer, soloPlayer))
+          rows <- db.recentResultsFor(soloPlayer.externalId)
+        yield assertEquals(rows.count(_.gameId.value == id.value), 1, s"expected exactly one row, got $rows")
+      }
+    }
+
   test("saving the same ended snapshot twice still inserts exactly one game_results row (#98)"):
     withContainers { pg =>
       store(pg).use { db =>

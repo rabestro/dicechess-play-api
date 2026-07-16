@@ -2,6 +2,10 @@
 -- indexed), so the ladder scheduler and rating batch can enumerate finished games by participant / result / rated /
 -- pairing without decoding JSON. One row per finished game, written once (in the same transaction as the terminal
 -- snapshot write, PgGameStore.save) and never updated afterward.
+-- No FOREIGN KEY to games(id) (unlike outbox) — deliberate, not an oversight: this projection is meant to outlive
+-- the bulky JSONB snapshot. A future retention pass that prunes old play.games rows to reclaim storage should be
+-- able to do so without an ON DELETE CASCADE also wiping out the compact rating/result history that's the whole
+-- point of keeping this table around.
 CREATE TABLE game_results (
     game_id            uuid PRIMARY KEY,
     white_external_id  text NOT NULL,

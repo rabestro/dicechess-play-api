@@ -177,7 +177,10 @@ final class PgGameStore private (xa: Transactor[IO])
   /** Two LIMIT-bounded, already-ordered subqueries (one per side) unioned and re-limited, rather than one `OR` across
     * both columns: an `OR` predicate on two single-column indexes forces Postgres to bitmap-scan and sort ALL of the
     * participant's matching rows before applying LIMIT — O(history size) — whereas each `(participant, finished_at
-    * DESC)` composite index below serves its half of this query as a plain bounded index scan.
+    * DESC)` composite index below serves its half of this query as a plain bounded index scan. Plain `UNION`, not
+    * `UNION ALL`: `GameRegistry.create` doesn't itself forbid seating the same principal on both sides (only its
+    * `Lobby`/`Challenges` callers do), so a self-played game would otherwise match both branches and come back twice.
+    * The dedupe cost is over at most `2 * limit` rows, not the participant's whole history.
     */
   def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
     sql"""(SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
@@ -186,7 +189,7 @@ final class PgGameStore private (xa: Transactor[IO])
            WHERE white_external_id = $externalId
            ORDER BY finished_at DESC
            LIMIT $limit)
-          UNION ALL
+          UNION
           (SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
                   server_seed, pairing_id::text, finished_at
            FROM play.game_results
@@ -213,16 +216,23 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map(PgGameStore.toRow))
 
+  /** `None` for a malformed `pairingId` short-circuits to an empty result without touching the database: the `::uuid`
+    * cast below would otherwise raise a Postgres error (22P02) instead of "found nothing", and a caller with a
+    * genuinely-minted pairing id (this method's only realistic caller today) never hits this path anyway.
+    */
   def pairFor(pairingId: String): IO[List[GameResultRow]] =
-    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                 server_seed, pairing_id::text, finished_at
-          FROM play.game_results
-          WHERE pairing_id = ${pairingId}::uuid"""
-      .query[PgGameStore.ResultTuple]
-      .to[List]
-      .transact(xa)
-      .timeout(SaveTimeout)
-      .map(_.map(PgGameStore.toRow))
+    scala.util.Try(java.util.UUID.fromString(pairingId)).toOption match
+      case None    => IO.pure(Nil)
+      case Some(_) =>
+        sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                     server_seed, pairing_id::text, finished_at
+              FROM play.game_results
+              WHERE pairing_id = ${pairingId}::uuid"""
+          .query[PgGameStore.ResultTuple]
+          .to[List]
+          .transact(xa)
+          .timeout(SaveTimeout)
+          .map(_.map(PgGameStore.toRow))
 
 object PgGameStore:
 
