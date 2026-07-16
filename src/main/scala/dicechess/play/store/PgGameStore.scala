@@ -5,15 +5,17 @@ import cats.effect.std.Console
 import cats.syntax.all.*
 import doobie.*
 import doobie.implicits.*
+import doobie.implicits.javatimedrivernative.*
 import doobie.postgres.circe.jsonb.implicits.*
 import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
-import dicechess.play.core.{GameId, Principal}
+import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat}
 import dicechess.play.ingest.PlaysiteIngest
 import io.circe.Json
 import io.circe.syntax.*
 import org.flywaydb.core.Flyway
 
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Postgres-backed store. Deployed against a **dedicated `play` database** (analytics is an aggregator with its own
@@ -24,11 +26,16 @@ import scala.concurrent.duration.*
   * Every round trip is bounded by a timeout: the caller treats store trouble as a degradation, and a *hung* query —
   * unlike a failed one — would otherwise stall the game's writer fiber in a way `handleErrorWith` can't catch.
   */
-final class PgGameStore private (xa: Transactor[IO]) extends GameStore with OutboxStore with BotStore:
+final class PgGameStore private (xa: Transactor[IO])
+    extends GameStore
+    with OutboxStore
+    with BotStore
+    with GameResultsStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
-  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload: the terminal
-    * write and its handoff are atomic, so a crash can't record a finished game that analytics never hears about.
+  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
+    * terminal write) its `game_results` row: the snapshot write and both handoffs are atomic, so a crash can't record a
+    * finished game that analytics or the ladder/rating projection never hears about.
     */
   def save(id: GameId, snapshot: GameSnapshot): IO[Unit] =
     val status = if snapshot.ended then "ended" else "active"
@@ -43,7 +50,16 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
         sql"""INSERT INTO play.outbox (game_id, payload)
               VALUES (${id.value}::uuid, $payload)
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
-    (upsert *> enqueue).transact(xa).timeout(SaveTimeout)
+    val recordResult = PgGameStore.finishedGameOf(snapshot) match
+      case None     => ().pure[ConnectionIO]
+      case Some(fg) =>
+        sql"""INSERT INTO play.game_results
+                (game_id, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id)
+              VALUES (${id.value}::uuid, ${fg.whiteExternalId}, ${fg.blackExternalId}, ${fg.result},
+                      ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.pairingId}::uuid)
+              ON CONFLICT (game_id) DO NOTHING""".update.run.void
+    (upsert *> enqueue *> recordResult).transact(xa).timeout(SaveTimeout)
 
   // ── OutboxStore ─────────────────────────────────────────────────────────────
 
@@ -146,7 +162,98 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
         }
       }
 
+  // ── GameResultsStore ──────────────────────────────────────────────────────
+
+  def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
+    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id::text, finished_at
+          FROM play.game_results
+          WHERE white_external_id = $externalId OR black_external_id = $externalId
+          ORDER BY finished_at DESC
+          LIMIT $limit"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
+  def finishedRatedSince(since: Instant): IO[List[GameResultRow]] =
+    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id::text, finished_at
+          FROM play.game_results
+          WHERE rated = true AND finished_at > $since
+          ORDER BY finished_at ASC"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
+  def pairFor(pairingId: String): IO[List[GameResultRow]] =
+    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id::text, finished_at
+          FROM play.game_results
+          WHERE pairing_id = ${pairingId}::uuid"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
 object PgGameStore:
+
+  /** The `game_results` fields derivable from a snapshot alone — everything except `finished_at`, which the INSERT
+    * leaves to the column's own `DEFAULT now()` rather than threading a captured instant through.
+    */
+  final private case class FinishedGame(
+      whiteExternalId: String,
+      blackExternalId: String,
+      result: Option[Int],
+      termination: String,
+      rated: Boolean,
+      timeControl: String,
+      serverSeed: String,
+      pairingId: Option[String]
+  )
+
+  /** `None` while the game is still active. Unlike `PlaysiteIngest.payload`, this does NOT exclude aborted games:
+    * `game_results` is an operational projection the scheduler/rating batch query, not the analytics corpus — an
+    * aborted game is still a real row (`termination = "aborted"`), just one downstream consumers can filter out.
+    */
+  private def finishedGameOf(snapshot: GameSnapshot): Option[FinishedGame] =
+    snapshot.status match
+      case GameStatus.Active                               => None
+      case GameStatus.Ended(GameOver(result, termination)) =>
+        (snapshot.players.get(Seat.White), snapshot.players.get(Seat.Black)).mapN { (white, black) =>
+          FinishedGame(
+            whiteExternalId = white.externalId,
+            blackExternalId = black.externalId,
+            result = Some(PlaysiteIngest.resultOf(result)),
+            termination = PlaysiteIngest.terminationOf(termination),
+            rated = snapshot.rated.getOrElse(false),
+            timeControl = snapshot.timeControl.toString,
+            serverSeed = snapshot.serverSeed,
+            pairingId = snapshot.pairingId
+          )
+        }
+
+  private type ResultTuple =
+    (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Instant)
+
+  private def toRow(t: ResultTuple): GameResultRow =
+    val (gameId, white, black, result, termination, rated, timeControl, serverSeed, pairingId, finishedAt) = t
+    GameResultRow(
+      GameId(gameId),
+      white,
+      black,
+      result,
+      termination,
+      rated,
+      timeControl,
+      serverSeed,
+      pairingId,
+      finishedAt
+    )
 
   /** Bound on a per-event snapshot write: long enough for a slow LAN round trip, short enough that a stalled database
     * degrades the game to in-memory play instead of freezing its writer fiber.

@@ -191,3 +191,42 @@ trait OutboxStore:
 
   /** Park a row that will never succeed (a 4xx such as the replay gate's 422) for manual inspection. */
   def markParked(gameId: GameId, error: String): IO[Unit]
+
+/** A finished game, as recorded in the queryable `game_results` projection (#98). */
+final case class GameResultRow(
+    gameId: GameId,
+    whiteExternalId: String,
+    blackExternalId: String,
+    // White-POV: 1 white won, -1 black won, 0 draw — same convention as the analytics ingest wire
+    // (`PlaysiteIngest.resultOf`). Option, not a bare Int: `GameResult` has no "unknown" case today, but the schema
+    // allows one for forward-compat.
+    result: Option[Int],
+    termination: String,
+    rated: Boolean,
+    timeControl: String,
+    serverSeed: String,
+    pairingId: Option[String],
+    finishedAt: java.time.Instant
+)
+
+/** Persistence seam for the queryable `game_results` projection (#98): the games table's own snapshot is opaque JSONB
+  * (only `status` is indexed), so the ladder scheduler and rating batch need this to enumerate finished games by
+  * participant / result / rated / pairing without decoding JSON. One row per finished game, written once (in the same
+  * transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — Postgres only,
+  * since `GameStore.noop`'s in-memory mode has nothing to project.
+  */
+trait GameResultsStore:
+  /** Most recent results `externalId` played (either seat), newest first. */
+  def recentResultsFor(externalId: String, limit: Int = GameResultsStore.DefaultRecentLimit): IO[List[GameResultRow]]
+
+  /** Every rated game finished strictly after `since` — an offline batch's cursor for incremental rating updates. */
+  def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]
+
+  /** The (up to two) games sharing this CRN pairing id (#101), for pentanomial scoring. */
+  def pairFor(pairingId: String): IO[List[GameResultRow]]
+
+object GameResultsStore:
+  /** `recentResultsFor`'s default page size — bounds a prolific bot's history to a reasonable page rather than its
+    * entire lifetime.
+    */
+  val DefaultRecentLimit: Int = 50

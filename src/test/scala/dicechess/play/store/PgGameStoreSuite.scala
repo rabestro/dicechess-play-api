@@ -11,6 +11,7 @@ import munit.CatsEffectSuite
 import org.testcontainers.utility.DockerImageName
 
 import java.security.MessageDigest
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Persistence against a real PostgreSQL (testcontainers): the store round-trip, and the property the whole feature
@@ -41,6 +42,21 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       lastRoll = List(2, 3, 6),
       turns = Vector(TurnRecord(1L, "w", List(1, 1, 4), List("e2e4"), "fen-after"))
     )
+
+  /** An ended snapshot with a distinct pair of players — `game_results` (#98) tests need their own participant
+    * namespace, since this suite shares one database across every test in the file (`TestContainerForAll`, no per-test
+    * reset) and `finishedRatedSince` in particular scans every row, not just a chosen participant's.
+    */
+  private def endedResultFixture(
+      white: Principal,
+      black: Principal,
+      rated: Boolean = false,
+      pairingId: Option[String] = None,
+      result: GameResult = GameResult.Win(Side.White),
+      termination: Termination = Termination.Resign
+  ): GameSnapshot =
+    snapshotFixture(GameStatus.Ended(GameOver(result, termination)))
+      .copy(players = Map(Seat.White -> white, Seat.Black -> black), rated = Some(rated), pairingId = pairingId)
 
   test("a snapshot round-trips through jsonb, and upserts replace by game id"):
     withContainers { pg =>
@@ -120,6 +136,136 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             !onLadder.contains(Principal.Bot("ladder-suite", "off-bot")),
             s"expected off-bot absent from $onLadder"
           )
+      }
+    }
+
+  test("finishing a game inserts exactly one game_results row with the expected fields (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white     = Principal.Guest("b2-white-1")
+        val black     = Principal.Bot("b2-team", "b2-bot-1")
+        val pairingId = "11111111-1111-1111-1111-111111111111"
+        for
+          id <- GameId.random
+          _  <- db.save(
+            id,
+            endedResultFixture(white, black, rated = true, pairingId = Some(pairingId))
+          )
+          rows <- db.recentResultsFor(white.externalId)
+        yield
+          val row = rows.find(_.gameId.value == id.value).getOrElse(fail(s"row for $id not found in $rows"))
+          assertEquals(row.whiteExternalId, white.externalId)
+          assertEquals(row.blackExternalId, black.externalId)
+          assertEquals(row.result, Some(1), "white won: white-POV result must be 1")
+          assertEquals(row.termination, "resign")
+          assert(row.rated)
+          assertEquals(row.timeControl, TimeControl.Fischer(300, 3).toString)
+          assertEquals(row.serverSeed, "ab12cd34")
+          assertEquals(row.pairingId, Some(pairingId))
+      }
+    }
+
+  test("an active (not yet ended) game does not get a game_results row (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white = Principal.Guest("b2-white-active")
+        val black = Principal.Guest("b2-black-active")
+        for
+          id <- GameId.random
+          _  <- db.save(
+            id,
+            snapshotFixture(GameStatus.Active).copy(players = Map(Seat.White -> white, Seat.Black -> black))
+          )
+          rows <- db.recentResultsFor(white.externalId)
+        yield assert(rows.forall(_.gameId.value != id.value), s"an active game must not appear in game_results: $rows")
+      }
+    }
+
+  test("recentResultsFor finds a game whichever seat the participant sat, newest first (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b2-recent-participant")
+        val opponent1   = Principal.Guest("b2-recent-opp1")
+        val opponent2   = Principal.Bot("b2-team", "b2-recent-opp2")
+        for
+          idAsWhite <- GameId.random
+          _         <- db.save(idAsWhite, endedResultFixture(participant, opponent1)) // participant seated White
+          // A short, deterministic gap: finished_at defaults to the DB's own now(), and the "newest first" ordering
+          // this test checks needs the two inserts to land at genuinely distinguishable timestamps.
+          _         <- IO.sleep(20.millis)
+          idAsBlack <- GameId.random
+          _         <- db.save(idAsBlack, endedResultFixture(opponent2, participant)) // participant seated Black
+          rows      <- db.recentResultsFor(participant.externalId)
+        yield assertEquals(
+          rows.map(_.gameId.value),
+          List(idAsBlack.value, idAsWhite.value),
+          s"expected newest first: $rows"
+        )
+      }
+    }
+
+  test("finishedRatedSince returns only rated games finished strictly after the cursor (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          idBefore <- GameId.random
+          _        <- db.save(
+            idBefore,
+            endedResultFixture(Principal.Guest("b2-since-w1"), Principal.Guest("b2-since-b1"), rated = true)
+          )
+          _            <- IO.sleep(20.millis)
+          cursor       <- IO(Instant.now())
+          _            <- IO.sleep(20.millis)
+          idAfterRated <- GameId.random
+          _            <- db.save(
+            idAfterRated,
+            endedResultFixture(Principal.Guest("b2-since-w2"), Principal.Guest("b2-since-b2"), rated = true)
+          )
+          idAfterCasual <- GameId.random
+          _             <- db.save(
+            idAfterCasual,
+            endedResultFixture(Principal.Guest("b2-since-w3"), Principal.Guest("b2-since-b3"), rated = false)
+          )
+          since <- db.finishedRatedSince(cursor)
+        yield
+          val ids = since.map(_.gameId.value).toSet
+          assert(!ids.contains(idBefore.value), "a game finished before the cursor must be excluded")
+          assert(ids.contains(idAfterRated.value), "a rated game finished after the cursor must be included")
+          assert(!ids.contains(idAfterCasual.value), "a casual (non-rated) game must be excluded regardless of timing")
+      }
+    }
+
+  test("pairFor returns both games sharing a pairing id, and nothing for an unknown one (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val pairingId = "22222222-2222-2222-2222-222222222222"
+        val alice     = Principal.Bot("b2-team", "b2-alice")
+        val bob       = Principal.Bot("b2-team", "b2-bob")
+        for
+          idA     <- GameId.random
+          _       <- db.save(idA, endedResultFixture(alice, bob, rated = true, pairingId = Some(pairingId)))
+          idB     <- GameId.random
+          _       <- db.save(idB, endedResultFixture(bob, alice, rated = true, pairingId = Some(pairingId)))
+          paired  <- db.pairFor(pairingId)
+          unknown <- db.pairFor("33333333-3333-3333-3333-333333333333")
+        yield
+          assertEquals(paired.map(_.gameId.value).toSet, Set(idA.value, idB.value))
+          assertEquals(unknown, Nil)
+      }
+    }
+
+  test("saving the same ended snapshot twice still inserts exactly one game_results row (#98)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white = Principal.Guest("b2-idempotent-white")
+        val black = Principal.Guest("b2-idempotent-black")
+        for
+          id <- GameId.random
+          fixture = endedResultFixture(white, black)
+          _    <- db.save(id, fixture)
+          _    <- db.save(id, fixture) // re-save: same game id, ON CONFLICT (game_id) DO NOTHING must hold
+          rows <- db.recentResultsFor(white.externalId)
+        yield assertEquals(rows.count(_.gameId.value == id.value), 1, s"expected exactly one row, got $rows")
       }
     }
 
