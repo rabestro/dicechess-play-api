@@ -170,6 +170,45 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("a mirrored pair's reveal-withholding survives a crash: resume correctly rebuilds the partner check (#116)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          // Life before the crash: a CRN mirrored pair, both games live.
+          registry1 <- GameRegistry.create(store = db)
+          paired    <- registry1.createMirroredPair(
+            Principal.Bot("acme", "alice"),
+            Principal.Bot("acme", "bob"),
+            TimeControl.Unlimited
+          )
+          pair = paired.toOption.getOrElse(fail("createMirroredPair failed"))
+
+          // The "crash": a brand-new registry over the same store — the in-memory partnerEnded closures from before
+          // the restart are gone; resume must rebuild them from the persisted partnerGameId (#115).
+          registry2 <- GameRegistry.create(store = db)
+          resumed   <- registry2.resume
+          _ = assert(resumed >= 2, s"both mirrored games must be resumed, got $resumed")
+          roomA <- registry2.get(pair.gameAWhite).map(_.getOrElse(fail("resumed game A not found")))
+          roomB <- registry2.get(pair.gameBWhite).map(_.getOrElse(fail("resumed game B not found")))
+
+          // End the resumed game A only; its rebuilt partnerEnded check must still correctly see B as active.
+          _      <- roomA.submit(Seat.White, GameCommand.Resign)
+          _      <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
+          snapA1 <- roomA.snapshot
+          _ = assertEquals(snapA1.seed, None, "a resumed paired game must still withhold its reveal while B is active")
+
+          // End B too; both now reveal, proving the rebuilt checks correctly see each other post-restart.
+          _      <- roomB.submit(Seat.White, GameCommand.Resign)
+          _      <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
+          snapB  <- roomB.snapshot
+          snapA2 <- roomA.snapshot
+        yield
+          assert(snapB.seed.nonEmpty, "game B must reveal once it (the second to end) concludes")
+          assert(snapA2.seed.nonEmpty, "game A must reveal on a later poll, now that B has also ended")
+          assertEquals(snapA2.seed, snapB.seed, "both resumed games still share the same server seed")
+      }
+    }
+
   private def sha256Hex(hexSeed: String): String =
     val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
     MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString

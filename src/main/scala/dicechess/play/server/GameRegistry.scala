@@ -8,7 +8,7 @@ import dicechess.play.dice.DiceSource
 import dicechess.play.game.GameRoom
 import dicechess.play.store.GameStore
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
 
 /** In-memory registry of live game rooms (one authoritative node, for now). Rooms snapshot themselves into the
   * `GameStore` on every event, and `resume` rebuilds them on boot — so live games survive a restart or deploy.
@@ -160,7 +160,7 @@ final class GameRegistry private (
         persist = store.save(id, _),
         partnerEnded = partnerEnded
       )
-      result <- made.traverse(room => register(id, room) *> room.start.as((id, room)))
+      result <- made.traverse(room => register(id, room, partnerEnded) *> room.start.as((id, room)))
     yield result
 
   /** A fresh 16-byte (128-bit) dice-seed contribution, hex-encoded — same shape as a real client's `SubmitSeed`, but
@@ -173,39 +173,66 @@ final class GameRegistry private (
 
   /** Rebuild rooms for every game that was live when the process stopped; returns how many were revived. A snapshot
     * that fails to restore is logged and skipped — one corrupt row must not take the server down.
+    *
+    * Two phases, deliberately NOT one traversal that restores-registers-starts each snapshot in turn (#115 review):
+    * `GameRoom.restore` starts the room's writer fiber (hence its clock) immediately, so if game B sat later in a large
+    * batch, game A's `partnerEndedCheck(idB)` could run — and wrongly conclude "no such partner, must have ended" —
+    * before B was ever registered, prematurely revealing A's secret. Restoring every snapshot first (fast, in-memory,
+    * no registry visibility yet) before registering any of them closes the realistic version of that race: the two
+    * phases combined are far quicker than any real game's move deadline. (A vanishingly narrow residual remains — a
+    * partner whose own deadline expires within the few CPU-bound milliseconds phase 1 itself takes — which also exists,
+    * identically, in `createMirroredPair`'s own back-to-back room creation; closing it fully would need decoupling room
+    * construction from fiber-starting throughout `GameRoom`, a bigger change than this fix warrants.)
     */
   def resume: IO[Int] =
-    store.loadActive
-      .flatMap(_.traverse { case (id, snapshot) =>
-        DiceSource
-          .fromHexSeed(snapshot.serverSeed)
-          .flatTraverse(dice =>
-            GameRoom.restore(
-              snapshot,
-              dice,
-              disconnectGrace = disconnectGrace,
-              persist = store.save(id, _),
-              // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted
-              // partner id. No partner (or an unpaired game): always eligible, exactly as before this feature.
-              partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
+    store.loadActive.flatMap { snapshots =>
+      snapshots
+        .traverse { case (id, snapshot) =>
+          DiceSource
+            .fromHexSeed(snapshot.serverSeed)
+            .flatTraverse(dice =>
+              GameRoom.restore(
+                snapshot,
+                dice,
+                disconnectGrace = disconnectGrace,
+                persist = store.save(id, _),
+                // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted
+                // partner id. No partner (or an unpaired game): always eligible, exactly as before this feature.
+                partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
+              )
             )
-          )
-          .flatMap {
-            case Left(error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error").as(0)
-            case Right(room) => register(id, room) *> room.start.as(1)
-          }
-      })
-      .map(_.sum)
+            .map(id -> _)
+        }
+        .flatMap { restored =>
+          val failures  = restored.collect { case (id, Left(error)) => id -> error }
+          val successes = restored.collect { case (id, Right(room)) => id -> room }
+          failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error")) *>
+            successes.traverse_(register(_, _)) *>
+            successes.traverse_((_, room) => room.start).as(successes.size)
+        }
+    }
 
-  private def register(id: GameId, room: GameRoom): IO[Unit] =
+  private def register(id: GameId, room: GameRoom, partnerEnded: IO[Boolean] = IO.pure(true)): IO[Unit] =
     room.seating.flatMap: seats =>
       val players = seats.values.toList
       rooms.update(_.updated(id, room)) *>
         byPlayer.update(index =>
           players.foldLeft(index)((acc, p) => acc.updated(p, acc.getOrElse(p, Set.empty) + id))
         ) *>
-        // Evict the room (and its index entries) once its game ends, so neither map grows without bound.
-        (room.result *> deregister(id, players)).start.void
+        // Evict the room (and its index entries) once its game ends — but not before its CRN partner also has
+        // (#115/#116 review): GET /games/{id} only ever serves an ended game from THIS live map (there is no
+        // fallback to the database), so evicting immediately would make a withheld reveal unrecoverable forever
+        // instead of merely delayed. An ordinary (unpaired) game's `partnerEnded` is `IO.pure(true)`, so the first
+        // check succeeds and it evicts immediately, exactly as before. `GET /bot/games`/`GET /games` already filter
+        // out ended-but-still-registered rooms (`status == Active`), so a lingering paired room is invisible there
+        // regardless of how long it lingers.
+        (room.result *> awaitPartnerThenDeregister(id, players, partnerEnded)).start.void
+
+  private def awaitPartnerThenDeregister(id: GameId, players: List[Principal], partnerEnded: IO[Boolean]): IO[Unit] =
+    partnerEnded.flatMap:
+      case true  => deregister(id, players)
+      case false =>
+        IO.sleep(GameRegistry.DeregisterPollInterval) *> awaitPartnerThenDeregister(id, players, partnerEnded)
 
   private def deregister(id: GameId, players: List[Principal]): IO[Unit] =
     rooms.update(_.removed(id)) *>
@@ -216,6 +243,12 @@ final class GameRegistry private (
       )
 
 object GameRegistry:
+
+  /** How often a room whose partner hasn't ended yet re-checks before deregistering (#115). Not latency-sensitive — the
+    * reveal is already visible via `GET /games/{id}` the moment the partner concludes, regardless of exactly when this
+    * room's own registry entry is eventually cleaned up — so a relaxed interval is fine.
+    */
+  private val DeregisterPollInterval: FiniteDuration = 2.seconds
 
   /** The result of `createMirroredPair`: two games tied together by a shared `pairingId` for downstream CRN scoring
     * (pentanomial: the pair is scored as one unit, not two independent games). `gameAWhite` seats `botA` White / `botB`

@@ -175,3 +175,34 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
             assertEquals(snapA2.clientSeeds, snapB.clientSeeds, "and the same fixed client-seed pair")
       }
     }
+
+  test(
+    "a paired game stays registered (GET /games/{id}-reachable) while its partner is still active, and is " +
+      "eventually evicted once both have ended (#116 review)"
+  ):
+    GameRegistry.create().flatMap { registry =>
+      registry.createMirroredPair(alice, bob, TimeControl.Unlimited).flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"createMirroredPair failed: $error"))
+        case Right(pair) =>
+          for
+            roomA <- registry.get(pair.gameAWhite).map(_.getOrElse(fail("game A not registered")))
+            _     <- roomA.submit(Seat.White, GameCommand.Resign)
+            _     <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
+            // The whole point of #116: an ended-but-partner-still-active room must NOT vanish from the registry —
+            // GET /games/{id} has no fallback to the database, so eviction here would make the reveal unrecoverable
+            // forever instead of merely delayed.
+            stillThere <- registry.get(pair.gameAWhite)
+            _ = assert(stillThere.isDefined, "an ended game must stay registered while its CRN partner is still active")
+            roomB <- registry.get(pair.gameBWhite).map(_.getOrElse(fail("game B not registered")))
+            _     <- roomB.submit(Seat.White, GameCommand.Resign)
+            _     <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
+            // Now that both have ended, game A's own deferred eviction (polling every 2s) should eventually fire —
+            // it must not linger forever either, or the registry leaks a map entry per finished ladder pair.
+            evicted <- registry
+              .get(pair.gameAWhite)
+              .map(_.isEmpty)
+              .iterateUntil(identity)
+              .timeoutTo(10.seconds, IO.raiseError(RuntimeException("game A was never evicted after both games ended")))
+          yield assert(evicted, "game A must eventually be evicted once its partner has also ended")
+      }
+    }
