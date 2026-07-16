@@ -5,15 +5,17 @@ import cats.effect.std.Console
 import cats.syntax.all.*
 import doobie.*
 import doobie.implicits.*
+import doobie.implicits.javatimedrivernative.*
 import doobie.postgres.circe.jsonb.implicits.*
 import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
-import dicechess.play.core.{GameId, Principal}
+import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat, Termination}
 import dicechess.play.ingest.PlaysiteIngest
 import io.circe.Json
 import io.circe.syntax.*
 import org.flywaydb.core.Flyway
 
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Postgres-backed store. Deployed against a **dedicated `play` database** (analytics is an aggregator with its own
@@ -24,11 +26,16 @@ import scala.concurrent.duration.*
   * Every round trip is bounded by a timeout: the caller treats store trouble as a degradation, and a *hung* query —
   * unlike a failed one — would otherwise stall the game's writer fiber in a way `handleErrorWith` can't catch.
   */
-final class PgGameStore private (xa: Transactor[IO]) extends GameStore with OutboxStore with BotStore:
+final class PgGameStore private (xa: Transactor[IO])
+    extends GameStore
+    with OutboxStore
+    with BotStore
+    with GameResultsStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
-  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload: the terminal
-    * write and its handoff are atomic, so a crash can't record a finished game that analytics never hears about.
+  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
+    * terminal write) its `game_results` row: the snapshot write and both handoffs are atomic, so a crash can't record a
+    * finished game that analytics or the ladder/rating projection never hears about.
     */
   def save(id: GameId, snapshot: GameSnapshot): IO[Unit] =
     val status = if snapshot.ended then "ended" else "active"
@@ -43,7 +50,26 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
         sql"""INSERT INTO play.outbox (game_id, payload)
               VALUES (${id.value}::uuid, $payload)
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
-    (upsert *> enqueue).transact(xa).timeout(SaveTimeout)
+    val finishedGame = PgGameStore.finishedGameOf(snapshot)
+    // finishedGameOf returning None while the snapshot IS ended means players was missing a seat — a malformed
+    // snapshot, not the normal "still active" case. The games-table write still goes through (it's the more
+    // foundational record), but a gap here must be visible, not silent, same as loadActive's corrupt-row logging.
+    val warnIfMalformed =
+      Console[IO]
+        .errorln(
+          s"[play][store] ended game ${id.value} produced no game_results row: players=${snapshot.players.keySet}"
+        )
+        .whenA(snapshot.ended && finishedGame.isEmpty)
+    val recordResult = finishedGame match
+      case None     => ().pure[ConnectionIO]
+      case Some(fg) =>
+        sql"""INSERT INTO play.game_results
+                (game_id, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id)
+              VALUES (${id.value}::uuid, ${fg.whiteExternalId}, ${fg.blackExternalId}, ${fg.result},
+                      ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.pairingId}::uuid)
+              ON CONFLICT (game_id) DO NOTHING""".update.run.void
+    warnIfMalformed *> (upsert *> enqueue *> recordResult).transact(xa).timeout(SaveTimeout)
 
   // ── OutboxStore ─────────────────────────────────────────────────────────────
 
@@ -146,7 +172,127 @@ final class PgGameStore private (xa: Transactor[IO]) extends GameStore with Outb
         }
       }
 
+  // ── GameResultsStore ──────────────────────────────────────────────────────
+
+  /** Two LIMIT-bounded, already-ordered subqueries (one per side) unioned and re-limited, rather than one `OR` across
+    * both columns: an `OR` predicate on two single-column indexes forces Postgres to bitmap-scan and sort ALL of the
+    * participant's matching rows before applying LIMIT — O(history size) — whereas each `(participant, finished_at
+    * DESC)` composite index below serves its half of this query as a plain bounded index scan. Plain `UNION`, not
+    * `UNION ALL`: `GameRegistry.create` doesn't itself forbid seating the same principal on both sides (only its
+    * `Lobby`/`Challenges` callers do), so a self-played game would otherwise match both branches and come back twice.
+    * The dedupe cost is over at most `2 * limit` rows, not the participant's whole history.
+    */
+  def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
+    sql"""(SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                  server_seed, pairing_id::text, finished_at
+           FROM play.game_results
+           WHERE white_external_id = $externalId
+           ORDER BY finished_at DESC
+           LIMIT $limit)
+          UNION
+          (SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                  server_seed, pairing_id::text, finished_at
+           FROM play.game_results
+           WHERE black_external_id = $externalId
+           ORDER BY finished_at DESC
+           LIMIT $limit)
+          ORDER BY finished_at DESC
+          LIMIT $limit"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
+  def finishedRatedSince(since: Instant): IO[List[GameResultRow]] =
+    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                 server_seed, pairing_id::text, finished_at
+          FROM play.game_results
+          WHERE rated = true AND finished_at > $since
+          ORDER BY finished_at ASC"""
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toRow))
+
+  /** `None` for a malformed `pairingId` short-circuits to an empty result without touching the database: the `::uuid`
+    * cast below would otherwise raise a Postgres error (22P02) instead of "found nothing", and a caller with a
+    * genuinely-minted pairing id (this method's only realistic caller today) never hits this path anyway.
+    */
+  def pairFor(pairingId: String): IO[List[GameResultRow]] =
+    scala.util.Try(java.util.UUID.fromString(pairingId)).toOption match
+      case None    => IO.pure(Nil)
+      case Some(_) =>
+        sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                     server_seed, pairing_id::text, finished_at
+              FROM play.game_results
+              WHERE pairing_id = ${pairingId}::uuid"""
+          .query[PgGameStore.ResultTuple]
+          .to[List]
+          .transact(xa)
+          .timeout(SaveTimeout)
+          .map(_.map(PgGameStore.toRow))
+
 object PgGameStore:
+
+  /** The `game_results` fields derivable from a snapshot alone — everything except `finished_at`, which the INSERT
+    * leaves to the column's own `DEFAULT now()` rather than threading a captured instant through.
+    */
+  final private case class FinishedGame(
+      whiteExternalId: String,
+      blackExternalId: String,
+      result: Option[Int],
+      termination: String,
+      rated: Boolean,
+      timeControl: String,
+      serverSeed: String,
+      pairingId: Option[String]
+  )
+
+  /** `None` while the game is still active (or, for an ended snapshot, if `players` is unexpectedly missing a seat —
+    * `save` logs that case separately, since it's a malformed row, not the normal "still active" path). Unlike
+    * `PlaysiteIngest.payload`, this does NOT exclude aborted games from the table entirely: `game_results` is an
+    * operational projection the scheduler/rating batch query, not the analytics corpus, so an aborted game is still a
+    * real row (`termination = "aborted"`). It IS excluded from rating eligibility specifically — `result = None` and
+    * `rated = false` regardless of what was decided at creation — since an aborted game has no sporting outcome and
+    * must never hand `finishedRatedSince`'s caller a fabricated win/loss/draw.
+    */
+  private def finishedGameOf(snapshot: GameSnapshot): Option[FinishedGame] =
+    snapshot.status match
+      case GameStatus.Active                               => None
+      case GameStatus.Ended(GameOver(result, termination)) =>
+        val aborted = termination == Termination.Aborted
+        (snapshot.players.get(Seat.White), snapshot.players.get(Seat.Black)).mapN { (white, black) =>
+          FinishedGame(
+            whiteExternalId = white.externalId,
+            blackExternalId = black.externalId,
+            result = Option.unless(aborted)(PlaysiteIngest.resultOf(result)),
+            termination = PlaysiteIngest.terminationOf(termination),
+            rated = !aborted && snapshot.rated.getOrElse(false),
+            timeControl = snapshot.timeControl.toString,
+            serverSeed = snapshot.serverSeed,
+            pairingId = snapshot.pairingId
+          )
+        }
+
+  private type ResultTuple =
+    (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Instant)
+
+  private def toRow(t: ResultTuple): GameResultRow =
+    val (gameId, white, black, result, termination, rated, timeControl, serverSeed, pairingId, finishedAt) = t
+    GameResultRow(
+      GameId(gameId),
+      white,
+      black,
+      result,
+      termination,
+      rated,
+      timeControl,
+      serverSeed,
+      pairingId,
+      finishedAt
+    )
 
   /** Bound on a per-event snapshot write: long enough for a slow LAN round trip, short enough that a stalled database
     * degrades the game to in-memory play instead of freezing its writer fiber.

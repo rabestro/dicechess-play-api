@@ -191,3 +191,53 @@ trait OutboxStore:
 
   /** Park a row that will never succeed (a 4xx such as the replay gate's 422) for manual inspection. */
   def markParked(gameId: GameId, error: String): IO[Unit]
+
+/** A finished game, as recorded in the queryable `game_results` projection (#98). */
+final case class GameResultRow(
+    gameId: GameId,
+    whiteExternalId: String,
+    blackExternalId: String,
+    // White-POV: 1 white won, -1 black won, 0 draw — same convention as the analytics ingest wire
+    // (`PlaysiteIngest.resultOf`). Option, not a bare Int: `GameResult` has no "unknown" case today, but the schema
+    // allows one for forward-compat.
+    result: Option[Int],
+    termination: String,
+    rated: Boolean,
+    timeControl: String,
+    serverSeed: String,
+    pairingId: Option[String],
+    finishedAt: java.time.Instant
+)
+
+/** Persistence seam for the queryable `game_results` projection (#98): the games table's own snapshot is opaque JSONB
+  * (only `status` is indexed), so the ladder scheduler and rating batch need this to enumerate finished games by
+  * participant / result / rated / pairing without decoding JSON. One row per finished game, written once (in the same
+  * transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — Postgres only,
+  * since `GameStore.noop`'s in-memory mode has nothing to project.
+  */
+trait GameResultsStore:
+  /** Most recent results `externalId` played (either seat), newest first. */
+  def recentResultsFor(externalId: String, limit: Int = GameResultsStore.DefaultRecentLimit): IO[List[GameResultRow]]
+
+  /** Every rated game finished strictly after `since` — an offline batch's cursor for incremental rating updates.
+    *
+    * '''Not a gap-free cursor:''' `finished_at` defaults to Postgres's `now()`, which freezes at transaction START, not
+    * commit. Two concurrent `save` calls can therefore commit out of start order — if a transaction starting at T1
+    * commits AFTER one starting later at T2 > T1, a batch that has already advanced its cursor to T2 will never see the
+    * T1 row on a later poll (`finished_at > T2` excludes it forever, even though it only just became visible). The
+    * realistic window is bounded by how long a `save` transaction can stay open (seconds, not minutes), so callers
+    * should poll with `since` set a little further back than their last cursor (a few seconds' overlap) and deduplicate
+    * by `GameResultRow.gameId`, which is already a natural idempotency key. A stronger guarantee (a monotonic sequence
+    * cursor, or a claim-based queue like `play.outbox`) is a larger, separate design question than this projection's
+    * own scope.
+    */
+  def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]
+
+  /** The (up to two) games sharing this CRN pairing id (#101), for pentanomial scoring. */
+  def pairFor(pairingId: String): IO[List[GameResultRow]]
+
+object GameResultsStore:
+  /** `recentResultsFor`'s default page size — bounds a prolific bot's history to a reasonable page rather than its
+    * entire lifetime.
+    */
+  val DefaultRecentLimit: Int = 50

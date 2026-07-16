@@ -59,19 +59,23 @@ object PlaysiteIngest:
           )
         )
 
-  /** White-POV result: 1 white won, -1 black won, 0 draw — the analytics convention. */
-  private def resultOf(result: GameResult): Int = result match
+  /** White-POV result: 1 white won, -1 black won, 0 draw — the analytics convention. `private[play]`: reused verbatim
+    * by `PgGameStore`'s `game_results` projection (#98), so the two never drift apart.
+    */
+  private[play] def resultOf(result: GameResult): Int = result match
     case GameResult.Win(Side.White) => 1
     case GameResult.Win(Side.Black) => -1
     case GameResult.Draw            => 0
 
-  /** `game_termination_enum` members (Aborted is filtered out before this is reached). */
-  private def terminationOf(termination: Termination): String = termination match
+  /** `game_termination_enum` members, for `payload()`'s own use (Aborted is filtered out before reaching this) — and
+    * reused as-is by `game_results` (#98), which unlike the analytics corpus DOES record aborted games.
+    */
+  private[play] def terminationOf(termination: Termination): String = termination match
     case Termination.KingCaptured => "king_captured"
     case Termination.Timeout      => "timeout"
     case Termination.Resign       => "resign"
     case Termination.Draw         => "draw_agreement"
-    case Termination.Aborted      => "unknown" // unreachable: payload() returns None for aborted games
+    case Termination.Aborted      => "aborted"
 
   private def timeInitialSec(timeControl: TimeControl): Option[Int] = timeControl match
     case TimeControl.SuddenDeath(initial)               => Some(initial)
