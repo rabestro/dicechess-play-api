@@ -52,7 +52,11 @@ final case class GameSnapshot(
     // Ties two CRN mirror games together (#101): same two participants, colours swapped, identical dice sequence.
     // `None` for every non-ladder game — most games have no pair, so unlike `rated` there is no "resolve to a
     // definite value" story; this stays `Option` all the way through (Session included), not just at rest.
-    pairingId: Option[String] = None
+    pairingId: Option[String] = None,
+    // The specific partner game's id (#115) — lets `GameRegistry.resume` rebuild the "has my partner ended yet"
+    // reveal-eligibility check after a restart, when it can no longer rely on the in-memory closure built at
+    // creation. `pairingId` alone isn't enough for that: it's a shared correlation key, not a pointer.
+    partnerGameId: Option[String] = None
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true

@@ -47,8 +47,9 @@ final class GameRegistry private (
       timeControl: TimeControl = TimeControl.Unlimited,
       requestedRated: Boolean = false
   ): IO[Either[String, (GameId, GameRoom)]] =
-    DiceSource.newCommitReveal().flatMap { dice =>
+    (GameId.random, DiceSource.newCommitReveal()).flatMapN { (id, dice) =>
       createRoom(
+        id,
         Map(Seat.White -> white, Seat.Black -> black),
         dice,
         timeControl,
@@ -68,14 +69,12 @@ final class GameRegistry private (
     * non-anonymous bots, so today this is always true — but the policy stays the single source of truth rather than
     * being assumed here too).
     *
-    * '''Known gap — do not wire this into live play yet (tracked in #115):''' both games share one secret, and
-    * `GameEnded` reveals it (`seed`/`clientSeeds`, unconditionally, in the clear) the instant EITHER game ends — public
-    * reveal, since `GET /games/{id}` exposes it too. Once the faster game ends, that reveal hands anyone (not just the
-    * two bots) everything needed to compute every remaining roll of the slower game:
-    * `roll(ply, clientSeedWhite, clientSeedBlack)` is a pure function of exactly the now-public values. The two games
-    * must not both reveal independently at their own natural end — the reveal needs to wait for BOTH games in the pair
-    * to finish. No caller exists yet (that's #102's job), so the blast radius today is zero; do not call this from a
-    * real scheduler before that's fixed.
+    * '''Reveal safety (#115):''' sharing one secret between two games would otherwise leak the slower game's remaining
+    * rolls the instant the faster one reveals at its own natural end (`GameEnded` is public, and so is
+    * `GET /games/{id}`). Each room is given a `partnerEnded` check (`partnerEndedCheck`, below) that it consults before
+    * revealing; a room only reveals once IT has ended AND its partner has too. Whichever game ends first withholds its
+    * reveal (`GameEnded` carries `None`/`None`); it becomes visible again on a later `GET /games/{id}` poll of that
+    * same game, once the partner has also concluded — see `Session.publicAt`.
     */
   def createMirroredPair(
       botA: Principal.Bot,
@@ -88,22 +87,30 @@ final class GameRegistry private (
       seedWhite <- randomSeed
       seedBlack <- randomSeed
       pairingId <- IO(java.util.UUID.randomUUID().toString)
+      idA       <- GameId.random
+      idB       <- GameId.random
       fixedSeeds = Map(Seat.White -> seedWhite, Seat.Black -> seedBlack)
       gameAWhite <- createRoom(
+        idA,
         Map(Seat.White -> botA, Seat.Black -> botB),
         dice,
         timeControl,
         rated,
         Some(pairingId),
-        fixedSeeds
+        Some(idB.value),
+        fixedSeeds,
+        partnerEndedCheck(idB)
       )
       gameBWhite <- createRoom(
+        idB,
         Map(Seat.White -> botB, Seat.Black -> botA),
         dice,
         timeControl,
         rated,
         Some(pairingId),
-        fixedSeeds
+        Some(idA.value),
+        fixedSeeds,
+        partnerEndedCheck(idA)
       )
     // No orphaned first game on a "partial" failure: createRoom's only error path is EngineOps.parse(initialDfen),
     // and both calls above use the same default (always-valid) InitialDfen — parsing is a pure function of that
@@ -114,19 +121,33 @@ final class GameRegistry private (
       case (Left(error), _)                   => Left(error)
       case (_, Left(error))                   => Left(error)
 
-  /** Shared room-creation seam behind both `create` and `createMirroredPair`: mint an id, build the room, register it
-    * once live. `presetClientSeeds` bypasses the normal `SubmitSeed` gate (empty for an ordinary game).
+  /** "Has `partnerId` ended?" (#115) — a room no longer tracked here has already been deregistered, which only ever
+    * happens after its `result` completes, so a missing room counts as ended too. Consulted fresh on every reveal
+    * decision (see `GameRoom.partnerEnded`), never cached, so it self-heals once the partner actually concludes.
+    */
+  private def partnerEndedCheck(partnerId: GameId): IO[Boolean] =
+    rooms.get.map(_.get(partnerId)).flatMap {
+      case None       => IO.pure(true)
+      case Some(room) => room.hasEnded
+    }
+
+  /** Shared room-creation seam behind both `create` and `createMirroredPair`: build the room (under the caller's
+    * pre-minted id — `createMirroredPair` needs both ids before either room exists, to wire each one's `partnerEnded`
+    * check to the other), register it, start it. `presetClientSeeds` bypasses the normal `SubmitSeed` gate (empty for
+    * an ordinary game).
     */
   private def createRoom(
+      id: GameId,
       players: Map[Seat, Principal],
       dice: DiceSource,
       timeControl: TimeControl,
       rated: Boolean,
       pairingId: Option[String] = None,
-      presetClientSeeds: Map[Seat, String] = Map.empty
+      partnerGameId: Option[String] = None,
+      presetClientSeeds: Map[Seat, String] = Map.empty,
+      partnerEnded: IO[Boolean] = IO.pure(true)
   ): IO[Either[String, (GameId, GameRoom)]] =
     for
-      id   <- GameId.random
       made <- GameRoom.create(
         players,
         dice,
@@ -134,8 +155,10 @@ final class GameRegistry private (
         timeControl = timeControl,
         rated = rated,
         pairingId = pairingId,
+        partnerGameId = partnerGameId,
         presetClientSeeds = presetClientSeeds,
-        persist = store.save(id, _)
+        persist = store.save(id, _),
+        partnerEnded = partnerEnded
       )
       result <- made.traverse(room => register(id, room) *> room.start.as((id, room)))
     yield result
@@ -157,7 +180,15 @@ final class GameRegistry private (
         DiceSource
           .fromHexSeed(snapshot.serverSeed)
           .flatTraverse(dice =>
-            GameRoom.restore(snapshot, dice, disconnectGrace = disconnectGrace, persist = store.save(id, _))
+            GameRoom.restore(
+              snapshot,
+              dice,
+              disconnectGrace = disconnectGrace,
+              persist = store.save(id, _),
+              // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted
+              // partner id. No partner (or an unpaired game): always eligible, exactly as before this feature.
+              partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
+            )
           )
           .flatMap {
             case Left(error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error").as(0)

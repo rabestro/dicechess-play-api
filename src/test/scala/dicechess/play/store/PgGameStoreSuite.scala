@@ -157,10 +157,14 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assertEquals(after.dfen, before.dfen, "the pending roll (DFEN dice pool) must survive the crash")
           assertEquals(commit2, commit1, "the dice commitment must survive the crash")
           assertEquals(room2.joinTokens, tokens1, "seat tokens must survive so players can reconnect")
-          assertEquals(sha256Hex(terminal.seed), commit1, "the revealed seed still opens the pre-crash commitment")
+          assertEquals(
+            sha256Hex(terminal.seed.getOrElse(fail("expected a revealed seed"))),
+            commit1,
+            "the revealed seed still opens the pre-crash commitment"
+          )
           assertEquals(
             terminal.clientSeeds,
-            ClientSeeds("white-client-seed-0001", "black-client-seed-0001"),
+            Some(ClientSeeds("white-client-seed-0001", "black-client-seed-0001")),
             "the submitted client seeds survive the crash into the reveal"
           )
       }

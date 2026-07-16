@@ -44,7 +44,7 @@ The server is authoritative over the dice, but every roll is verifiable after th
 1. **Commit.** At game creation the create response carries `commit = SHA-256(serverSeed)` — the server is now locked to a `serverSeed` it cannot change. The same `commit` also rides on every `Snapshot`, so a bot that only opens the game stream (and never saw the create response) still sees it before any roll.
 2. **Contribute entropy.** After the commit, each side submits its own high-entropy `clientSeed` (see [`POST /bot/game/{id}/seed`](#submit-a-dice-seed)). Because the commit was published *before* the server saw any client seed, neither the server nor a player can grind the dice in their favour.
 3. **Roll.** Every roll is `HMAC-SHA256(serverSeed, message)` mapped to three unbiased 1..6 values, where `message` is the canonical, length-prefixed concatenation `uint32be(len(clientSeedWhite)) ++ clientSeedWhite ++ uint32be(len(clientSeedBlack)) ++ clientSeedBlack ++ int64be(ply)` (seed lengths are UTF-8 byte counts; all integers big-endian). The seeds are fixed for the whole game.
-4. **Reveal.** `GameEnded` reveals `seed` (the server seed) and `clientSeeds`, so anyone can recompute every roll and confirm that `SHA-256(seed)` equals the `commit`.
+4. **Reveal.** `GameEnded` reveals `seed` (the server seed) and `clientSeeds`, so anyone can recompute every roll and confirm that `SHA-256(seed)` equals the `commit`. **Exception:** a server-paired ladder rematch (two games sharing one seed/client-seed pair with colours swapped, for common-random-numbers scoring) withholds both fields — `null`/`null` — on whichever of the two games ends first, so its still-running partner's future rolls aren't handed away early. Poll `GET /games/{id}` again once *both* games of the pair have ended to retrieve the reveal.
 
 **Opening-roll gate.** The server holds the first roll until *both* seats have submitted a seed, so submit yours as soon as you receive `GameStart`. If a seat does not seed within a few seconds the game force-starts anyway, and that seat's contribution falls back to its (already-public) external id — a missing seed never stalls the game, it only forfeits that seat's own entropy contribution. A seed must be 16–256 characters (e.g. the hex of ≥8 random bytes); send a strong random one promptly.
 
@@ -496,7 +496,7 @@ Long-lived stream for a specific game's state transitions.
       }
     }
     ```
-    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`). While `dicePending` is `true`, `legalMoves` carries the pending roll's [legal-move tree](#legal-moves) (or `null` if it was too large to inline — fetch [`GET /games/{id}/moves`](#get-legal-moves)). `players` is both seats' public faces — bots by team-qualified name, humans anonymous — so a board or spectator knows who is playing.
+    `commit` is the dice commitment (constant for the game); `seed` and `clientSeeds` stay `null` until the game ends, then carry the reveal (same fields as `GameEnded`) — except a server-paired ladder rematch, where they stay `null` even after `status` becomes `Ended` until its mirror partner has *also* ended (see [Provably-Fair Dice](#provably-fair-dice) point 4). While `dicePending` is `true`, `legalMoves` carries the pending roll's [legal-move tree](#legal-moves) (or `null` if it was too large to inline — fetch [`GET /games/{id}/moves`](#get-legal-moves)). `players` is both seats' public faces — bots by team-qualified name, humans anonymous — so a board or spectator knows who is playing.
   - **DiceRolled** (Server rolled dice for a player's turn):
     ```json
     {
@@ -543,6 +543,15 @@ Long-lived stream for a specific game's state transitions.
     ```
     *(Result can also be `{"Draw":{}}` and termination can be one of `"KingCaptured"`, `"Resign"`, `"Draw"`, `"Aborted"`, `"Timeout"`.)*
     `seed` is the revealed server seed (hex): `SHA-256(seed)` equals the `commit` (in the create response and on every `Snapshot`), so anyone can open the dice commitment after the game. `clientSeeds` reveals the two post-commit client seeds folded into every roll (see [Provably-Fair Dice](#provably-fair-dice)); with these you can recompute the full transcript: `roll(ply) = HMAC-SHA256(seed, uint32be(len(white)) ++ white ++ uint32be(len(black)) ++ black ++ int64be(ply))`. A seat that never submitted a seed shows its external id here (the fallback the server used).
+
+    **Both fields can instead be `null`:**
+    ```json
+    {"GameEnded": {"v": 3, "over": {"result": {"Draw": {}}, "termination": "Aborted"}, "seed": null, "clientSeeds": null}}
+    ```
+    This happens only for a server-paired ladder rematch (see [Provably-Fair Dice](#provably-fair-dice) point 4) whose
+    mirror partner hasn't concluded yet — the two games share one secret, so revealing early would hand away the
+    partner's still-unplayed rolls. Poll `GET /games/{id}` again once both games of the pair have ended; the reveal
+    becomes available there even though the original live event showed `null`.
   - **Rejected** (Moves rejected by the engine):
     ```json
     {

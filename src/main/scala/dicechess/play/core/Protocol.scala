@@ -140,5 +140,8 @@ enum GameEvent:
   // `commit` published at creation (and echoed on every snapshot). With `clientSeeds`, the full roll transcript can be
   // recomputed using the canonical length-prefixed message (see `DiceSource.rollMessage`):
   // `roll(ply) = HMAC-SHA256(seed, uint32be(len(white)) ++ white ++ uint32be(len(black)) ++ black ++ int64be(ply))`.
-  case GameEnded(v: Long, over: GameOver, seed: String, clientSeeds: ClientSeeds)
+  // `None` for both ONLY for a CRN-paired ladder game (#101) whose mirror partner hasn't concluded yet — the two
+  // games share one secret, so revealing either early would hand away the other's still-unplayed rolls (#115).
+  // Poll `GET /games/{id}` again once the partner has also ended; an ordinary (unpaired) game always reveals here.
+  case GameEnded(v: Long, over: GameOver, seed: Option[String], clientSeeds: Option[ClientSeeds])
   case Rejected(v: Long, seat: Seat, reason: String)

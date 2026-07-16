@@ -42,9 +42,9 @@ class GameRoomSuite extends munit.CatsEffectSuite:
       .map: (event, commit, snap) =>
         assert(event.seed.nonEmpty, "the game-end event must reveal the seed")
         // The whole point of commit-reveal: the revealed seed hashes to the commitment published at creation.
-        assertEquals(sha256Hex(event.seed), commit)
+        assertEquals(sha256Hex(event.seed.getOrElse(fail("expected a revealed seed"))), commit)
         // And the terminal snapshot carries the same reveal, so a client that joins after the end can still verify.
-        assertEquals(snap.seed, Some(event.seed))
+        assertEquals(snap.seed, event.seed)
 
   test("two bots play a full game through the room to a terminal state"):
     val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)
@@ -239,7 +239,7 @@ class GameRoomSuite extends munit.CatsEffectSuite:
             .parMapN((event, _) => event)
             .timeoutTo(10.seconds, IO.raiseError(RuntimeException("no game-end event")))
       }
-      .map(event => assertEquals(event.clientSeeds, ClientSeeds(seedW, seedB)))
+      .map(event => assertEquals(event.clientSeeds, Some(ClientSeeds(seedW, seedB))))
 
   /** Any root-to-leaf walk of the wire tree — a complete legal turn by construction. */
   private def leafPath(tree: MoveTree): List[String] =
