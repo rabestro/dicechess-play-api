@@ -219,7 +219,18 @@ trait GameResultsStore:
   /** Most recent results `externalId` played (either seat), newest first. */
   def recentResultsFor(externalId: String, limit: Int = GameResultsStore.DefaultRecentLimit): IO[List[GameResultRow]]
 
-  /** Every rated game finished strictly after `since` — an offline batch's cursor for incremental rating updates. */
+  /** Every rated game finished strictly after `since` — an offline batch's cursor for incremental rating updates.
+    *
+    * '''Not a gap-free cursor:''' `finished_at` defaults to Postgres's `now()`, which freezes at transaction START, not
+    * commit. Two concurrent `save` calls can therefore commit out of start order — if a transaction starting at T1
+    * commits AFTER one starting later at T2 > T1, a batch that has already advanced its cursor to T2 will never see the
+    * T1 row on a later poll (`finished_at > T2` excludes it forever, even though it only just became visible). The
+    * realistic window is bounded by how long a `save` transaction can stay open (seconds, not minutes), so callers
+    * should poll with `since` set a little further back than their last cursor (a few seconds' overlap) and deduplicate
+    * by `GameResultRow.gameId`, which is already a natural idempotency key. A stronger guarantee (a monotonic sequence
+    * cursor, or a claim-based queue like `play.outbox`) is a larger, separate design question than this projection's
+    * own scope.
+    */
   def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]
 
   /** The (up to two) games sharing this CRN pairing id (#101), for pentanomial scoring. */

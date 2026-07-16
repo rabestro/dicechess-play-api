@@ -9,7 +9,7 @@ import doobie.implicits.javatimedrivernative.*
 import doobie.postgres.circe.jsonb.implicits.*
 import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
-import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat}
+import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat, Termination}
 import dicechess.play.ingest.PlaysiteIngest
 import io.circe.Json
 import io.circe.syntax.*
@@ -50,7 +50,17 @@ final class PgGameStore private (xa: Transactor[IO])
         sql"""INSERT INTO play.outbox (game_id, payload)
               VALUES (${id.value}::uuid, $payload)
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
-    val recordResult = PgGameStore.finishedGameOf(snapshot) match
+    val finishedGame = PgGameStore.finishedGameOf(snapshot)
+    // finishedGameOf returning None while the snapshot IS ended means players was missing a seat — a malformed
+    // snapshot, not the normal "still active" case. The games-table write still goes through (it's the more
+    // foundational record), but a gap here must be visible, not silent, same as loadActive's corrupt-row logging.
+    val warnIfMalformed =
+      Console[IO]
+        .errorln(
+          s"[play][store] ended game ${id.value} produced no game_results row: players=${snapshot.players.keySet}"
+        )
+        .whenA(snapshot.ended && finishedGame.isEmpty)
+    val recordResult = finishedGame match
       case None     => ().pure[ConnectionIO]
       case Some(fg) =>
         sql"""INSERT INTO play.game_results
@@ -59,7 +69,7 @@ final class PgGameStore private (xa: Transactor[IO])
               VALUES (${id.value}::uuid, ${fg.whiteExternalId}, ${fg.blackExternalId}, ${fg.result},
                       ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.pairingId}::uuid)
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
-    (upsert *> enqueue *> recordResult).transact(xa).timeout(SaveTimeout)
+    warnIfMalformed *> (upsert *> enqueue *> recordResult).transact(xa).timeout(SaveTimeout)
 
   // ── OutboxStore ─────────────────────────────────────────────────────────────
 
@@ -164,11 +174,25 @@ final class PgGameStore private (xa: Transactor[IO])
 
   // ── GameResultsStore ──────────────────────────────────────────────────────
 
+  /** Two LIMIT-bounded, already-ordered subqueries (one per side) unioned and re-limited, rather than one `OR` across
+    * both columns: an `OR` predicate on two single-column indexes forces Postgres to bitmap-scan and sort ALL of the
+    * participant's matching rows before applying LIMIT — O(history size) — whereas each `(participant, finished_at
+    * DESC)` composite index below serves its half of this query as a plain bounded index scan.
+    */
   def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
-    sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                 server_seed, pairing_id::text, finished_at
-          FROM play.game_results
-          WHERE white_external_id = $externalId OR black_external_id = $externalId
+    sql"""(SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                  server_seed, pairing_id::text, finished_at
+           FROM play.game_results
+           WHERE white_external_id = $externalId
+           ORDER BY finished_at DESC
+           LIMIT $limit)
+          UNION ALL
+          (SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                  server_seed, pairing_id::text, finished_at
+           FROM play.game_results
+           WHERE black_external_id = $externalId
+           ORDER BY finished_at DESC
+           LIMIT $limit)
           ORDER BY finished_at DESC
           LIMIT $limit"""
       .query[PgGameStore.ResultTuple]
@@ -216,21 +240,26 @@ object PgGameStore:
       pairingId: Option[String]
   )
 
-  /** `None` while the game is still active. Unlike `PlaysiteIngest.payload`, this does NOT exclude aborted games:
-    * `game_results` is an operational projection the scheduler/rating batch query, not the analytics corpus — an
-    * aborted game is still a real row (`termination = "aborted"`), just one downstream consumers can filter out.
+  /** `None` while the game is still active (or, for an ended snapshot, if `players` is unexpectedly missing a seat —
+    * `save` logs that case separately, since it's a malformed row, not the normal "still active" path). Unlike
+    * `PlaysiteIngest.payload`, this does NOT exclude aborted games from the table entirely: `game_results` is an
+    * operational projection the scheduler/rating batch query, not the analytics corpus, so an aborted game is still a
+    * real row (`termination = "aborted"`). It IS excluded from rating eligibility specifically — `result = None` and
+    * `rated = false` regardless of what was decided at creation — since an aborted game has no sporting outcome and
+    * must never hand `finishedRatedSince`'s caller a fabricated win/loss/draw.
     */
   private def finishedGameOf(snapshot: GameSnapshot): Option[FinishedGame] =
     snapshot.status match
       case GameStatus.Active                               => None
       case GameStatus.Ended(GameOver(result, termination)) =>
+        val aborted = termination == Termination.Aborted
         (snapshot.players.get(Seat.White), snapshot.players.get(Seat.Black)).mapN { (white, black) =>
           FinishedGame(
             whiteExternalId = white.externalId,
             blackExternalId = black.externalId,
-            result = Some(PlaysiteIngest.resultOf(result)),
+            result = Option.unless(aborted)(PlaysiteIngest.resultOf(result)),
             termination = PlaysiteIngest.terminationOf(termination),
-            rated = snapshot.rated.getOrElse(false),
+            rated = !aborted && snapshot.rated.getOrElse(false),
             timeControl = snapshot.timeControl.toString,
             serverSeed = snapshot.serverSeed,
             pairingId = snapshot.pairingId

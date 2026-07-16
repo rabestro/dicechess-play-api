@@ -20,10 +20,12 @@ CREATE TABLE game_results (
 -- The rating batch's own cursor query: rated games finished since its last run.
 CREATE INDEX game_results_rated_finished_idx ON game_results (rated, finished_at);
 
--- recentResultsFor(externalId) looks up either seat; two single-column indexes let Postgres bitmap-OR them,
--- unlike one composite index which wouldn't help an OR predicate.
-CREATE INDEX game_results_white_idx ON game_results (white_external_id);
-CREATE INDEX game_results_black_idx ON game_results (black_external_id);
+-- recentResultsFor(externalId) needs the top N by finished_at for either seat. A plain single-column index per side
+-- would force Postgres to bitmap-OR the two, then sort ALL of a prolific bot's matching rows before applying LIMIT —
+-- O(history size), not O(limit). Composite (participant, finished_at DESC) lets the query below run each side as its
+-- own LIMIT-bounded, already-ordered index scan instead.
+CREATE INDEX game_results_white_finished_idx ON game_results (white_external_id, finished_at DESC);
+CREATE INDEX game_results_black_finished_idx ON game_results (black_external_id, finished_at DESC);
 
 -- pairFor(pairingId): most games aren't part of a CRN pair, so a partial index keeps it small.
 CREATE INDEX game_results_pairing_idx ON game_results (pairing_id) WHERE pairing_id IS NOT NULL;

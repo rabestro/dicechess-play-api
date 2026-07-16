@@ -11,7 +11,6 @@ import munit.CatsEffectSuite
 import org.testcontainers.utility.DockerImageName
 
 import java.security.MessageDigest
-import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Persistence against a real PostgreSQL (testcontainers): the store round-trip, and the property the whole feature
@@ -207,14 +206,18 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
   test("finishedRatedSince returns only rated games finished strictly after the cursor (#98)"):
     withContainers { pg =>
       store(pg).use { db =>
+        val before = Principal.Guest("b2-since-w1")
         for
           idBefore <- GameId.random
-          _        <- db.save(
-            idBefore,
-            endedResultFixture(Principal.Guest("b2-since-w1"), Principal.Guest("b2-since-b1"), rated = true)
-          )
-          _            <- IO.sleep(20.millis)
-          cursor       <- IO(Instant.now())
+          _        <- db.save(idBefore, endedResultFixture(before, Principal.Guest("b2-since-b1"), rated = true))
+          // The cursor is the row's OWN database-generated finished_at, not a JVM-side Instant.now(): comparing a
+          // local clock against Postgres's own now() would make this boundary assertion depend on the two clocks
+          // being in sync, which isn't guaranteed (#98 review).
+          beforeRow <- db
+            .recentResultsFor(before.externalId)
+            .map(_.find(_.gameId.value == idBefore.value).getOrElse(fail("row not found right after saving it")))
+          cursor = beforeRow.finishedAt
+          // A short, deterministic gap so the next inserts' own finished_at lands strictly after the cursor.
           _            <- IO.sleep(20.millis)
           idAfterRated <- GameId.random
           _            <- db.save(
@@ -229,7 +232,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           since <- db.finishedRatedSince(cursor)
         yield
           val ids = since.map(_.gameId.value).toSet
-          assert(!ids.contains(idBefore.value), "a game finished before the cursor must be excluded")
+          assert(!ids.contains(idBefore.value), "a game AT the cursor must be excluded (strictly after)")
           assert(ids.contains(idAfterRated.value), "a rated game finished after the cursor must be included")
           assert(!ids.contains(idAfterCasual.value), "a casual (non-rated) game must be excluded regardless of timing")
       }
