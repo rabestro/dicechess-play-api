@@ -157,12 +157,64 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assertEquals(after.dfen, before.dfen, "the pending roll (DFEN dice pool) must survive the crash")
           assertEquals(commit2, commit1, "the dice commitment must survive the crash")
           assertEquals(room2.joinTokens, tokens1, "seat tokens must survive so players can reconnect")
-          assertEquals(sha256Hex(terminal.seed), commit1, "the revealed seed still opens the pre-crash commitment")
+          assertEquals(
+            sha256Hex(terminal.seed.getOrElse(fail("expected a revealed seed"))),
+            commit1,
+            "the revealed seed still opens the pre-crash commitment"
+          )
           assertEquals(
             terminal.clientSeeds,
-            ClientSeeds("white-client-seed-0001", "black-client-seed-0001"),
+            Some(ClientSeeds("white-client-seed-0001", "black-client-seed-0001")),
             "the submitted client seeds survive the crash into the reveal"
           )
+      }
+    }
+
+  test("a mirrored pair's reveal-withholding survives a crash: resume correctly rebuilds the partner check (#116)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          // Life before the crash: a CRN mirrored pair, both games live.
+          registry1 <- GameRegistry.create(store = db)
+          paired    <- registry1.createMirroredPair(
+            Principal.Bot("acme", "alice"),
+            Principal.Bot("acme", "bob"),
+            TimeControl.Unlimited
+          )
+          pair = paired.toOption.getOrElse(fail("createMirroredPair failed"))
+
+          // The "crash": a brand-new registry over the same store — the in-memory partnerEnded closures from before
+          // the restart are gone; resume must rebuild them from the persisted partnerGameId (#115).
+          registry2 <- GameRegistry.create(store = db)
+          resumed   <- registry2.resume
+          _ = assert(resumed >= 2, s"both mirrored games must be resumed, got $resumed")
+          roomA <- registry2.get(pair.gameAWhite).map(_.getOrElse(fail("resumed game A not found")))
+          roomB <- registry2.get(pair.gameBWhite).map(_.getOrElse(fail("resumed game B not found")))
+
+          // End the resumed game A only; its rebuilt partnerEnded check must still correctly see B as active.
+          _      <- roomA.submit(Seat.White, GameCommand.Resign)
+          _      <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
+          snapA1 <- roomA.snapshot
+          _ = assertEquals(snapA1.seed, None, "a resumed paired game must still withhold its reveal while B is active")
+          // A FRESH lookup through the registry, not the held `roomA` reference: this is what actually exercises
+          // `register`'s own (separately threaded) partnerEnded check, not just GameRoom.restore's — the two are
+          // easy to fix one and forget the other (as review on #116 caught), and a held reference can't tell the
+          // difference, since it works identically whether or not the room is still in the registry's map.
+          stillThere <- registry2.get(pair.gameAWhite)
+          _ = assert(
+            stillThere.isDefined,
+            "a resumed paired game must stay registered (hence GET /games/{id}-reachable) while its partner is active"
+          )
+
+          // End B too; both now reveal, proving the rebuilt checks correctly see each other post-restart.
+          _      <- roomB.submit(Seat.White, GameCommand.Resign)
+          _      <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
+          snapB  <- roomB.snapshot
+          snapA2 <- roomA.snapshot
+        yield
+          assert(snapB.seed.nonEmpty, "game B must reveal once it (the second to end) concludes")
+          assert(snapA2.seed.nonEmpty, "game A must reveal on a later poll, now that B has also ended")
+          assertEquals(snapA2.seed, snapB.seed, "both resumed games still share the same server seed")
       }
     }
 

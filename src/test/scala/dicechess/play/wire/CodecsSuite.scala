@@ -54,16 +54,23 @@ class CodecsSuite extends munit.FunSuite:
       GameEvent.GameEnded(
         9L,
         GameOver(GameResult.Win(Side.Black), Termination.KingCaptured),
-        "ab12",
-        ClientSeeds("w", "b")
+        Some("ab12"),
+        Some(ClientSeeds("w", "b"))
       )
     )
     roundtrip[GameEvent](
-      GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted), "cd34", ClientSeeds("w", "b"))
+      GameEvent.GameEnded(7L, GameOver(GameResult.Draw, Termination.Aborted), Some("cd34"), Some(ClientSeeds("w", "b")))
     )
     roundtrip[GameEvent](
-      GameEvent.GameEnded(8L, GameOver(GameResult.Win(Side.White), Termination.Timeout), "ef56", ClientSeeds("w", "b"))
+      GameEvent.GameEnded(
+        8L,
+        GameOver(GameResult.Win(Side.White), Termination.Timeout),
+        Some("ef56"),
+        Some(ClientSeeds("w", "b"))
+      )
     )
+    // A CRN-paired game (#115) whose mirror partner hasn't concluded yet withholds the reveal entirely.
+    roundtrip[GameEvent](GameEvent.GameEnded(10L, GameOver(GameResult.Draw, Termination.Aborted), None, None))
     roundtrip[GameEvent](GameEvent.Rejected(2L, Seat.Black, "nope"))
 
   test("Principal round-trips"):
@@ -131,10 +138,21 @@ class CodecsSuite extends munit.FunSuite:
       (GameEvent.GameEnded(
         3L,
         GameOver(GameResult.Win(Side.White), Termination.KingCaptured),
-        "ab12",
-        ClientSeeds("w", "b")
+        Some("ab12"),
+        Some(ClientSeeds("w", "b"))
       ): GameEvent).asJson.noSpaces,
       """{"GameEnded":{"v":3,"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"},"seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}"""
+    )
+    // A CRN-paired game (#115) withholds the reveal (both null) until its mirror partner has also concluded — pin
+    // this shape too, so a future change can't silently drop the "still withheld" case back to always-revealing.
+    assertEquals(
+      (GameEvent.GameEnded(
+        4L,
+        GameOver(GameResult.Draw, Termination.Aborted),
+        None,
+        None
+      ): GameEvent).asJson.noSpaces,
+      """{"GameEnded":{"v":4,"over":{"result":{"Draw":{}},"termination":"Aborted"},"seed":null,"clientSeeds":null}}"""
     )
     // A terminal Snapshot is a public surface too: pin its exact shape so a rename/omission of commit/seed/clientSeeds
     // (the dice-fairness trio revealed at game end) breaks the suite rather than silently reshaping the protocol.

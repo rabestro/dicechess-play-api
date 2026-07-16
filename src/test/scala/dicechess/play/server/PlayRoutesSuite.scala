@@ -271,10 +271,10 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           .timeoutTo(20.seconds, IO.raiseError(RuntimeException("no GameEnded over the wire")))
       yield
         assert(ended.seed.nonEmpty, "the GameEnded frame must carry the revealed seed")
-        assertEquals(sha256Hex(ended.seed), created.commit)
+        assertEquals(sha256Hex(ended.seed.getOrElse(fail("expected a revealed seed"))), created.commit)
         // Neither seat seeded (white only connected then dropped), so each client seed is the seat's external-id
         // fallback — assert the exact pair, which also catches a white/black swap.
-        assertEquals(ended.clientSeeds, ClientSeeds("guest:white", "guest:black"))
+        assertEquals(ended.clientSeeds, Some(ClientSeeds("guest:white", "guest:black")))
 
   test("clientFrames interleaves keep-alive pings into a quiet game"):
     // A room that is created but never started stays quiet after its initial Snapshot, so the only

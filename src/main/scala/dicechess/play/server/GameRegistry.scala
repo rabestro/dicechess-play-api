@@ -8,7 +8,7 @@ import dicechess.play.dice.DiceSource
 import dicechess.play.game.GameRoom
 import dicechess.play.store.GameStore
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
 
 /** In-memory registry of live game rooms (one authoritative node, for now). Rooms snapshot themselves into the
   * `GameStore` on every event, and `resume` rebuilds them on boot — so live games survive a restart or deploy.
@@ -47,8 +47,9 @@ final class GameRegistry private (
       timeControl: TimeControl = TimeControl.Unlimited,
       requestedRated: Boolean = false
   ): IO[Either[String, (GameId, GameRoom)]] =
-    DiceSource.newCommitReveal().flatMap { dice =>
+    (GameId.random, DiceSource.newCommitReveal()).flatMapN { (id, dice) =>
       createRoom(
+        id,
         Map(Seat.White -> white, Seat.Black -> black),
         dice,
         timeControl,
@@ -68,14 +69,12 @@ final class GameRegistry private (
     * non-anonymous bots, so today this is always true — but the policy stays the single source of truth rather than
     * being assumed here too).
     *
-    * '''Known gap — do not wire this into live play yet (tracked in #115):''' both games share one secret, and
-    * `GameEnded` reveals it (`seed`/`clientSeeds`, unconditionally, in the clear) the instant EITHER game ends — public
-    * reveal, since `GET /games/{id}` exposes it too. Once the faster game ends, that reveal hands anyone (not just the
-    * two bots) everything needed to compute every remaining roll of the slower game:
-    * `roll(ply, clientSeedWhite, clientSeedBlack)` is a pure function of exactly the now-public values. The two games
-    * must not both reveal independently at their own natural end — the reveal needs to wait for BOTH games in the pair
-    * to finish. No caller exists yet (that's #102's job), so the blast radius today is zero; do not call this from a
-    * real scheduler before that's fixed.
+    * '''Reveal safety (#115):''' sharing one secret between two games would otherwise leak the slower game's remaining
+    * rolls the instant the faster one reveals at its own natural end (`GameEnded` is public, and so is
+    * `GET /games/{id}`). Each room is given a `partnerEnded` check (`partnerEndedCheck`, below) that it consults before
+    * revealing; a room only reveals once IT has ended AND its partner has too. Whichever game ends first withholds its
+    * reveal (`GameEnded` carries `None`/`None`); it becomes visible again on a later `GET /games/{id}` poll of that
+    * same game, once the partner has also concluded — see `Session.publicAt`.
     */
   def createMirroredPair(
       botA: Principal.Bot,
@@ -88,22 +87,30 @@ final class GameRegistry private (
       seedWhite <- randomSeed
       seedBlack <- randomSeed
       pairingId <- IO(java.util.UUID.randomUUID().toString)
+      idA       <- GameId.random
+      idB       <- GameId.random
       fixedSeeds = Map(Seat.White -> seedWhite, Seat.Black -> seedBlack)
       gameAWhite <- createRoom(
+        idA,
         Map(Seat.White -> botA, Seat.Black -> botB),
         dice,
         timeControl,
         rated,
         Some(pairingId),
-        fixedSeeds
+        Some(idB.value),
+        fixedSeeds,
+        partnerEndedCheck(idB)
       )
       gameBWhite <- createRoom(
+        idB,
         Map(Seat.White -> botB, Seat.Black -> botA),
         dice,
         timeControl,
         rated,
         Some(pairingId),
-        fixedSeeds
+        Some(idA.value),
+        fixedSeeds,
+        partnerEndedCheck(idA)
       )
     // No orphaned first game on a "partial" failure: createRoom's only error path is EngineOps.parse(initialDfen),
     // and both calls above use the same default (always-valid) InitialDfen — parsing is a pure function of that
@@ -114,19 +121,33 @@ final class GameRegistry private (
       case (Left(error), _)                   => Left(error)
       case (_, Left(error))                   => Left(error)
 
-  /** Shared room-creation seam behind both `create` and `createMirroredPair`: mint an id, build the room, register it
-    * once live. `presetClientSeeds` bypasses the normal `SubmitSeed` gate (empty for an ordinary game).
+  /** "Has `partnerId` ended?" (#115) — a room no longer tracked here has already been deregistered, which only ever
+    * happens after its `result` completes, so a missing room counts as ended too. Consulted fresh on every reveal
+    * decision (see `GameRoom.partnerEnded`), never cached, so it self-heals once the partner actually concludes.
+    */
+  private def partnerEndedCheck(partnerId: GameId): IO[Boolean] =
+    rooms.get.map(_.get(partnerId)).flatMap {
+      case None       => IO.pure(true)
+      case Some(room) => room.hasEnded
+    }
+
+  /** Shared room-creation seam behind both `create` and `createMirroredPair`: build the room (under the caller's
+    * pre-minted id — `createMirroredPair` needs both ids before either room exists, to wire each one's `partnerEnded`
+    * check to the other), register it, start it. `presetClientSeeds` bypasses the normal `SubmitSeed` gate (empty for
+    * an ordinary game).
     */
   private def createRoom(
+      id: GameId,
       players: Map[Seat, Principal],
       dice: DiceSource,
       timeControl: TimeControl,
       rated: Boolean,
       pairingId: Option[String] = None,
-      presetClientSeeds: Map[Seat, String] = Map.empty
+      partnerGameId: Option[String] = None,
+      presetClientSeeds: Map[Seat, String] = Map.empty,
+      partnerEnded: IO[Boolean] = IO.pure(true)
   ): IO[Either[String, (GameId, GameRoom)]] =
     for
-      id   <- GameId.random
       made <- GameRoom.create(
         players,
         dice,
@@ -134,10 +155,12 @@ final class GameRegistry private (
         timeControl = timeControl,
         rated = rated,
         pairingId = pairingId,
+        partnerGameId = partnerGameId,
         presetClientSeeds = presetClientSeeds,
-        persist = store.save(id, _)
+        persist = store.save(id, _),
+        partnerEnded = partnerEnded
       )
-      result <- made.traverse(room => register(id, room) *> room.start.as((id, room)))
+      result <- made.traverse(room => register(id, room, partnerEnded) *> room.start.as((id, room)))
     yield result
 
   /** A fresh 16-byte (128-bit) dice-seed contribution, hex-encoded — same shape as a real client's `SubmitSeed`, but
@@ -150,31 +173,70 @@ final class GameRegistry private (
 
   /** Rebuild rooms for every game that was live when the process stopped; returns how many were revived. A snapshot
     * that fails to restore is logged and skipped — one corrupt row must not take the server down.
+    *
+    * Two phases, deliberately NOT one traversal that restores-registers-starts each snapshot in turn (#115 review):
+    * `GameRoom.restore` starts the room's writer fiber (hence its clock) immediately, so if game B sat later in a large
+    * batch, game A's `partnerEndedCheck(idB)` could run — and wrongly conclude "no such partner, must have ended" —
+    * before B was ever registered, prematurely revealing A's secret. Restoring every snapshot first (fast, in-memory,
+    * no registry visibility yet) before registering any of them closes the realistic version of that race: the two
+    * phases combined are far quicker than any real game's move deadline. (A vanishingly narrow residual remains — a
+    * partner whose own deadline expires within the few CPU-bound milliseconds phase 1 itself takes — which also exists,
+    * identically, in `createMirroredPair`'s own back-to-back room creation; closing it fully would need decoupling room
+    * construction from fiber-starting throughout `GameRoom`, a bigger change than this fix warrants.)
     */
   def resume: IO[Int] =
-    store.loadActive
-      .flatMap(_.traverse { case (id, snapshot) =>
-        DiceSource
-          .fromHexSeed(snapshot.serverSeed)
-          .flatTraverse(dice =>
-            GameRoom.restore(snapshot, dice, disconnectGrace = disconnectGrace, persist = store.save(id, _))
-          )
-          .flatMap {
-            case Left(error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error").as(0)
-            case Right(room) => register(id, room) *> room.start.as(1)
-          }
-      })
-      .map(_.sum)
+    store.loadActive.flatMap { snapshots =>
+      snapshots
+        .traverse { case (id, snapshot) =>
+          // The in-memory closure from before the restart is gone (#115) — rebuild it from the persisted partner
+          // id. No partner (or an unpaired game): always eligible, exactly as before this feature. Computed once and
+          // carried alongside the restored room into phase 2 below — it's needed for BOTH `GameRoom.restore` (reveal
+          // gating) AND `register` (deregistration timing, #116 review); building it only for `restore` and letting
+          // `register` fall back to its own default was exactly the bug the review caught.
+          val partnerEnded = snapshot.partnerGameId.fold(IO.pure(true))(pid => partnerEndedCheck(GameId(pid)))
+          DiceSource
+            .fromHexSeed(snapshot.serverSeed)
+            .flatTraverse(dice =>
+              GameRoom.restore(
+                snapshot,
+                dice,
+                disconnectGrace = disconnectGrace,
+                persist = store.save(id, _),
+                partnerEnded = partnerEnded
+              )
+            )
+            .map(made => (id, partnerEnded, made))
+        }
+        .flatMap { restored =>
+          val failures  = restored.collect { case (id, _, Left(error)) => id -> error }
+          val successes = restored.collect { case (id, partnerEnded, Right(room)) => (id, partnerEnded, room) }
+          failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error")) *>
+            successes.traverse_((id, partnerEnded, room) => register(id, room, partnerEnded)) *>
+            successes.traverse_((_, _, room) => room.start).as(successes.size)
+        }
+    }
 
-  private def register(id: GameId, room: GameRoom): IO[Unit] =
+  private def register(id: GameId, room: GameRoom, partnerEnded: IO[Boolean]): IO[Unit] =
     room.seating.flatMap: seats =>
       val players = seats.values.toList
       rooms.update(_.updated(id, room)) *>
         byPlayer.update(index =>
           players.foldLeft(index)((acc, p) => acc.updated(p, acc.getOrElse(p, Set.empty) + id))
         ) *>
-        // Evict the room (and its index entries) once its game ends, so neither map grows without bound.
-        (room.result *> deregister(id, players)).start.void
+        // Evict the room (and its index entries) once its game ends — but not before its CRN partner also has
+        // (#115/#116 review): GET /games/{id} only ever serves an ended game from THIS live map (there is no
+        // fallback to the database), so evicting immediately would make a withheld reveal unrecoverable forever
+        // instead of merely delayed. An ordinary (unpaired) game's `partnerEnded` is `IO.pure(true)`, so the first
+        // check succeeds and it evicts immediately, exactly as before. `GET /bot/games`/`GET /games` already filter
+        // out ended-but-still-registered rooms (`status == Active`), so a lingering paired room is invisible there
+        // regardless of how long it lingers.
+        (room.result *> awaitPartnerThenDeregister(id, players, partnerEnded)).start.void
+
+  private def awaitPartnerThenDeregister(id: GameId, players: List[Principal], partnerEnded: IO[Boolean]): IO[Unit] =
+    partnerEnded.flatMap:
+      case true  => deregister(id, players)
+      case false =>
+        IO.sleep(GameRegistry.DeregisterPollInterval) *> awaitPartnerThenDeregister(id, players, partnerEnded)
 
   private def deregister(id: GameId, players: List[Principal]): IO[Unit] =
     rooms.update(_.removed(id)) *>
@@ -185,6 +247,12 @@ final class GameRegistry private (
       )
 
 object GameRegistry:
+
+  /** How often a room whose partner hasn't ended yet re-checks before deregistering (#115). Not latency-sensitive — the
+    * reveal is already visible via `GET /games/{id}` the moment the partner concludes, regardless of exactly when this
+    * room's own registry entry is eventually cleaned up — so a relaxed interval is fine.
+    */
+  private val DeregisterPollInterval: FiniteDuration = 2.seconds
 
   /** The result of `createMirroredPair`: two games tied together by a shared `pairingId` for downstream CRN scoring
     * (pentanomial: the pair is scored as one unit, not two independent games). `gameAWhite` seats `botA` White / `botB`
