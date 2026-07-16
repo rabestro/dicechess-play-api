@@ -103,7 +103,7 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
           case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
           case Right(_)    =>
             written.get.map { snaps =>
-              assert(snaps.headOption.exists(_.rated), "the creation snapshot must be marked rated")
+              assert(snaps.headOption.exists(_.rated.contains(true)), "the creation snapshot must be marked rated")
             }
         }
     }
@@ -116,7 +116,10 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
           case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
           case Right(_)    =>
             written.get.map { snaps =>
-              assert(snaps.headOption.exists(!_.rated), "omitting rated must default the snapshot to casual")
+              assert(
+                snaps.headOption.exists(_.rated.contains(false)),
+                "omitting rated must default the snapshot to casual"
+              )
             }
         }
     }
@@ -142,6 +145,6 @@ class GameRoomPersistenceSuite extends munit.CatsEffectSuite:
                 }
               _     <- restored.submit(Seat.White, GameCommand.Resign)
               ended <- awaitWritten(afterRestore)(_.lastOption.exists(_.ended))
-            yield assert(ended.last.rated, "the restored room's terminal snapshot must still be rated")
+            yield assert(ended.last.rated.contains(true), "the restored room's terminal snapshot must still be rated")
         }
     }

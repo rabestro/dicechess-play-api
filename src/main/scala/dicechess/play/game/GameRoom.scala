@@ -347,7 +347,7 @@ final class GameRoom private (
       pending = s.pending,
       status = s.status,
       timeControl = s.timeControl,
-      rated = s.rated,
+      rated = Some(s.rated), // always written going forward; only pre-existing rows lack the key (see GameSnapshot)
       remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
       lastRoll = s.lastRoll,
       turns = s.turns,
@@ -697,7 +697,9 @@ object GameRoom:
             snapshot.pending,
             snapshot.status,
             snapshot.timeControl,
-            rated = snapshot.rated,
+            // A pre-existing row from before this field existed has no key at all (see GameSnapshot.rated) —
+            // resolve that to unrated, exactly like createdAtEpochMs's own absent-key story.
+            rated = snapshot.rated.getOrElse(false),
             remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
             // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
             // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.

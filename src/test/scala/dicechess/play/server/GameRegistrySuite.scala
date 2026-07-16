@@ -52,7 +52,7 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
           case Left(error) => IO.raiseError(RuntimeException(s"create failed: $error"))
           case Right(_)    =>
             written.get.map { snaps =>
-              assert(snaps.headOption.exists(_.rated), "the creation snapshot must be marked rated")
+              assert(snaps.headOption.exists(_.rated.contains(true)), "the creation snapshot must be marked rated")
             }
         }
       }
@@ -65,7 +65,10 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
           case Left(error) => IO.raiseError(RuntimeException(s"create failed: $error"))
           case Right(_)    =>
             written.get.map { snaps =>
-              assert(snaps.headOption.exists(!_.rated), "a guest participant must force the snapshot casual")
+              assert(
+                snaps.headOption.exists(_.rated.contains(false)),
+                "a guest participant must force the snapshot casual"
+              )
             }
         }
       }
@@ -78,7 +81,10 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
           case Left(error) => IO.raiseError(RuntimeException(s"create failed: $error"))
           case Right(_)    =>
             written.get.map { snaps =>
-              assert(snaps.headOption.exists(!_.rated), "omitting requestedRated must default to casual")
+              assert(
+                snaps.headOption.exists(_.rated.contains(false)),
+                "omitting requestedRated must default to casual"
+              )
             }
         }
       }
