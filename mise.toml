@@ -10,6 +10,9 @@ scalafmt = "3.11.1"   # native CLI; MUST match the version in .scalafmt.conf
 
 # Workflow CLIs
 gh = "latest"         # GitHub CLI: PRs, issues, releases
+
+# Docs site (Astro/Starlight in docs/) — build only, unrelated to the Scala toolchain
+node = "22"           # matches the setup-node version in .github/workflows/deploy-docs.yaml
 jq = "latest"         # JSON processor
 
 [tasks.setup]
@@ -65,3 +68,18 @@ run = "lefthook install"
 [tasks."hook:run"]
 description = "🏃 Run all pre-commit hook jobs across the codebase"
 run = "lefthook run pre-commit --all-files"
+
+[tasks."docs:install"]
+description = "📦 Install the documentation site's npm dependencies"
+dir = "docs"
+run = "npm install"
+
+[tasks."docs:dev"]
+description = "📖 Start the local Astro/Starlight documentation dev server"
+dir = "docs"
+run = "npm run dev"
+
+[tasks."docs:build"]
+description = "🏗️  Compile the documentation site to static HTML (docs/dist)"
+dir = "docs"
+run = "npm run build"

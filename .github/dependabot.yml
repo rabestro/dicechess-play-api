@@ -1,0 +1,35 @@
+# Dependency hygiene. The docs/ site is the only npm surface in this repo (the Scala
+# backend is managed by sbt); it is watched from day one so it never accumulates the
+# advisory backlog an unwatched Astro site tends to (see ADR-0012).
+version: 2
+updates:
+  # Docs site (Astro + Starlight)
+  - package-ecosystem: "npm"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "documentation"
+    commit-message:
+      prefix: "chore(docs)"
+    groups:
+      # One PR for the routine minor/patch bumps; majors still come individually.
+      astro-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions used by every workflow (CI, deploy, docs)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
