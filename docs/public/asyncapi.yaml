@@ -1,0 +1,179 @@
+asyncapi: 3.1.0
+info:
+  title: Dice Chess Bot Event Streams
+  version: '1.0'
+  description: >
+    The two long-lived ndjson (newline-delimited JSON) streams a bot may hold: the account event
+    stream for incoming challenges and game starts, and a per-game stream of state transitions.
+    Each message is one JSON object on its own line; blank lines are ~25s keep-alives and must be
+    ignored. Streams are live-only — recover missed facts via the REST polling endpoints (see
+    openapi.yaml). This description complements the REST contract in `openapi.yaml`.
+  license:
+    name: AGPL-3.0-or-later
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+servers:
+  production:
+    host: play-api.jc.id.lv
+    protocol: https
+    description: Public production platform. Authenticate with `Authorization: Bearer <token>`.
+channels:
+  accountEvents:
+    address: /bot/stream/event
+    title: Account event stream
+    description: Incoming challenges and game starts for the authenticated bot.
+    messages:
+      challengeReceived: { $ref: '#/components/messages/ChallengeReceived' }
+      challengeDeclined: { $ref: '#/components/messages/ChallengeDeclined' }
+      gameStart: { $ref: '#/components/messages/GameStart' }
+  gameEvents:
+    address: /bot/game/stream/{id}
+    title: Game event stream
+    description: State transitions for one game.
+    parameters:
+      id:
+        description: The game id.
+    messages:
+      snapshot: { $ref: '#/components/messages/Snapshot' }
+      diceRolled: { $ref: '#/components/messages/DiceRolled' }
+      turnPlayed: { $ref: '#/components/messages/TurnPlayed' }
+      gameEnded: { $ref: '#/components/messages/GameEnded' }
+      rejected: { $ref: '#/components/messages/Rejected' }
+operations:
+  receiveAccountEvents:
+    action: receive
+    channel: { $ref: '#/channels/accountEvents' }
+    summary: Stream account events.
+    messages:
+      - { $ref: '#/channels/accountEvents/messages/challengeReceived' }
+      - { $ref: '#/channels/accountEvents/messages/challengeDeclined' }
+      - { $ref: '#/channels/accountEvents/messages/gameStart' }
+  receiveGameEvents:
+    action: receive
+    channel: { $ref: '#/channels/gameEvents' }
+    summary: Stream one game's state transitions.
+    messages:
+      - { $ref: '#/channels/gameEvents/messages/snapshot' }
+      - { $ref: '#/channels/gameEvents/messages/diceRolled' }
+      - { $ref: '#/channels/gameEvents/messages/turnPlayed' }
+      - { $ref: '#/channels/gameEvents/messages/gameEnded' }
+      - { $ref: '#/channels/gameEvents/messages/rejected' }
+components:
+  messages:
+    ChallengeReceived:
+      name: ChallengeReceived
+      title: A challenge was addressed to you.
+      payload:
+        type: object
+        properties:
+          ChallengeReceived:
+            type: object
+            properties:
+              id: { type: string }
+              challenger: { $ref: '#/components/schemas/Principal' }
+    ChallengeDeclined:
+      name: ChallengeDeclined
+      title: A challenge you created was declined or expired.
+      payload:
+        type: object
+        properties:
+          ChallengeDeclined:
+            type: object
+            properties:
+              id: { type: string }
+    GameStart:
+      name: GameStart
+      title: A game you are seated in has started.
+      payload:
+        type: object
+        properties:
+          GameStart:
+            type: object
+            properties:
+              gameId: { type: string }
+    Snapshot:
+      name: Snapshot
+      title: The current game state, sent immediately on connect.
+      payload:
+        type: object
+        properties:
+          Snapshot:
+            type: object
+            properties:
+              v: { type: integer }
+              state: { $ref: '#/components/schemas/PublicGameState' }
+    DiceRolled:
+      name: DiceRolled
+      title: The server rolled the dice for a turn.
+      payload:
+        type: object
+        properties:
+          DiceRolled:
+            type: object
+            properties:
+              v: { type: integer }
+              seat: { $ref: '#/components/schemas/Seat' }
+              dice: { type: array, items: { type: integer, minimum: 1, maximum: 6 } }
+              dfen: { type: string }
+              clocks: { $ref: '#/components/schemas/Clocks' }
+              legalMoves:
+                description: The legal-move tree for this roll; {} = forced pass; null = fetch GET /games/{id}/moves.
+    TurnPlayed:
+      name: TurnPlayed
+      title: A turn's moves were applied.
+      payload:
+        type: object
+        properties:
+          TurnPlayed:
+            type: object
+            properties:
+              v: { type: integer }
+              seat: { $ref: '#/components/schemas/Seat' }
+              moves: { type: array, items: { type: string } }
+              fenAfter: { type: string }
+    GameEnded:
+      name: GameEnded
+      title: The game is over — carries the provably-fair reveal.
+      payload:
+        type: object
+        properties:
+          GameEnded:
+            type: object
+            properties:
+              v: { type: integer }
+              over:
+                type: object
+                properties:
+                  result: { description: '{"Win":{"side":"White"}} or {"Draw":{}}.' }
+                  termination: { type: string, enum: [KingCaptured, Resign, Draw, Aborted, Timeout] }
+              seed: { type: [string, 'null'], description: Revealed server seed (null while a mirror-pair partner is unfinished). }
+              clientSeeds: { type: [object, 'null'] }
+    Rejected:
+      name: Rejected
+      title: The engine rejected submitted moves.
+      payload:
+        type: object
+        properties:
+          Rejected:
+            type: object
+            properties:
+              v: { type: integer }
+              seat: { $ref: '#/components/schemas/Seat' }
+              reason: { type: string }
+  schemas:
+    Seat:
+      type: string
+      enum: [White, Black]
+    Clocks:
+      type: [object, 'null']
+      properties:
+        white: { type: integer }
+        black: { type: integer }
+    Principal:
+      type: object
+      description: Single-key identity wrapper, e.g. {"Bot":{"team":"anon","name":"other-bot"}}.
+    PublicGameState:
+      type: object
+      description: >
+        The same object GET /games/{id} returns — dfen, activeSeat, dicePending, status,
+        timeControl, clocks, commit, seed, clientSeeds, legalMoves, players. See PublicGameState
+        in openapi.yaml.
