@@ -194,16 +194,20 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
 /** Pure parsing/config logic — no container. */
 class RatingBatchPureSuite extends munit.FunSuite:
 
-  test("parseBot accepts only the canonical bot:team:<team>:<name> shape"):
+  test("Principal.fromBotExternalId accepts only the canonical bot:team:<team>:<name> shape"):
     assertEquals(
-      RatingBatch.parseBot("bot:team:acme:alice"),
+      Principal.fromBotExternalId("bot:team:acme:alice"),
       Some(Principal.Bot("acme", "alice")): Option[Principal.Bot]
     )
-    assertEquals(RatingBatch.parseBot("guest:0198-uuid"), None)
-    assertEquals(RatingBatch.parseBot("user:42"), None)
-    assertEquals(RatingBatch.parseBot("bot:greedy"), None, "legacy bot:<algorithm> ids are not registered identities")
-    assertEquals(RatingBatch.parseBot("bot:team:acme:"), None, "an empty name must not parse")
-    assertEquals(RatingBatch.parseBot("bot:team::alice"), None, "an empty team must not parse")
+    assertEquals(Principal.fromBotExternalId("guest:0198-uuid"), None)
+    assertEquals(Principal.fromBotExternalId("user:42"), None)
+    assertEquals(
+      Principal.fromBotExternalId("bot:greedy"),
+      None,
+      "legacy bot:<algorithm> ids are not registered identities"
+    )
+    assertEquals(Principal.fromBotExternalId("bot:team:acme:"), None, "an empty name must not parse")
+    assertEquals(Principal.fromBotExternalId("bot:team::alice"), None, "an empty team must not parse")
 
   test("scores maps the white-POV result vocabulary and nothing else"):
     assertEquals(RatingBatch.scores(1), Some((1.0, 0.0)))

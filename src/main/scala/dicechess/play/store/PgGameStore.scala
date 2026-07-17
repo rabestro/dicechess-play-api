@@ -32,7 +32,8 @@ final class PgGameStore private (xa: Transactor[IO])
     with OutboxStore
     with BotStore
     with GameResultsStore
-    with RatingStore:
+    with RatingStore
+    with LeaderboardStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
@@ -273,6 +274,60 @@ final class PgGameStore private (xa: Transactor[IO])
   private def stampApplied(gameId: GameId): ConnectionIO[Unit] =
     sql"""UPDATE play.game_results SET rating_applied_at = now()
           WHERE game_id = ${gameId.value}::uuid""".update.run.void
+
+  // ── LeaderboardStore (#103) ───────────────────────────────────────────────
+
+  /** One query: registered bots joined against their rated, decided W-D-L aggregated from `game_results` (each game
+    * contributes from both seats' perspectives via the UNION ALL). The scan over rated games is acceptable at this
+    * corpus's scale; if the ladder ever grows past that, a materialised tally is the upgrade path — behind this same
+    * trait method.
+    */
+  def leaderboard(maxRd: Double): IO[List[LeaderboardEntry]] =
+    sql"""SELECT b.team, b.name, b.glicko_rating, b.glicko_rd, b.on_ladder,
+                 COALESCE(t.wins, 0), COALESCE(t.draws, 0), COALESCE(t.losses, 0)
+          FROM play.bots b
+          LEFT JOIN (
+            SELECT external_id, SUM(win) AS wins, SUM(draw) AS draws, SUM(loss) AS losses
+            FROM (
+              SELECT white_external_id AS external_id,
+                     CASE WHEN result = 1  THEN 1 ELSE 0 END AS win,
+                     CASE WHEN result = 0  THEN 1 ELSE 0 END AS draw,
+                     CASE WHEN result = -1 THEN 1 ELSE 0 END AS loss
+              FROM play.game_results WHERE rated = true AND result IS NOT NULL
+              UNION ALL
+              SELECT black_external_id,
+                     CASE WHEN result = -1 THEN 1 ELSE 0 END,
+                     CASE WHEN result = 0  THEN 1 ELSE 0 END,
+                     CASE WHEN result = 1  THEN 1 ELSE 0 END
+              FROM play.game_results WHERE rated = true AND result IS NOT NULL
+            ) sides
+            GROUP BY external_id
+          ) t ON t.external_id = 'bot:team:' || b.team || ':' || b.name
+          WHERE b.glicko_rd <= $maxRd
+          ORDER BY b.glicko_rating DESC, b.glicko_rd ASC, b.team, b.name"""
+      .query[(String, String, Double, Double, Boolean, Int, Int, Int)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (team, name, rating, rd, onLadder, wins, draws, losses) =>
+        LeaderboardEntry(team, name, rating, rd, onLadder, ResultTally(wins, draws, losses))
+      })
+
+  def resultTallyFor(externalId: String): IO[ResultTally] =
+    sql"""SELECT
+            COALESCE(SUM(CASE WHEN (white_external_id = $externalId AND result = 1)
+                               OR (black_external_id = $externalId AND result = -1) THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN (white_external_id = $externalId AND result = -1)
+                               OR (black_external_id = $externalId AND result = 1) THEN 1 ELSE 0 END), 0)
+          FROM play.game_results
+          WHERE rated = true AND result IS NOT NULL
+            AND (white_external_id = $externalId OR black_external_id = $externalId)"""
+      .query[(Int, Int, Int)]
+      .unique
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(ResultTally(_, _, _))
 
 object PgGameStore:
 

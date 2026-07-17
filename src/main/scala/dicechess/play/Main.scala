@@ -13,13 +13,14 @@ import dicechess.play.server.{
   GameRegistry,
   HealthRoutes,
   LadderScheduler,
+  LeaderboardRoutes,
   Lobby,
   LobbyRoutes,
   PlayRoutes
 }
 import dicechess.play.ingest.IngestDeliverer
 import dicechess.play.rating.RatingBatch
-import dicechess.play.store.{BotStore, GameStore, PgGameStore, RatingStore}
+import dicechess.play.store.{BotStore, GameStore, PgGameStore}
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
@@ -35,7 +36,10 @@ object Main extends IOApp.Simple:
   // and registered bot identities are durable; with INGEST_URL/INGEST_TOKEN also set, finished games are delivered to
   // analytics from the durable outbox. Without PLAY_DB_URL the server runs in-memory exactly as before (games and
   // registered bots die with the process).
-  private def appResources: Resource[IO, (GameStore, BotStore, Option[RatingStore], IO[Unit])] =
+  // The third slot is the concrete Postgres store when persistence is on: the rating batch and the public
+  // leaderboard/profile routes both need its DB-only seams (RatingStore, LeaderboardStore) and are simply absent
+  // without a database.
+  private def appResources: Resource[IO, (GameStore, BotStore, Option[PgGameStore], IO[Unit])] =
     PgGameStore.configFromEnv match
       case None           => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, None, IO.never))
       case Some(dbConfig) =>
@@ -55,8 +59,8 @@ object Main extends IOApp.Simple:
 
   def run: IO[Unit] = appResources.use(serve)
 
-  private def serve(resources: (GameStore, BotStore, Option[RatingStore], IO[Unit])): IO[Unit] =
-    val (store, botStore, ratingStore, deliverer) = resources
+  private def serve(resources: (GameStore, BotStore, Option[PgGameStore], IO[Unit])): IO[Unit] =
+    val (store, botStore, pgStore, deliverer) = resources
     for
       registry   <- GameRegistry.create(store = store)
       resumed    <- registry.resume
@@ -81,7 +85,7 @@ object Main extends IOApp.Simple:
       // The rating batch (#119) is opt-in the same way (RATING_INTERVAL_SECONDS) — and additionally needs the
       // database: without PLAY_DB_URL there is no game_results queue to drain, so a set-but-useless env var gets a
       // loud warning instead of a silent no-op.
-      ratingLoop <- (RatingBatch.configFromEnv, ratingStore) match
+      ratingLoop <- (RatingBatch.configFromEnv, pgStore) match
         case (None, _) =>
           IO.println("[play][rating] RATING_INTERVAL_SECONDS unset: no automatic rating updates")
             .as(IO.never: IO[Unit])
@@ -90,8 +94,8 @@ object Main extends IOApp.Simple:
             .Console[IO]
             .errorln("[play][rating] RATING_INTERVAL_SECONDS set but PLAY_DB_URL unset: rating batch disabled")
             .as(IO.never: IO[Unit])
-        case (Some(ratingConfig), Some(rs)) =>
-          IO.pure(new RatingBatch(botStore, rs, ratingConfig).scheduler())
+        case (Some(ratingConfig), Some(pg)) =>
+          IO.pure(new RatingBatch(botStore, pg, ratingConfig).scheduler())
       // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, and the ingest deliverer
       // are scoped to the server: they run while it runs and are cancelled with it, so a failure surfaces instead of
       // being silently dropped by a detached fiber.
@@ -103,21 +107,26 @@ object Main extends IOApp.Simple:
         ratingLoop.background
       ).tupled
         .surround:
+          // The leaderboard/profile API reads bots + game_results — DB-only seams, so without persistence the
+          // routes are simply not mounted (404), same spirit as the rating batch above.
+          val leaderboard =
+            pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
             .withPort(port)
             .withHttpWebSocketApp(wsb =>
               cors(
-                (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> BotRoutes(
-                  botAuth,
-                  challenges,
-                  botEvents,
-                  registry,
-                  lobby,
-                  mintLimit,
-                  registerLimit
-                )).orNotFound
+                (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
+                  BotRoutes(
+                    botAuth,
+                    challenges,
+                    botEvents,
+                    registry,
+                    lobby,
+                    mintLimit,
+                    registerLimit
+                  )).orNotFound
               )
             )
             .build

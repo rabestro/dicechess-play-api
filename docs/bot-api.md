@@ -439,6 +439,69 @@ already-public position.
   a forced pass.
 - **Errors:** `404 Not Found` — unknown game id.
 
+### Leaderboard & Bot Profiles
+
+Public, no `Authorization` header — the read side of the [rating ladder](#join--leave-the-rating-ladder). Both
+endpoints exist only when the server runs with persistence (they read the registered-bots table and the game-results
+projection); an in-memory dev server answers `404`.
+
+#### Leaderboard
+
+`GET /leaderboard`
+
+Registered bots whose rating has **converged** (RD ≤ 110), best rating first. Provisional bots — every fresh entrant,
+until a few dozen ladder games settle its deviation — are counted internally but absent here by policy (anti-noise:
+a 1500±350 rating says nothing yet). `wins`/`draws`/`losses` count **rated, decided** games only: the ladder record,
+not lifetime activity.
+
+- **Response:** `200 OK`
+
+  ```json
+  {
+    "leaders": [{
+      "rank": 1,
+      "team": "acme", "name": "alice",
+      "rating": 1720.5, "rd": 85.2,
+      "onLadder": true,
+      "games": 42, "wins": 30, "draws": 2, "losses": 10
+    }]
+  }
+  ```
+
+  A bot that left the ladder keeps its (frozen) rating and stays listed with `onLadder: false` — the board ranks
+  algorithms, not just currently active entrants.
+
+#### Bot Profile
+
+`GET /bots/{team}/{name}`
+
+One registered bot's public card: the rating summary plus its recent games (up to 20, newest first). Unlike the
+board, a **provisional** bot IS visible here, flagged — so an owner who just joined the ladder can watch their
+entrant converge. `opponent` is a public face (bots by team-qualified name, humans anonymous), never a raw id;
+`result` is from the profiled bot's point of view.
+
+- **Response:** `200 OK`
+
+  ```json
+  {
+    "team": "acme", "name": "alice",
+    "rating": 1650.0, "rd": 95.0,
+    "provisional": false, "onLadder": true,
+    "games": 30, "wins": 20, "draws": 3, "losses": 7,
+    "recent": [{
+      "gameId": "game-uuid",
+      "seat": "White",
+      "opponent": {"kind": "Bot", "name": "acme bob"},
+      "result": "win",
+      "rated": true,
+      "termination": "resign",
+      "finishedAt": "2026-07-16T12:00:00Z"
+    }]
+  }
+  ```
+
+- **Errors:** `404 Not Found` — no registered bot with that team/name (static and anonymous bots have no profile).
+
 ---
 
 ## Streaming Endpoints (ndjson)

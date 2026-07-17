@@ -272,3 +272,36 @@ trait RatingStore:
     * forever.
     */
   def markRatingApplied(gameId: GameId): IO[Unit]
+
+/** A bot's rated, decided W-D-L record from `game_results` (undecided/casual games are excluded — this is the ladder
+  * record, not a lifetime activity counter).
+  */
+final case class ResultTally(wins: Int, draws: Int, losses: Int):
+  def games: Int = wins + draws + losses
+
+object ResultTally:
+  val Empty: ResultTally = ResultTally(0, 0, 0)
+
+/** One public leaderboard row's worth of state: the bot, its rating, and its rated record. */
+final case class LeaderboardEntry(
+    team: String,
+    name: String,
+    rating: Double,
+    rd: Double,
+    onLadder: Boolean,
+    tally: ResultTally
+)
+
+/** Read seam for the public leaderboard/profile API (D.2, #103) — Postgres only, like [[GameResultsStore]]: the queries
+  * join `bots` with aggregates over `game_results`, neither of which exists in the in-memory mode (the leaderboard
+  * endpoints are simply not mounted without persistence).
+  */
+trait LeaderboardStore:
+  /** Every registered bot whose rating has converged (`glicko_rd <= maxRd`), best rating first, with its rated W-D-L
+    * record. Provisional bots (above the threshold) are the caller's to hide — which this filter does — per the ladder
+    * policy (#119): counted internally, invisible publicly until the deviation settles.
+    */
+  def leaderboard(maxRd: Double): IO[List[LeaderboardEntry]]
+
+  /** The rated, decided W-D-L record of one participant (either seat), for the profile endpoint. */
+  def resultTallyFor(externalId: String): IO[ResultTally]

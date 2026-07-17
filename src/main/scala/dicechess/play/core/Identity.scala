@@ -36,3 +36,14 @@ enum Principal:
     case Guest(id)       => s"guest:$id"
     case User(id)        => s"user:$id"
     case Bot(team, name) => s"bot:team:$team:$name"
+
+object Principal:
+  /** The inverse of [[Principal.externalId]] for registered-bot ids — `bot:team:<team>:<name>` and nothing else.
+    * Colocated with the format so the two can't drift. Safe to split on `:` because team and name are colon-free slugs
+    * (the issuance invariant above). `None` for every other identity shape (guests, users, the legacy `bot:<algorithm>`
+    * ids analytics knows).
+    */
+  def fromBotExternalId(externalId: String): Option[Principal.Bot] =
+    externalId.split(':') match
+      case Array("bot", "team", team, name) if team.nonEmpty && name.nonEmpty => Some(Principal.Bot(team, name))
+      case _                                                                  => None

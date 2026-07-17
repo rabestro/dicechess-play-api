@@ -303,6 +303,72 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("the leaderboard lists converged bots best-first with their rated records and hides provisional ones (#103)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val strong: Principal.Bot = Principal.Bot("lb-suite", "strong")
+        val weak: Principal.Bot   = Principal.Bot("lb-suite", "weak")
+        for
+          _ <- db.register("lb-suite", "strong", "hash-lb-strong")
+          _ <- db.register("lb-suite", "weak", "hash-lb-weak")
+          _ <- db.register("lb-suite", "fresh", "hash-lb-fresh") // untouched: RD 350 = provisional
+          _ <- db.setOnLadder("lb-suite", "strong", true)
+          // Converge both veterans' ratings. The stamped game id is random and matches no game_results row, so the
+          // stamp inside applyRatingUpdate is a no-op — this is purely "set two bots' glicko state atomically".
+          fakeId <- GameId.random
+          _      <- db.applyRatingUpdate(
+            fakeId,
+            strong,
+            dicechess.play.rating.Glicko(1700.0, 80.0, 0.05),
+            weak,
+            dicechess.play.rating.Glicko(1400.0, 90.0, 0.05)
+          )
+          // The rated record: strong beats weak once per colour, plus one draw; one casual win must not count.
+          idA <- GameId.random
+          _   <- db.save(idA, endedResultFixture(strong, weak, rated = true)) // strong wins as White
+          idB <- GameId.random
+          _   <- db.save(
+            idB,
+            endedResultFixture(weak, strong, rated = true, result = GameResult.Win(Side.Black))
+          ) // strong wins as Black
+          idC   <- GameId.random
+          _     <- db.save(idC, endedResultFixture(strong, weak, rated = true, result = GameResult.Draw))
+          idD   <- GameId.random
+          _     <- db.save(idD, endedResultFixture(strong, weak, rated = false)) // casual: excluded from the tally
+          board <- db.leaderboard(maxRd = 110.0).map(_.filter(_.team == "lb-suite"))
+        yield
+          assertEquals(board.map(_.name), List("strong", "weak"), "best rating first; provisional 'fresh' hidden")
+          val strongRow = board.head
+          assertEquals(strongRow.tally, ResultTally(wins = 2, draws = 1, losses = 0))
+          assert(strongRow.onLadder, "the on-ladder flag must ride along")
+          assertEquals(board(1).tally, ResultTally(wins = 0, draws = 1, losses = 2))
+          assert(!board(1).onLadder)
+      }
+    }
+
+  test("resultTallyFor counts rated decided games from either seat, and is Empty for a stranger (#103)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val a = Principal.Bot("lb-tally", "a")
+        val b = Principal.Bot("lb-tally", "b")
+        for
+          idA <- GameId.random
+          _   <- db.save(idA, endedResultFixture(a, b, rated = true)) // a wins as White
+          idB <- GameId.random
+          _   <- db.save(idB, endedResultFixture(b, a, rated = true, result = GameResult.Win(Side.Black))) // a as Black
+          idC <- GameId.random
+          _        <- db.save(idC, endedResultFixture(a, b, rated = false)) // casual: excluded
+          tallyA   <- db.resultTallyFor(a.externalId)
+          tallyB   <- db.resultTallyFor(b.externalId)
+          stranger <- db.resultTallyFor("bot:team:lb-tally:nobody")
+        yield
+          assertEquals(tallyA, ResultTally(wins = 2, draws = 0, losses = 0))
+          assertEquals(tallyA.games, 2)
+          assertEquals(tallyB, ResultTally(wins = 0, draws = 0, losses = 2))
+          assertEquals(stranger, ResultTally.Empty)
+      }
+    }
+
   test("a live game — its fixed roll included — survives a crash and plays on with the same commitment"):
     withContainers { pg =>
       store(pg).use { db =>
