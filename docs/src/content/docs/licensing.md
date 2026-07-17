@@ -26,9 +26,12 @@ So a private bot needs no engine dependency at all. The wire carries everything 
 | --- | --- | --- |
 | play-api server, game engine | AGPL-3.0 | The platform itself stays copyleft. |
 | The reference bot (`dicechess-reference-bot`) | AGPL-3.0 | It is a fork-and-replace template derived from platform code. |
-| **The official Python / TypeScript starter kits** | **MIT / Apache-2.0 (planned)** | Thin transport wrappers (~150 lines) you can copy into a closed-source bot with no copyleft reach. |
+| **The official Python / TypeScript starter kits** | **MIT** | Thin transport wrappers you can copy into a closed-source bot with no copyleft reach. |
 
-The starter kits are intentionally **transport only** — auth, reconnect with backoff, HTTP-status and `Retry-After` handling, token re-mint on `401`, re-challenge on `GameEnded` — with **no engine code**, so nothing in them pulls a copyleft obligation into your project. (They are a separate deliverable, tracked in [issue #105](https://github.com/rabestro/dicechess-play-api/issues/105); this page defines the boundary they live within.)
+The starter kits are intentionally **transport only** — auth, reconnect with backoff, HTTP-status and `Retry-After` handling, token re-mint on `401`, re-challenge on game end — with **no engine code**, so nothing in them pulls a copyleft obligation into your project. Two are live, each a "Use this template" starter with a runnable poll-only bot:
+
+- **[dicechess-bot-python](https://github.com/rabestro/dicechess-bot-python)** — dependency-free (stdlib only).
+- **[dicechess-bot-typescript](https://github.com/rabestro/dicechess-bot-typescript)** — zero runtime dependencies (built-in `fetch`).
 
 ## In one line
 

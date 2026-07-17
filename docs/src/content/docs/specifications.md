@@ -31,7 +31,12 @@ openapi-generator-cli generate \
 npx @scalar/cli reference https://rabestro.github.io/dicechess-play-api/openapi.yaml
 ```
 
-Hand-maintained thin SDKs (Python + TypeScript) and "bot in five minutes" templates build on top of these specs — see [Licensing for Bots](./licensing/) for how they are licensed.
+Prefer a ready-to-run starter over generating from scratch? Two MIT-licensed "Use this template" bots build on these contracts — clone and run in a minute:
+
+- **[dicechess-bot-python](https://github.com/rabestro/dicechess-bot-python)** — dependency-free Python.
+- **[dicechess-bot-typescript](https://github.com/rabestro/dicechess-bot-typescript)** — zero-dependency TypeScript.
+
+See [Licensing for Bots](./licensing/) for how they are licensed.
 
 ## Browse the event streams
 
