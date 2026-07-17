@@ -1,7 +1,7 @@
 package dicechess.play.server
 
-import cats.effect.{IO, Ref}
-import cats.effect.std.Console
+import cats.effect.{IO, Ref, Resource}
+import cats.effect.std.{Console, Supervisor}
 import cats.syntax.all.*
 import dicechess.play.core.{GameEvent, GameId, GameStatus, Principal, PublicGameState, Seat}
 import dicechess.play.game.GameRoom
@@ -59,7 +59,8 @@ final class Webhooks private (
     client: Client[IO],
     checkUrl: String => IO[Either[String, Uri]],
     config: Webhooks.Config,
-    attached: Ref[IO, Set[(GameId, Seat)]]
+    attached: Ref[IO, Set[(GameId, Seat)]],
+    runners: Supervisor[IO]
 ):
   import Webhooks.*
 
@@ -119,10 +120,13 @@ final class Webhooks private (
                   store.get(bot.team, bot.name).flatMap {
                     case None    => IO.unit
                     case Some(_) =>
+                      // Supervised, not `.start`-detached (review): the runners belong to the service's own
+                      // lifecycle, so releasing the `Webhooks` resource cancels every in-flight runner instead
+                      // of leaving them running after shutdown — the same "nothing silently detached" doctrine
+                      // the other background loops follow.
                       attached.update(_ + ((id, seat))) *>
-                        run(id, room, seat, bot)
-                          .guarantee(attached.update(_ - ((id, seat))))
-                          .start
+                        runners
+                          .supervise(run(id, room, seat, bot).guarantee(attached.update(_ - ((id, seat)))))
                           .void
                   }
             case _ => IO.unit
@@ -226,19 +230,28 @@ final class Webhooks private (
           client
             .run(request)
             .use { response =>
+              // One byte past the cap is read so an oversized body is REJECTED, not silently truncated
+              // (review): a truncated prefix that happens to parse must never pass for the real answer.
               response.body
-                .take(MaxResponseBytes)
-                .through(fs2.text.utf8.decode)
+                .take(MaxResponseBytes + 1)
                 .compile
-                .string
-                .map(text => (response.status.code, text))
+                .to(Array)
+                .map(bytes => (response.status.code, bytes))
             }
             .timeout(timeout)
             .attempt
-            .map:
-              case Right((200, text)) => Right(text)
-              case Right((code, _))   => Left(s"endpoint answered HTTP $code")
-              case Left(error)        => Left(s"delivery failed: ${error.toString.take(200)}")
+            .flatMap:
+              case Right((200, bytes)) if bytes.length > MaxResponseBytes =>
+                IO.pure(Left("endpoint answered with an oversized body"))
+              case Right((200, bytes)) => IO.pure(Right(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)))
+              case Right((code, _))    => IO.pure(Left(s"endpoint answered HTTP $code"))
+              case Left(error)         =>
+                // The transport detail (exception messages embed resolved addresses and distinguish refused
+                // from timed-out) goes to the server log only; the caller-visible reason stays generic so a
+                // 422 can't be used as a connectivity oracle against internal hosts (review).
+                Console[IO]
+                  .errorln(s"[play][webhook] POST failed: ${error.toString.take(200)}")
+                  .as(Left("could not reach the endpoint"))
         }
 
 object Webhooks:
@@ -270,11 +283,18 @@ object Webhooks:
     */
   def configFromEnv: Option[Config] = Config.fromValues(sys.env.get("WEBHOOK_TIMEOUT_SECONDS"))
 
+  /** A `Resource` because the service OWNS its per-game runner fibers (a `Supervisor`): releasing it cancels every
+    * in-flight runner, so webhook delivery can never outlive the server that started it.
+    */
   def create(
       registry: GameRegistry,
       store: WebhookStore,
       client: Client[IO],
       config: Config,
       checkUrl: String => IO[Either[String, Uri]] = WebhookSecurity.checkPublicHttps
-  ): IO[Webhooks] =
-    Ref.of[IO, Set[(GameId, Seat)]](Set.empty).map(new Webhooks(registry, store, client, checkUrl, config, _))
+  ): Resource[IO, Webhooks] =
+    Supervisor[IO](await = false).evalMap { runners =>
+      Ref
+        .of[IO, Set[(GameId, Seat)]](Set.empty)
+        .map(new Webhooks(registry, store, client, checkUrl, config, _, runners))
+    }

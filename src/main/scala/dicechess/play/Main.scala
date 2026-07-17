@@ -99,34 +99,36 @@ object Main extends IOApp.Simple:
             .as(IO.never: IO[Unit])
         case (Some(ratingConfig), Some(pg)) =>
           IO.pure(new RatingBatch(botStore, pg, ratingConfig).scheduler())
-      // Webhook push (F.2, #104) is opt-in the same way (WEBHOOK_TIMEOUT_SECONDS). Unlike the rating batch it does
-      // NOT require the database: in-memory mode registers webhooks for the process's lifetime, matching how
-      // registered-bot identities behave there. The service is threaded to the routes as an Option — absent, the
-      // /bot/webhook endpoints answer 503 and no delivery loop runs.
-      webhookParts <- Webhooks.configFromEnv match
-        case None =>
-          IO.println("[play][webhook] WEBHOOK_TIMEOUT_SECONDS unset: webhook push disabled")
-            .as((None: Option[Webhooks], IO.never: IO[Unit]))
-        case Some(webhookConfig) =>
-          pgStore
-            .fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore))
-            .flatMap(webhookStore => Webhooks.create(registry, webhookStore, httpClient, webhookConfig))
-            .map(service => (Some(service): Option[Webhooks], service.loop.void))
-      (webhookService, webhookLoop) = webhookParts
       // Registration triggers an outbound verification POST, so it shares the strict per-IP budget of /bot/register.
       webhookLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
+      // Webhook push (F.2, #104) is opt-in the same way (WEBHOOK_TIMEOUT_SECONDS). Unlike the rating batch it does
+      // NOT require the database: in-memory mode registers webhooks for the process's lifetime, matching how
+      // registered-bot identities behave there. The service is a Resource because it owns its per-game runner
+      // fibers (a Supervisor) — releasing it cancels them all. It is threaded to the routes as an Option — absent,
+      // the /bot/webhook endpoints answer 503 and no delivery loop runs.
+      webhookResource = Webhooks.configFromEnv match
+        case None =>
+          Resource
+            .eval(IO.println("[play][webhook] WEBHOOK_TIMEOUT_SECONDS unset: webhook push disabled"))
+            .as(None: Option[Webhooks])
+        case Some(webhookConfig) =>
+          Resource
+            .eval(pgStore.fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore)))
+            .flatMap(webhookStore => Webhooks.create(registry, webhookStore, httpClient, webhookConfig))
+            .map(Some(_))
       // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, the webhook loop, and the
       // ingest deliverer are scoped to the server: they run while it runs and are cancelled with it, so a failure
       // surfaces instead of being silently dropped by a detached fiber.
-      _ <- (
-        deliverer.background,
-        lobby.sweeper().background,
-        challenges.sweeper().background,
-        ladderLoop.background,
-        ratingLoop.background,
-        webhookLoop.background
-      ).tupled
-        .surround:
+      _ <- webhookResource.use { webhookService =>
+        val loops = (
+          deliverer.background,
+          lobby.sweeper().background,
+          challenges.sweeper().background,
+          ladderLoop.background,
+          ratingLoop.background,
+          webhookService.fold(IO.never: IO[Unit])(_.loop.void).background
+        ).tupled
+        loops.surround {
           // The leaderboard/profile API reads bots + game_results — DB-only seams, so without persistence the
           // routes are simply not mounted (404), same spirit as the rating batch above.
           val leaderboard =
@@ -152,6 +154,8 @@ object Main extends IOApp.Simple:
             )
             .build
             .useForever
+        }
+      }
     yield ()
 
   /** Per-IP hourly budget for `POST /bot/register` — a team registers a handful of identities, not thirty. */

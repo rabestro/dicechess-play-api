@@ -1,6 +1,6 @@
 package dicechess.play.server
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import dicechess.play.store.{BotStore, GameStore, WebhookStore}
 import io.circe.Json
 import io.circe.parser.decode
@@ -35,24 +35,24 @@ class WebhookRoutesSuite extends CatsEffectSuite:
 
   private def fixture(
       endpoint: HttpApp[IO] = echoEndpoint,
-      checkUrl: String => IO[Either[String, Uri]] = null, // null → allowAll; kept overridable for the SSRF case
+      checkUrl: Option[String => IO[Either[String, Uri]]] = None, // None → allowAll; Some for the SSRF case
       limit: Int = 100
-  ): IO[(org.http4s.HttpRoutes[IO], String, String, String)] =
+  ): Resource[IO, (org.http4s.HttpRoutes[IO], String, String, String)] =
     for
-      bots     <- BotStore.inMemory
-      auth     <- BotAuth.fromSpec("house|greedy|static-token", bots)
-      registry <- GameRegistry.create(store = GameStore.noop)
-      store    <- WebhookStore.inMemory
+      bots     <- Resource.eval(BotStore.inMemory)
+      auth     <- Resource.eval(BotAuth.fromSpec("house|greedy|static-token", bots))
+      registry <- Resource.eval(GameRegistry.create(store = GameStore.noop))
+      store    <- Resource.eval(WebhookStore.inMemory)
       webhooks <- Webhooks.create(
         registry,
         store,
         Client.fromHttpApp(endpoint),
         Webhooks.Config(timeout = 2.seconds),
-        Option(checkUrl).getOrElse(allowAll)
+        checkUrl.getOrElse(allowAll)
       )
-      limiter    <- AnonMintLimiter.create(limit = limit)
-      registered <- auth.register("hooks", "pusher").map(_.toOption.get._1)
-      anon       <- auth.mintAnon(None).map(_._1)
+      limiter    <- Resource.eval(AnonMintLimiter.create(limit = limit))
+      registered <- Resource.eval(auth.register("hooks", "pusher").map(_.toOption.get._1))
+      anon       <- Resource.eval(auth.mintAnon(None).map(_._1))
     yield (WebhookRoutes(auth, Some(webhooks), limiter), registered, anon, "static-token")
 
   private def request(method: Method, token: Option[String], body: Option[Json] = None): Request[IO] =
@@ -78,7 +78,7 @@ class WebhookRoutesSuite extends CatsEffectSuite:
       assertEquals(deleted.status, Status.ServiceUnavailable)
 
   test("no token is 401; anonymous and static bots are 403 — webhooks are a registered-bot perk"):
-    fixture().flatMap { (routes, _, anonToken, staticToken) =>
+    fixture().use { (routes, _, anonToken, staticToken) =>
       for
         unauthed <- routes.orNotFound.run(request(Method.POST, None, Some(goodBody)))
         anon     <- routes.orNotFound.run(request(Method.POST, Some(anonToken), Some(goodBody)))
@@ -90,7 +90,7 @@ class WebhookRoutesSuite extends CatsEffectSuite:
     }
 
   test("register → inspect → delete: 201 with the one-time secret, 200 info without it, 204, then 404s"):
-    fixture().flatMap { (routes, token, _, _) =>
+    fixture().use { (routes, token, _, _) =>
       for
         created <- routes.orNotFound.run(request(Method.POST, Some(token), Some(goodBody)))
         body    <- created.as[Json]
@@ -113,7 +113,7 @@ class WebhookRoutesSuite extends CatsEffectSuite:
 
   test("a failed handshake is 422 with the reason, and a malformed body is 400"):
     val wrongNonce = HttpApp[IO](_ => Ok(Json.obj("nonce" -> "different".asJson)))
-    fixture(endpoint = wrongNonce).flatMap { (routes, token, _, _) =>
+    fixture(endpoint = wrongNonce).use { (routes, token, _, _) =>
       for
         refused <- routes.orNotFound.run(request(Method.POST, Some(token), Some(goodBody)))
         reason  <- refused.bodyText.compile.string
@@ -125,7 +125,7 @@ class WebhookRoutesSuite extends CatsEffectSuite:
     }
 
   test("the production URL policy turns an SSRF attempt into a 422 before any POST"):
-    fixture(checkUrl = WebhookSecurity.checkPublicHttps).flatMap { (routes, token, _, _) =>
+    fixture(checkUrl = Some(WebhookSecurity.checkPublicHttps)).use { (routes, token, _, _) =>
       val privateTarget = Json.obj("url" -> "https://169.254.169.254/latest/meta-data".asJson)
       for
         refused <- routes.orNotFound.run(request(Method.POST, Some(token), Some(privateTarget)))
@@ -136,7 +136,7 @@ class WebhookRoutesSuite extends CatsEffectSuite:
     }
 
   test("registration draws from a per-IP budget: the attempt after the limit is 429 with Retry-After"):
-    fixture(limit = 2).flatMap { (routes, token, _, _) =>
+    fixture(limit = 2).use { (routes, token, _, _) =>
       val post = request(Method.POST, Some(token), Some(goodBody))
       for
         first   <- routes.orNotFound.run(post)

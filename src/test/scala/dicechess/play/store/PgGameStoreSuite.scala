@@ -172,7 +172,9 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       store(pg).use { db =>
         val at = java.time.Instant.parse("2026-07-17T12:00:00Z")
         db.put(BotWebhook("webhook-suite", "never-registered", "https://fn.example", "s", at)).attempt.map {
-          case Left(_)   => () // FK violation, as designed
+          // Precisely the FK violation (SQLSTATE 23503), not just any store failure (review).
+          case Left(e: java.sql.SQLException) => assertEquals(e.getSQLState, "23503", e.toString)
+          case Left(other)                    => fail(s"expected a foreign-key SQLException, got $other")
           case Right(()) => fail("a webhook for an unregistered identity must be rejected by the FK")
         }
       }

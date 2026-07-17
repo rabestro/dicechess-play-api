@@ -70,6 +70,21 @@ class WebhookSecuritySuite extends CatsEffectSuite:
       )
     )
 
+  test("special-use ranges that a modern kernel can still route are rejected too (review)"):
+    allRejected(
+      List(
+        "https://0.0.0.1/hook",      // 0.0.0.0/8 — behaves as local on Linux
+        "https://192.0.0.1/hook",    // 192.0.0.0/24 IETF protocol assignments
+        "https://192.0.2.1/hook",    // TEST-NET-1
+        "https://198.51.100.1/hook", // TEST-NET-2
+        "https://203.0.113.1/hook",  // TEST-NET-3
+        "https://198.18.0.1/hook",   // benchmarking 198.18.0.0/15
+        "https://198.19.255.1/hook", // benchmarking, upper half
+        "https://240.0.0.1/hook",    // 240.0.0.0/4 — routable unicast on Linux since 2019
+        "https://[2001:db8::1]/hook" // IPv6 documentation range
+      )
+    )
+
   test("a public IP literal passes and keeps the parsed Uri"):
     WebhookSecurity
       .checkPublicHttps("https://1.1.1.1/hook")

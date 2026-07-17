@@ -43,7 +43,7 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       store: WebhookStore,
       client: Client[IO],
       checkUrl: String => IO[Either[String, Uri]] = allowAll
-  ): IO[Webhooks] = Webhooks.create(registry, store, client, config, checkUrl)
+  ): cats.effect.Resource[IO, Webhooks] = Webhooks.create(registry, store, client, config, checkUrl)
 
   private val seed = "0123456789abcdef" // the 16-char minimum a seat must contribute
 
@@ -102,9 +102,9 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       secrets   <- Ref.of[IO, List[String]](Nil)
       delivered <- Ref.of[IO, Int](0)
       badSig    <- Ref.of[IO, Int](0)
-      webhooks  <- service(registry, store, Client.fromHttpApp(botEndpoint(secrets, registry, delivered, badSig)))
       bot: Principal.Bot = Principal.Bot("hooks", "alpha")
-      result <- webhooks.register(bot, "https://bot.example/hook")
+      result <- service(registry, store, Client.fromHttpApp(botEndpoint(secrets, registry, delivered, badSig)))
+        .use(_.register(bot, "https://bot.example/hook"))
       stored <- store.get("hooks", "alpha")
     yield
       val hook = result.getOrElse(fail(s"registration must succeed, got $result"))
@@ -119,8 +119,8 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       registry <- GameRegistry.create(store = GameStore.noop)
       store    <- WebhookStore.inMemory
       bot: Principal.Bot = Principal.Bot("hooks", "alpha")
-      first  <- service(registry, store, Client.fromHttpApp(wrongNonce)).flatMap(_.register(bot, "https://x.example"))
-      second <- service(registry, store, Client.fromHttpApp(noJson)).flatMap(_.register(bot, "https://x.example"))
+      first  <- service(registry, store, Client.fromHttpApp(wrongNonce)).use(_.register(bot, "https://x.example"))
+      second <- service(registry, store, Client.fromHttpApp(noJson)).use(_.register(bot, "https://x.example"))
       stored <- store.get("hooks", "alpha")
     yield
       assert(first.left.exists(_.contains("nonce")), s"wrong echo must fail with the reason, got $first")
@@ -132,9 +132,10 @@ class WebhooksSuite extends munit.CatsEffectSuite:
     for
       registry <- GameRegistry.create(store = GameStore.noop)
       store    <- WebhookStore.inMemory
-      webhooks <- service(registry, store, dead)
-      result   <- webhooks.register(Principal.Bot("hooks", "alpha"), "https://gone.example/hook")
-      stored   <- store.get("hooks", "alpha")
+      result   <- service(registry, store, dead).use(
+        _.register(Principal.Bot("hooks", "alpha"), "https://gone.example/hook")
+      )
+      stored <- store.get("hooks", "alpha")
     yield
       assert(result.isLeft)
       assertEquals(stored, None)
@@ -145,9 +146,11 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       store    <- WebhookStore.inMemory
       calls    <- Ref.of[IO, Int](0)
       counting = Client.fromHttpApp(HttpApp[IO](_ => calls.update(_ + 1) *> Ok("")))
-      webhooks <- Webhooks.create(registry, store, counting, config) // production checkUrl
-      result   <- webhooks.register(Principal.Bot("hooks", "alpha"), "https://192.168.10.3/hook")
-      posted   <- calls.get
+      // production checkUrl by default
+      result <- Webhooks
+        .create(registry, store, counting, config)
+        .use(_.register(Principal.Bot("hooks", "alpha"), "https://192.168.10.3/hook"))
+      posted <- calls.get
     yield
       assert(result.left.exists(_.contains("non-public")), s"expected the SSRF reason, got $result")
       assertEquals(posted, 0, "the guard must reject BEFORE any request is made")
@@ -176,9 +179,8 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       for
         registry <- GameRegistry.create(store = GameStore.noop)
         store    <- WebhookStore.inMemory
-        webhooks <- service(registry, store, client)
         url = s"http://127.0.0.1:${server.address.getPort}/hook"
-        result <- webhooks.register(Principal.Bot("hooks", "alpha"), url)
+        result <- service(registry, store, client).use(_.register(Principal.Bot("hooks", "alpha"), url))
       yield assert(result.isRight, s"real-socket handshake must succeed, got $result")
     }
 
@@ -191,18 +193,23 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       secrets   <- Ref.of[IO, List[String]](Nil)
       delivered <- Ref.of[IO, Int](0)
       badSig    <- Ref.of[IO, Int](0)
-      webhooks  <- service(registry, store, Client.fromHttpApp(botEndpoint(secrets, registry, delivered, badSig)))
       alpha: Principal.Bot = Principal.Bot("hooks", "alpha")
       beta: Principal.Bot  = Principal.Bot("hooks", "beta")
-      hookA <- webhooks.register(alpha, "https://bots.example/hook").map(_.toOption.get)
-      hookB <- webhooks.register(beta, "https://bots.example/hook").map(_.toOption.get)
-      _     <- secrets.set(List(hookA.secret, hookB.secret))
-      made  <- registry.create(alpha, beta, TimeControl.Unlimited)
-      (_, room) = made.toOption.get
-      _        <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
-      _        <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
-      _        <- webhooks.attachSweep // both seats get runners; the game then drives itself
-      over     <- room.result.timeoutTo(150.seconds, IO.raiseError(new RuntimeException("webhook game never ended")))
+      // The service stays open for the whole game: its runners are supervised by the Resource now.
+      over <- service(registry, store, Client.fromHttpApp(botEndpoint(secrets, registry, delivered, badSig)))
+        .use: webhooks =>
+          for
+            hookA <- webhooks.register(alpha, "https://bots.example/hook").map(_.toOption.get)
+            hookB <- webhooks.register(beta, "https://bots.example/hook").map(_.toOption.get)
+            _     <- secrets.set(List(hookA.secret, hookB.secret))
+            made  <- registry.create(alpha, beta, TimeControl.Unlimited)
+            (_, room) = made.toOption.get
+            _    <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
+            _    <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
+            _    <- webhooks.attachSweep // both seats get runners; the game then drives itself
+            over <- room.result
+              .timeoutTo(150.seconds, IO.raiseError(new RuntimeException("webhook game never ended")))
+          yield over
       turns    <- delivered.get
       rejected <- badSig.get
     yield
@@ -218,7 +225,6 @@ class WebhooksSuite extends munit.CatsEffectSuite:
     for
       registry <- GameRegistry.create(store = GameStore.noop)
       store    <- WebhookStore.inMemory
-      webhooks <- service(registry, store, dead)
       silent = Principal.Bot("hooks", "silent")
       // Registered directly at the store seam: `register` would (rightly) refuse a dead endpoint's handshake,
       // and this test is about a webhook that DIED AFTER registration.
@@ -228,35 +234,45 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       (_, room) = made.toOption.get
       _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
       driver = BotConnection(opponent, Seat.Black, BotRegistry.getAlgorithm("greedy").get)
-      over <- driver
-        .run(room)
-        .background
-        .use: _ =>
-          webhooks.attachSweep *>
-            room.result.timeoutTo(
-              20.seconds,
-              IO.raiseError(new RuntimeException("the room hung instead of flagging the dead webhook"))
-            )
+      over <- service(registry, store, dead).use: webhooks =>
+        driver
+          .run(room)
+          .background
+          .use: _ =>
+            webhooks.attachSweep *>
+              room.result.timeoutTo(
+                20.seconds,
+                IO.raiseError(new RuntimeException("the room hung instead of flagging the dead webhook"))
+              )
     yield
       assertEquals(over.termination, Termination.Timeout)
       assertEquals(over.result, GameResult.Win(Side.Black), "the webhook seat (White) must lose on time")
 
   test("garbage and non-200 responses submit nothing — the game stays untouched for the clock to decide"):
-    val garbage = Client.fromHttpApp(HttpApp[IO](_ => Ok("this is not a move")))
     for
       registry <- GameRegistry.create(store = GameStore.noop)
       store    <- WebhookStore.inMemory
-      webhooks <- service(registry, store, garbage)
-      noisy = Principal.Bot("hooks", "noisy")
+      // The endpoint signals when it has answered, so the assertion waits for the delivery to have actually
+      // happened instead of sleeping and racing it (review).
+      answered <- cats.effect.Deferred[IO, Unit]
+      garbage = Client.fromHttpApp(HttpApp[IO](_ => answered.complete(()).attempt *> Ok("this is not a move")))
+      noisy   = Principal.Bot("hooks", "noisy")
       _    <- store.put(BotWebhook("hooks", "noisy", "https://noise.example/hook", "s" * 64, Instant.EPOCH))
       made <- registry.create(noisy, Principal.Bot("acme", "idle"), TimeControl.Unlimited)
       (_, room) = made.toOption.get
-      _     <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
-      _     <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
-      _     <- webhooks.attachSweep
-      _     <- IO.sleep(500.millis)                        // ample time for the (in-process) delivery round trip
-      state <- room.snapshot
-      _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
+      state <- service(registry, store, garbage).use: webhooks =>
+        for
+          _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
+          _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
+          _ <- webhooks.attachSweep
+          // Generous but bounded: under the full `check` this runs with scoverage instrumentation AND alongside
+          // the testcontainers suites, so the delivery fiber can be starved well past a tight bound without any
+          // logic being wrong — 30s tolerates that while still failing loudly if delivery truly never happens.
+          _ <- answered.get
+            .timeoutTo(30.seconds, IO.raiseError(new RuntimeException("delivery never reached the endpoint")))
+          state <- room.snapshot
+          _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
+        yield state
     yield
       assertEquals(state.status, GameStatus.Active)
       assert(state.dicePending, "an unparseable answer must leave the pending roll unanswered")

@@ -57,20 +57,38 @@ object WebhookSecurity:
               IO.blocking(InetAddress.getAllByName(host)).attempt.map {
                 case Left(_)          => Left(s"host does not resolve: $host")
                 case Right(addresses) =>
-                  addresses.find(a => !isPublic(a)) match
-                    case Some(bad) => Left(s"host resolves to a non-public address: ${bad.getHostAddress}")
-                    case None      => Right(uri)
+                  // The refusal deliberately does NOT name the offending address (review): with a split-horizon
+                  // resolver, echoing it would let a registered caller probe internal DNS names through the 422
+                  // and learn private addresses one registration at a time.
+                  if addresses.forall(isPublic) then Right(uri)
+                  else Left("host resolves to a non-public address")
               }
 
   /** Whether an address is routable-public. Java's `isSiteLocalAddress` covers RFC1918 for IPv4 (and the deprecated
-    * IPv6 fec0::/10); IPv6 ULA (fc00::/7), CGNAT (100.64.0.0/10) and the limited broadcast address need their own
-    * checks. IPv4-mapped IPv6 literals need none: `InetAddress` parses `::ffff:a.b.c.d` into an `Inet4Address`, so they
-    * take the IPv4 branch naturally.
+    * IPv6 fec0::/10); the rest of the special-use registries need their own checks — including ranges that LOOK
+    * unroutable but aren't on a modern Linux host (review): the kernel happily treats 0.0.0.0/8 as local and, since
+    * 2019, routes 240.0.0.0/4 as ordinary unicast, so "reserved" is not "unreachable". IPv4-mapped IPv6 literals need
+    * no case of their own: `InetAddress` parses `::ffff:a.b.c.d` into an `Inet4Address`, so they take the IPv4 branch
+    * naturally.
     */
   private[server] def isPublic(address: InetAddress): Boolean =
-    val bytes       = address.getAddress
-    val uniqueLocal = bytes.length == 16 && (bytes(0) & 0xfe) == 0xfc
-    val cgnat       = bytes.length == 4 && (bytes(0) & 0xff) == 100 && (bytes(1) & 0xc0) == 64
-    val broadcast   = bytes.length == 4 && bytes.forall(_ == -1)
+    val bytes          = address.getAddress
+    def b(i: Int): Int = bytes(i) & 0xff
+    val v4Special      = bytes.length == 4 && {
+      val zeroNet      = b(0) == 0                                  // 0.0.0.0/8 — local on Linux
+      val cgnat        = b(0) == 100 && (b(1) & 0xc0) == 64         // 100.64.0.0/10
+      val ietfProtocol = b(0) == 192 && b(1) == 0 && b(2) == 0      // 192.0.0.0/24
+      val testNets     = (b(0) == 192 && b(1) == 0 && b(2) == 2) || // 192.0.2.0/24 TEST-NET-1
+        (b(0) == 198 && b(1) == 51 && b(2) == 100) || // 198.51.100.0/24 TEST-NET-2
+        (b(0) == 203 && b(1) == 0 && b(2) == 113) // 203.0.113.0/24 TEST-NET-3
+      val benchmarking = b(0) == 198 && (b(1) & 0xfe) == 18         // 198.18.0.0/15
+      val classE       = (b(0) & 0xf0) == 0xf0                      // 240.0.0.0/4, broadcast included
+      zeroNet || cgnat || ietfProtocol || testNets || benchmarking || classE
+    }
+    val v6Special = bytes.length == 16 && {
+      val uniqueLocal   = (b(0) & 0xfe) == 0xfc                                        // fc00::/7 ULA
+      val documentation = b(0) == 0x20 && b(1) == 0x01 && b(2) == 0x0d && b(3) == 0xb8 // 2001:db8::/32
+      uniqueLocal || documentation
+    }
     !(address.isLoopbackAddress || address.isAnyLocalAddress || address.isLinkLocalAddress ||
-      address.isSiteLocalAddress || address.isMulticastAddress || uniqueLocal || cgnat || broadcast)
+      address.isSiteLocalAddress || address.isMulticastAddress || v4Special || v6Special)

@@ -650,7 +650,8 @@ Webhooks are enabled per server by the `WEBHOOK_TIMEOUT_SECONDS` env var (operat
 per-turn wait is additionally bounded by the mover's remaining clock). When the feature is off, every endpoint
 below answers `503 Service Unavailable`.
 
-#### Register a Webhook
+### Register a Webhook
+
 `POST /bot/webhook`
 
 - **Request:**
@@ -676,14 +677,15 @@ no game data is ever sent to an unverified URL.
   - `429 Too Many Requests` — per-IP registration budget (the handshake makes the server POST outward).
   - `503 Service Unavailable` — webhooks disabled on this server.
 
-#### Inspect / Remove the Webhook
+### Inspect / Remove the Webhook
+
 `GET /bot/webhook` · `DELETE /bot/webhook`
 
 `GET` answers `200 {"url": …, "verifiedAt": "2026-07-17T12:00:00Z"}` (the secret is never shown again) or `404` if
 none is registered. `DELETE` answers `204` and deliveries stop at the **next turn** — mid-game included, the games
 themselves keep running (and keep charging your clock).
 
-#### The Turn Delivery
+### The Turn Delivery
 
 When it is your bot's turn in any of its games, the server POSTs **one** request to your URL:
 
@@ -704,7 +706,7 @@ round trip.
 
 Every delivery (the verification handshake included) carries two headers:
 
-```
+```text
 X-DiceChess-Timestamp: 1752750000
 X-DiceChess-Signature: <hex of HMAC-SHA256(secret, "<timestamp>.<raw body>")>
 ```
