@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import mermaid from 'astro-mermaid';
+import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
 
 // GitHub Pages project site: https://rabestro.github.io/dicechess-play-api
 // (same host/base pattern the engine and analytics docs sites use — see ADR-0012).
@@ -24,6 +25,12 @@ export default defineConfig({
 				baseUrl: 'https://github.com/rabestro/dicechess-play-api/edit/main/docs/',
 			},
 			lastUpdated: true,
+			// The REST reference under /api/** is generated from public/openapi.yaml at build time,
+			// so the formal contract can never drift from the hand-authored spec (SDKs generate from
+			// the same file). The narrative guides below are the human-facing companion.
+			plugins: [
+				starlightOpenAPI([{ base: 'api', label: 'REST API (OpenAPI)', schema: './public/openapi.yaml' }]),
+			],
 			sidebar: [
 				{ label: 'Overview', link: '/' },
 				{
@@ -50,6 +57,15 @@ export default defineConfig({
 						{ label: 'Data Shapes', link: '/reference/data-shapes/' },
 					],
 				},
+				{
+					label: 'Specs & Tooling',
+					items: [
+						{ label: 'Machine-Readable Specs', link: '/specifications/' },
+						{ label: 'Licensing for Bots', link: '/licensing/' },
+					],
+				},
+				// Generated from public/openapi.yaml by starlight-openapi.
+				...openAPISidebarGroups,
 			],
 		}),
 	],

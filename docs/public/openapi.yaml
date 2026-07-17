@@ -1,0 +1,683 @@
+openapi: 3.1.0
+info:
+  title: Dice Chess Bot API
+  version: '1.0'
+  description: >
+    REST contract for connecting a bot to the Dice Chess play platform. This is the
+    machine-readable companion to the guides at https://rabestro.github.io/dicechess-play-api/ —
+    use it to generate a client (`openapi-generator`, `openapi-typescript`, etc.). The two
+    long-lived ndjson event streams are described separately in `asyncapi.yaml`.
+  license:
+    name: AGPL-3.0-or-later
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+servers:
+  - url: https://play-api.jc.id.lv
+    description: Public production platform
+security:
+  - bearerAuth: []
+tags:
+  - name: Identity
+    description: Tokens and bot identity — anonymous mint, durable registration, rotation, ladder opt-in.
+  - name: Challenges
+    description: Direct bot-to-bot challenges.
+  - name: Seeks
+    description: Public lobby offers — how bots meet humans.
+  - name: Gameplay
+    description: Seeding the dice, submitting turns, resigning.
+  - name: Discovery
+    description: Public, unauthenticated reads — live games, legal moves, a single game snapshot.
+  - name: Leaderboard
+    description: Public rating-ladder reads. Present only when the server runs with persistence.
+  - name: Webhooks
+    description: Register an HTTPS callback the server POSTs turns to. Registered bots only; enabled per server.
+paths:
+  /bot/anon:
+    post:
+      tags: [Identity]
+      summary: Mint an anonymous token
+      description: >
+        Mints an ephemeral, unranked token with zero registration. Anonymous tokens live in
+        server memory (~24h TTL) and never appear on the ladder. One of the two routes that need
+        no Authorization header (the other is POST /bot/register).
+      security: []
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional display name for the anonymous bot.
+      responses:
+        '201':
+          description: Token minted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /bot/register:
+    post:
+      tags: [Identity]
+      summary: Register a durable bot
+      description: >
+        Claims a durable self-service identity that survives server restarts and can join the
+        ladder, rotate its token, and register a webhook. The token is shown exactly once.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Identity claimed. Store the token now — it is shown only once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400':
+          description: Invalid slug, or a reserved team (`anon`, `house`).
+        '409':
+          description: The identity (team/name) is already taken.
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /bot/token:
+    post:
+      tags: [Identity]
+      summary: Rotate the token
+      description: >
+        Swaps the caller's Bearer token; the old one stops authenticating immediately, the new
+        one is shown once. Registered bots only.
+      responses:
+        '200':
+          description: Fresh token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                required: [token]
+        '403':
+          description: Caller is anonymous (re-mint instead) or static (rotates via server env).
+  /bot/account:
+    get:
+      tags: [Identity]
+      summary: Current identity
+      responses:
+        '200':
+          description: The caller's identity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /bot/ladder/join:
+    post:
+      tags: [Identity]
+      summary: Join the rating ladder
+      description: >
+        Opts a registered bot into the server-paired rating ladder. Passive: the server starts
+        server-chosen mirror-pair games on its own. Registered bots only.
+      responses:
+        '200':
+          description: Ladder membership state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LadderState' }
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+  /bot/ladder/leave:
+    post:
+      tags: [Identity]
+      summary: Leave the rating ladder
+      description: Freezes the bot's rating and stops new ladder pairings. Registered bots only.
+      responses:
+        '200':
+          description: Ladder membership state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LadderState' }
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+  /bot/challenge:
+    post:
+      tags: [Challenges]
+      summary: Create a challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateChallengeRequest' }
+      responses:
+        '201':
+          description: Challenge created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Challenge' }
+        '400':
+          description: Challenging yourself.
+        '429':
+          description: Too many pending challenges.
+  /bot/challenges:
+    get:
+      tags: [Challenges]
+      summary: List pending challenges
+      description: Every pending challenge involving the caller — `in` addressed to you, `out` yours.
+      responses:
+        '200':
+          description: Pending challenges.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChallengeList' }
+  /bot/challenge/{id}/accept:
+    post:
+      tags: [Challenges]
+      summary: Accept a challenge
+      parameters: [{ $ref: '#/components/parameters/ChallengeId' }]
+      responses:
+        '201':
+          description: Game created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GameCreated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bot/challenge/{id}/decline:
+    post:
+      tags: [Challenges]
+      summary: Decline a challenge
+      parameters: [{ $ref: '#/components/parameters/ChallengeId' }]
+      responses:
+        '200': { description: Declined. }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bot/seeks:
+    post:
+      tags: [Seeks]
+      summary: Post a lobby seek
+      description: A standing public offer in the same lobby guests use. Anyone may accept it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeControl: { $ref: '#/components/schemas/TimeControl' }
+      responses:
+        '201':
+          description: Seek posted. Hold it by polling; it expires after ~2 minutes without a poll.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  seekId: { type: string }
+                  secret: { type: string, description: Capability secret for poll/cancel. }
+                required: [seekId, secret]
+        '429':
+          description: Too many open seeks (cap 3).
+  /bot/seeks/{id}/accept:
+    post:
+      tags: [Seeks]
+      summary: Accept a lobby seek
+      description: Accept an open seek from the public `GET /lobby/seeks` list. Colour is random.
+      parameters: [{ $ref: '#/components/parameters/SeekId' }]
+      responses:
+        '201':
+          description: Game created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GameCreated' }
+        '400': { description: Accepting your own seek. }
+        '404': { description: No such open seek. }
+        '409': { description: Someone claimed it first. }
+  /bot/game/{id}/seed:
+    post:
+      tags: [Gameplay]
+      summary: Submit a dice seed
+      description: >
+        Contribute this seat's post-commit entropy for the provably-fair dice. Submit once, as
+        soon as the game starts and before the opening roll. Fire-and-forget.
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                seed: { type: string, minLength: 16, maxLength: 256 }
+              required: [seed]
+      responses:
+        '202': { description: Accepted (a duplicate, too-late, or malformed seed is ignored). }
+  /bot/game/{id}/move:
+    post:
+      tags: [Gameplay]
+      summary: Submit turn moves
+      description: >
+        Submit the turn's micro-moves in UCI, one per rolled die. The verdict is synchronous.
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MoveRequest' }
+      responses:
+        '200':
+          description: The turn was applied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MoveVerdict' }
+        '202':
+          description: No verdict within a few seconds — treat as fire-and-forget and watch the stream.
+        '409':
+          description: Refused (`not your turn`, `illegal turn`, `game is over`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MoveVerdict' }
+  /bot/game/{id}/resign:
+    post:
+      tags: [Gameplay]
+      summary: Resign a game
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      responses:
+        '202': { description: Accepted. }
+  /bot/games:
+    get:
+      tags: [Gameplay]
+      summary: List my live games
+      description: >
+        Every live game the caller is seated in — the polling counterpart of `GameStart` and the
+        post-restart recovery path.
+      responses:
+        '200':
+          description: Live games.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  games:
+                    type: array
+                    items: { $ref: '#/components/schemas/MyGame' }
+                required: [games]
+  /games:
+    get:
+      tags: [Discovery]
+      summary: List live games (public)
+      description: Every live game on the node, with both seats' public faces. Sorted by version desc, capped at 50.
+      security: []
+      responses:
+        '200':
+          description: Live games with a total count.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  games:
+                    type: array
+                    items: { $ref: '#/components/schemas/PublicGame' }
+                  total: { type: integer }
+                required: [games, total]
+  /games/{id}:
+    get:
+      tags: [Discovery]
+      summary: Get a game snapshot (public)
+      description: >
+        The polling read of a single game — the same state object the game stream sends on
+        connect. Also where a withheld dice reveal (mirror-pair games) becomes available once both
+        games of the pair conclude.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      responses:
+        '200':
+          description: The current public game state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicGameState' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /games/{id}/moves:
+    get:
+      tags: [Discovery]
+      summary: Get legal moves (public)
+      description: The full legal-move tree for the pending roll, never capped.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      responses:
+        '200':
+          description: The legal-move tree tied to the current roll.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegalMovesResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /leaderboard:
+    get:
+      tags: [Leaderboard]
+      summary: Rating leaderboard (public)
+      description: Registered bots whose rating has converged (RD ≤ 110), best first. Provisional bots are hidden.
+      security: []
+      responses:
+        '200':
+          description: Ranked leaders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  leaders:
+                    type: array
+                    items: { $ref: '#/components/schemas/LeaderRow' }
+                required: [leaders]
+        '404': { description: Server runs without persistence. }
+  /bots/{team}/{name}:
+    get:
+      tags: [Leaderboard]
+      summary: Bot profile (public)
+      description: One registered bot's public card — rating summary plus up to 20 recent games.
+      security: []
+      parameters:
+        - { name: team, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The bot's public profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotProfile' }
+        '404': { description: No registered bot with that team/name. }
+  /bot/webhook:
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook
+      description: >
+        Register an HTTPS callback the server POSTs turns to. The URL must be HTTPS and resolve to
+        a public address; the server runs an ownership handshake before storing it. Registered
+        bots only; enabled per server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri }
+              required: [url]
+      responses:
+        '201':
+          description: Registered. The signing secret is shown exactly once.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  secret: { type: string, description: Per-bot HMAC key; shown once. }
+                required: [url, secret]
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+        '422': { description: URL-policy violation or failed handshake (the body says which). }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { description: Webhooks disabled on this server. }
+    get:
+      tags: [Webhooks]
+      summary: Inspect the webhook
+      responses:
+        '200':
+          description: The registered webhook (the secret is never shown again).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  verifiedAt: { type: string, format: date-time }
+                required: [url, verifiedAt]
+        '404': { description: No webhook registered. }
+        '503': { description: Webhooks disabled on this server. }
+    delete:
+      tags: [Webhooks]
+      summary: Remove the webhook
+      description: Deliveries stop at the next turn; the games themselves keep running.
+      responses:
+        '204': { description: Removed. }
+        '404': { description: No webhook was registered. }
+        '503': { description: Webhooks disabled on this server. }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 'Authorization: Bearer <token>. Every route requires it except POST /bot/anon and POST /bot/register (which mint/claim a token).'
+  parameters:
+    GameId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Game id.
+    ChallengeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Challenge id.
+    SeekId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Seek id.
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired Bearer token.
+    NotFound:
+      description: Unknown resource.
+    RateLimited:
+      description: Rate limited — check the `Retry-After` header.
+    RegisteredOnly:
+      description: The caller is anonymous or static; this feature needs a registered identity.
+  schemas:
+    TokenResponse:
+      type: object
+      properties:
+        token: { type: string }
+        team: { type: string }
+        name: { type: string }
+        id: { type: string, description: 'External id, e.g. bot:team:anon:mybot-8b7a6c5d.' }
+      required: [token, team, name, id]
+    RegisterRequest:
+      type: object
+      properties:
+        team: { type: string, pattern: '^[a-z0-9][a-z0-9-]*$', maxLength: 32 }
+        name: { type: string, pattern: '^[a-z0-9][a-z0-9-]*$', maxLength: 32 }
+      required: [team, name]
+    Account:
+      type: object
+      properties:
+        team: { type: string }
+        name: { type: string }
+        id: { type: string }
+      required: [team, name, id]
+    LadderState:
+      type: object
+      properties:
+        onLadder: { type: boolean }
+        glickoRating: { type: number }
+        glickoRd: { type: number }
+      required: [onLadder, glickoRating, glickoRd]
+    CreateChallengeRequest:
+      type: object
+      properties:
+        team: { type: string }
+        name: { type: string }
+        timeControl:
+          allOf: [{ $ref: '#/components/schemas/TimeControl' }]
+          description: Optional — the server defaults an omitted time control to Unlimited.
+      required: [team, name]
+    Challenge:
+      type: object
+      properties:
+        id: { type: string }
+        challenger: { $ref: '#/components/schemas/Principal' }
+        target: { $ref: '#/components/schemas/Principal' }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        targetOnline: { type: boolean, description: Advisory — whether the target holds an account stream. }
+      required: [id, challenger, target, timeControl]
+    ChallengeList:
+      type: object
+      properties:
+        in: { type: array, items: { $ref: '#/components/schemas/Challenge' } }
+        out: { type: array, items: { $ref: '#/components/schemas/Challenge' } }
+      required: [in, out]
+    GameCreated:
+      type: object
+      properties:
+        gameId: { type: string }
+      required: [gameId]
+    MoveRequest:
+      type: object
+      properties:
+        moves:
+          type: array
+          items: { type: string, description: A UCI micro-move, e.g. e2e4. }
+          description: One entry per rolled die; a root-to-leaf path of the legal-move tree.
+      required: [moves]
+    MoveVerdict:
+      type: object
+      properties:
+        applied: { type: boolean }
+        version: { type: [integer, 'null'], description: The resulting TurnPlayed version, or null when refused. }
+        reason: { type: [string, 'null'], description: Rejection reason when not applied. }
+      required: [applied]
+    MyGame:
+      type: object
+      properties:
+        gameId: { type: string }
+        seat: { $ref: '#/components/schemas/Seat' }
+        activeSeat: { $ref: '#/components/schemas/Seat' }
+        dicePending: { type: boolean }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        clocks: { $ref: '#/components/schemas/Clocks' }
+        version: { type: integer }
+      required: [gameId, seat, activeSeat, dicePending, timeControl, version]
+    PublicGame:
+      type: object
+      properties:
+        gameId: { type: string }
+        players: { $ref: '#/components/schemas/Players' }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        activeSeat: { $ref: '#/components/schemas/Seat' }
+        dicePending: { type: boolean }
+        clocks: { $ref: '#/components/schemas/Clocks' }
+        version: { type: integer }
+        dfen: { type: string }
+      required: [gameId, timeControl, activeSeat, dicePending, version, dfen]
+    PublicGameState:
+      type: object
+      description: The single-game snapshot — identical to the game stream's Snapshot.state.
+      properties:
+        version: { type: integer }
+        dfen: { type: string, description: DFEN — the 7th field is the pending dice pool as piece letters. }
+        activeSeat: { $ref: '#/components/schemas/Seat' }
+        dicePending: { type: boolean }
+        status: { type: object, description: 'Single-key status, e.g. {"Active":{}} or {"Ended":{}}.' }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        clocks: { $ref: '#/components/schemas/Clocks' }
+        commit: { type: string, description: SHA-256 of the server seed (the dice commitment). }
+        seed: { type: [string, 'null'], description: Revealed server seed after the game ends (null until then; withheld for a pending mirror pair). }
+        clientSeeds: { type: [object, 'null'], description: The two revealed client seeds, or null. }
+        legalMoves:
+          anyOf: [{ $ref: '#/components/schemas/MoveTree' }, { type: 'null' }]
+          description: The legal-move tree while dicePending; null if too large to inline (fetch GET /games/{id}/moves) or absent otherwise.
+        players:
+          anyOf: [{ $ref: '#/components/schemas/Players' }, { type: 'null' }]
+          description: Both seats' public faces; may be absent.
+      required: [version, dfen, activeSeat, dicePending, status, timeControl, commit]
+    LegalMovesResponse:
+      type: object
+      properties:
+        version: { type: integer }
+        dfen: { type: string }
+        dicePending: { type: boolean }
+        legalMoves: { $ref: '#/components/schemas/MoveTree' }
+      required: [version, dfen, dicePending, legalMoves]
+    MoveTree:
+      type: object
+      description: >
+        A prefix tree of UCI micro-moves. Each key is a micro-move; its value is the tree of legal
+        continuations. A leaf ({}) is a complete legal turn. An empty top-level tree means a forced
+        pass. On inline copies, null means the enumeration was too large — fetch GET /games/{id}/moves.
+      additionalProperties:
+        $ref: '#/components/schemas/MoveTree'
+    LeaderRow:
+      type: object
+      properties:
+        rank: { type: integer }
+        team: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        rd: { type: number }
+        onLadder: { type: boolean }
+        games: { type: integer }
+        wins: { type: integer }
+        draws: { type: integer }
+        losses: { type: integer }
+      required: [rank, team, name, rating, rd, onLadder, games, wins, draws, losses]
+    BotProfile:
+      type: object
+      properties:
+        team: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        rd: { type: number }
+        provisional: { type: boolean }
+        onLadder: { type: boolean }
+        games: { type: integer }
+        wins: { type: integer }
+        draws: { type: integer }
+        losses: { type: integer }
+        recent:
+          type: array
+          items: { $ref: '#/components/schemas/RecentGame' }
+      required: [team, name, rating, rd, provisional, onLadder, games, wins, draws, losses, recent]
+    RecentGame:
+      type: object
+      properties:
+        gameId: { type: string }
+        seat: { $ref: '#/components/schemas/Seat' }
+        opponent: { $ref: '#/components/schemas/PublicFace' }
+        result: { type: string, enum: [win, draw, loss, unknown] }
+        rated: { type: boolean }
+        termination: { type: string }
+        finishedAt: { type: string, format: date-time }
+      required: [gameId, seat, opponent, result, rated, termination, finishedAt]
+    Seat:
+      type: string
+      enum: [White, Black]
+    Clocks:
+      type: [object, 'null']
+      description: Remaining milliseconds per side as of the carrying event; null on Unlimited games.
+      properties:
+        white: { type: integer }
+        black: { type: integer }
+    Players:
+      type: object
+      properties:
+        white: { $ref: '#/components/schemas/PublicFace' }
+        black: { $ref: '#/components/schemas/PublicFace' }
+      required: [white, black]
+    PublicFace:
+      type: object
+      description: A participant's public, spectator-safe face — never a raw id.
+      properties:
+        kind: { type: string, enum: [Bot, Human] }
+        name: { type: [string, 'null'], description: Team-qualified bot name, or null for a human. }
+      required: [kind]
+    Principal:
+      type: object
+      description: A participant's identity as a single-key wrapper.
+      oneOf:
+        - { type: object, required: [Guest], properties: { Guest: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [User], properties: { User: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [Bot], properties: { Bot: { type: object, properties: { team: { type: string }, name: { type: string } } } } }
+    TimeControl:
+      type: object
+      description: A single-key time-control wrapper.
+      oneOf:
+        - { type: object, properties: { Unlimited: { type: object } }, required: [Unlimited] }
+        - { type: object, properties: { SuddenDeath: { type: object, properties: { initialSeconds: { type: integer } }, required: [initialSeconds] } }, required: [SuddenDeath] }
+        - { type: object, properties: { Fischer: { type: object, properties: { initialSeconds: { type: integer }, incrementSeconds: { type: integer } }, required: [initialSeconds, incrementSeconds] } }, required: [Fischer] }
+        - { type: object, properties: { PerMove: { type: object, properties: { secondsPerMove: { type: integer } }, required: [secondsPerMove] } }, required: [PerMove] }

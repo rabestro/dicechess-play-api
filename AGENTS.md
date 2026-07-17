@@ -211,9 +211,12 @@ Three layers, by audience (see ADR-0012 for the boundary):
   `CONTRIBUTING.md`, `SECURITY.md`, `CLA.md`.
 - Update-trigger map: `/bot` routes or protocol semantics changed → the matching **docs site**
   page under `docs/src/content/docs/` (REST → `reference/rest.md`, streams →
-  `reference/streaming.md`, webhooks → `reference/webhooks.md`); dice protocol →
-  `provably-fair.md` (+ `examples/random_bot.py` if affected); a new public API surface → a new
-  site page + sidebar entry in `astro.config.mjs`; server env vars or compose → README
+  `reference/streaming.md`, webhooks → `reference/webhooks.md`) **AND the machine-readable specs**
+  (`docs/public/openapi.yaml` for REST, `docs/public/asyncapi.yaml` for the streams) — these are
+  served for client codegen and the OpenAPI is rendered into the `/api/**` reference by
+  `starlight-openapi` at build (an invalid spec fails the build, so it can't drift silently); dice
+  protocol → `provably-fair.md` (+ `examples/random_bot.py` if affected); a new public API surface
+  → a new site page + sidebar entry in `astro.config.mjs`; server env vars or compose → README
   run/deploy sections; `wire/Codecs.scala` → coordinate with dicechess-play.
 - The docs site deploys independently (`deploy-docs.yaml`, paths-filtered to `docs/**`); backend
   CI ignores docs-only changes and vice versa. `docs/package.json` is watched by Dependabot.
