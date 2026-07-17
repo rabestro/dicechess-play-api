@@ -15,7 +15,9 @@ servers:
   production:
     host: play-api.jc.id.lv
     protocol: https
-    description: Public production platform. Authenticate with `Authorization: Bearer <token>`.
+    description: 'Public production platform. Authenticate with an Authorization: Bearer <token> header.'
+    security:
+      - $ref: '#/components/securitySchemes/bearerAuth'
 channels:
   accountEvents:
     address: /bot/stream/event
@@ -58,12 +60,18 @@ operations:
       - { $ref: '#/channels/gameEvents/messages/gameEnded' }
       - { $ref: '#/channels/gameEvents/messages/rejected' }
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A Bearer token from POST /bot/anon or POST /bot/register.
   messages:
     ChallengeReceived:
       name: ChallengeReceived
       title: A challenge was addressed to you.
       payload:
         type: object
+        required: [ChallengeReceived]
         properties:
           ChallengeReceived:
             type: object
@@ -75,6 +83,7 @@ components:
       title: A challenge you created was declined or expired.
       payload:
         type: object
+        required: [ChallengeDeclined]
         properties:
           ChallengeDeclined:
             type: object
@@ -85,6 +94,7 @@ components:
       title: A game you are seated in has started.
       payload:
         type: object
+        required: [GameStart]
         properties:
           GameStart:
             type: object
@@ -95,6 +105,7 @@ components:
       title: The current game state, sent immediately on connect.
       payload:
         type: object
+        required: [Snapshot]
         properties:
           Snapshot:
             type: object
@@ -106,6 +117,7 @@ components:
       title: The server rolled the dice for a turn.
       payload:
         type: object
+        required: [DiceRolled]
         properties:
           DiceRolled:
             type: object
@@ -116,12 +128,14 @@ components:
               dfen: { type: string }
               clocks: { $ref: '#/components/schemas/Clocks' }
               legalMoves:
+                oneOf: [{ $ref: '#/components/schemas/MoveTree' }, { type: 'null' }]
                 description: The legal-move tree for this roll; {} = forced pass; null = fetch GET /games/{id}/moves.
     TurnPlayed:
       name: TurnPlayed
       title: A turn's moves were applied.
       payload:
         type: object
+        required: [TurnPlayed]
         properties:
           TurnPlayed:
             type: object
@@ -135,6 +149,7 @@ components:
       title: The game is over — carries the provably-fair reveal.
       payload:
         type: object
+        required: [GameEnded]
         properties:
           GameEnded:
             type: object
@@ -146,12 +161,15 @@ components:
                   result: { description: '{"Win":{"side":"White"}} or {"Draw":{}}.' }
                   termination: { type: string, enum: [KingCaptured, Resign, Draw, Aborted, Timeout] }
               seed: { type: [string, 'null'], description: Revealed server seed (null while a mirror-pair partner is unfinished). }
-              clientSeeds: { type: [object, 'null'] }
+              clientSeeds:
+                oneOf: [{ $ref: '#/components/schemas/ClientSeeds' }, { type: 'null' }]
+                description: The two revealed client seeds, or null while withheld.
     Rejected:
       name: Rejected
       title: The engine rejected submitted moves.
       payload:
         type: object
+        required: [Rejected]
         properties:
           Rejected:
             type: object
@@ -168,12 +186,51 @@ components:
       properties:
         white: { type: integer }
         black: { type: integer }
+    ClientSeeds:
+      type: object
+      description: The two revealed client seeds (present only with the end-of-game reveal).
+      properties:
+        white: { type: string }
+        black: { type: string }
+    MoveTree:
+      type: object
+      description: >
+        A prefix tree of UCI micro-moves; each key is a micro-move whose value is the tree of
+        legal continuations. A leaf ({}) is a complete legal turn.
+      additionalProperties:
+        $ref: '#/components/schemas/MoveTree'
     Principal:
       type: object
       description: Single-key identity wrapper, e.g. {"Bot":{"team":"anon","name":"other-bot"}}.
+      oneOf:
+        - { type: object, required: [Guest], properties: { Guest: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [User], properties: { User: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [Bot], properties: { Bot: { type: object, properties: { team: { type: string }, name: { type: string } } } } }
     PublicGameState:
       type: object
-      description: >
-        The same object GET /games/{id} returns — dfen, activeSeat, dicePending, status,
-        timeControl, clocks, commit, seed, clientSeeds, legalMoves, players. See PublicGameState
-        in openapi.yaml.
+      description: The same object GET /games/{id} returns (see PublicGameState in openapi.yaml).
+      required: [version, dfen, activeSeat, dicePending, status, timeControl, commit]
+      properties:
+        version: { type: integer }
+        dfen: { type: string }
+        activeSeat: { $ref: '#/components/schemas/Seat' }
+        dicePending: { type: boolean }
+        status: { type: object }
+        timeControl: { type: object }
+        clocks: { $ref: '#/components/schemas/Clocks' }
+        commit: { type: string }
+        seed: { type: [string, 'null'] }
+        clientSeeds:
+          oneOf: [{ $ref: '#/components/schemas/ClientSeeds' }, { type: 'null' }]
+        legalMoves:
+          oneOf: [{ $ref: '#/components/schemas/MoveTree' }, { type: 'null' }]
+        players:
+          type: object
+          properties:
+            white: { $ref: '#/components/schemas/PublicFace' }
+            black: { $ref: '#/components/schemas/PublicFace' }
+    PublicFace:
+      type: object
+      properties:
+        kind: { type: string, enum: [Bot, Human] }
+        name: { type: [string, 'null'] }

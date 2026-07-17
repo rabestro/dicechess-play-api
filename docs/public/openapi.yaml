@@ -37,8 +37,8 @@ paths:
       summary: Mint an anonymous token
       description: >
         Mints an ephemeral, unranked token with zero registration. Anonymous tokens live in
-        server memory (~24h TTL) and never appear on the ladder. The only route that needs no
-        Authorization header.
+        server memory (~24h TTL) and never appear on the ladder. One of the two routes that need
+        no Authorization header (the other is POST /bot/register).
       security: []
       parameters:
         - name: name
@@ -433,13 +433,14 @@ paths:
       description: Deliveries stop at the next turn; the games themselves keep running.
       responses:
         '204': { description: Removed. }
+        '404': { description: No webhook was registered. }
         '503': { description: Webhooks disabled on this server. }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: 'Authorization: Bearer <token>. Every route except POST /bot/anon requires it.'
+      description: 'Authorization: Bearer <token>. Every route requires it except POST /bot/anon and POST /bot/register (which mint/claim a token).'
   parameters:
     GameId:
       name: id
@@ -502,8 +503,10 @@ components:
       properties:
         team: { type: string }
         name: { type: string }
-        timeControl: { $ref: '#/components/schemas/TimeControl' }
-      required: [team, name, timeControl]
+        timeControl:
+          allOf: [{ $ref: '#/components/schemas/TimeControl' }]
+          description: Optional — the server defaults an omitted time control to Unlimited.
+      required: [team, name]
     Challenge:
       type: object
       properties:
@@ -561,7 +564,7 @@ components:
         clocks: { $ref: '#/components/schemas/Clocks' }
         version: { type: integer }
         dfen: { type: string }
-      required: [gameId, players, timeControl, activeSeat, dicePending, version, dfen]
+      required: [gameId, timeControl, activeSeat, dicePending, version, dfen]
     PublicGameState:
       type: object
       description: The single-game snapshot — identical to the game stream's Snapshot.state.
@@ -576,9 +579,13 @@ components:
         commit: { type: string, description: SHA-256 of the server seed (the dice commitment). }
         seed: { type: [string, 'null'], description: Revealed server seed after the game ends (null until then; withheld for a pending mirror pair). }
         clientSeeds: { type: [object, 'null'], description: The two revealed client seeds, or null. }
-        legalMoves: { description: The legal-move tree while dicePending, null if too large to inline, or absent otherwise. }
-        players: { $ref: '#/components/schemas/Players' }
-      required: [version, dfen, activeSeat, dicePending, status, timeControl, commit, players]
+        legalMoves:
+          anyOf: [{ $ref: '#/components/schemas/MoveTree' }, { type: 'null' }]
+          description: The legal-move tree while dicePending; null if too large to inline (fetch GET /games/{id}/moves) or absent otherwise.
+        players:
+          anyOf: [{ $ref: '#/components/schemas/Players' }, { type: 'null' }]
+          description: Both seats' public faces; may be absent.
+      required: [version, dfen, activeSeat, dicePending, status, timeControl, commit]
     LegalMovesResponse:
       type: object
       properties:
@@ -632,7 +639,7 @@ components:
         gameId: { type: string }
         seat: { $ref: '#/components/schemas/Seat' }
         opponent: { $ref: '#/components/schemas/PublicFace' }
-        result: { type: string, enum: [win, draw, loss] }
+        result: { type: string, enum: [win, draw, loss, unknown] }
         rated: { type: boolean }
         termination: { type: string }
         finishedAt: { type: string, format: date-time }
@@ -663,9 +670,9 @@ components:
       type: object
       description: A participant's identity as a single-key wrapper.
       oneOf:
-        - { type: object, properties: { Guest: { type: object, properties: { id: { type: string } } } } }
-        - { type: object, properties: { User: { type: object, properties: { id: { type: string } } } } }
-        - { type: object, properties: { Bot: { type: object, properties: { team: { type: string }, name: { type: string } } } } }
+        - { type: object, required: [Guest], properties: { Guest: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [User], properties: { User: { type: object, properties: { id: { type: string } } } } }
+        - { type: object, required: [Bot], properties: { Bot: { type: object, properties: { team: { type: string }, name: { type: string } } } } }
     TimeControl:
       type: object
       description: A single-key time-control wrapper.

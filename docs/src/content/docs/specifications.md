@@ -10,7 +10,7 @@ Everything on this site is backed by two machine-readable specifications. They a
 | Spec | Covers | File |
 | --- | --- | --- |
 | **OpenAPI 3.1** | the REST Bot API — every endpoint, request, and response | [`openapi.yaml`](../openapi.yaml) |
-| **AsyncAPI 3.0** | the two ndjson event streams and their message payloads | [`asyncapi.yaml`](../asyncapi.yaml) |
+| **AsyncAPI 3.1** | the two ndjson event streams and their message payloads | [`asyncapi.yaml`](../asyncapi.yaml) |
 
 The rendered REST reference in the sidebar (**REST API (OpenAPI)**) is generated from `openapi.yaml` at build time, so it can never drift from the file you download.
 
