@@ -58,10 +58,14 @@ object StrengthReport:
 
     // CRN groups: a pairing id shared by exactly two usable games of the same unordered matchup is a complete pair
     // (ONE pentanomial observation); everything else degrades to per-game trinomial singles.
-    val (paired, unpaired)            = usable.partition(_._1.isDefined)
-    val groups                        = paired.groupBy(_._1).values.map(_.map(_._2)).toList
-    val (completePairs, brokenGroups) = groups.partition { games =>
-      games.sizeIs == 2 && games.map(g => Set(g.white, g.black)).distinct.sizeIs == 1
+    val (paired, unpaired) = usable.partition(_._1.isDefined)
+    val groups             = paired.groupBy(_._1).values.map(_.map(_._2)).toList
+    // Strictly a COLOUR-SWAPPED pair: same two bots with seats exchanged — the pentanomial observation model
+    // assumes the swap (that's what cancels colour bias inside the pair), so a hypothetical same-colour "pair"
+    // must degrade to singles rather than pollute the pair statistics.
+    val (completePairs, brokenGroups) = groups.partition {
+      case List(g1, g2) => g1.white == g2.black && g1.black == g2.white
+      case _            => false
     }
     val singleGames = unpaired.map(_._2) ++ brokenGroups.flatten
 

@@ -87,14 +87,17 @@ object Sprt:
 
   /** GSPRT contribution of one observation family (score values with their counts). Zero observations contribute
     * nothing; otherwise mean and variance are computed over the pseudo-count-smoothed histogram (see
-    * [[BinPseudoCount]]), which is strictly positive-variance by construction.
+    * [[BinPseudoCount]]), which is strictly positive-variance by construction — but the evidence multiplier is the REAL
+    * observation count only: pseudo-observations may regularise the estimated moments, never add statistical weight of
+    * their own (multiplying by the smoothed total would inflate small samples' confidence by up to 2.5×, as review on
+    * the first version caught).
     */
   private def llrContribution(bins: List[(Double, Long)], s0: Double, s1: Double): Double =
     val realCount = bins.map(_._2).sum
     if realCount == 0 then 0.0
     else
       val smoothed = bins.map((value, count) => (value, count.toDouble + BinPseudoCount))
-      val n        = smoothed.map(_._2).sum
-      val mean     = smoothed.map((value, count) => value * count).sum / n
-      val variance = smoothed.map((value, count) => value * value * count).sum / n - mean * mean
-      n * (s1 - s0) * (2.0 * mean - s0 - s1) / (2.0 * variance)
+      val total    = smoothed.map(_._2).sum
+      val mean     = smoothed.map((value, count) => value * count).sum / total
+      val variance = smoothed.map((value, count) => value * value * count).sum / total - mean * mean
+      realCount * (s1 - s0) * (2.0 * mean - s0 - s1) / (2.0 * variance)

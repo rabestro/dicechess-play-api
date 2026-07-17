@@ -64,6 +64,15 @@ class StrengthReportSuite extends munit.FunSuite:
     assertEquals(matchup.pairs.n1, 1L, "loss + draw = 0.5 for v1")
     assertEquals(matchup.pairs.n2, 1L, "loss + win = 1.0 for v1")
 
+  test("a same-colour 'pair' (no seat swap) degrades to singles — the pentanomial model assumes the swap"):
+    val rows = List(
+      row(v3, v1, Some(1), Some("no-swap")),
+      row(v3, v1, Some(-1), Some("no-swap")) // same participants, same colours: NOT a CRN pair
+    )
+    val report = StrengthReport.build(rows)
+    assertEquals(report.completePairs, 0)
+    assertEquals(report.singles, 2)
+
   test("an incomplete pairing group and an unpaired game both degrade to trinomial singles"):
     val rows = List(
       row(v3, v1, Some(1), Some("half-pair")), // partner never finished

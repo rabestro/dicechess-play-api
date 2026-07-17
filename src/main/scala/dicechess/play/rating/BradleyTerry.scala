@@ -24,6 +24,11 @@ object BradleyTerry:
     */
   final case class Ranked(player: String, elo: Double, ciLow: Double, ciHigh: Double, losVsNext: Option[Double])
 
+  /** Virtual-draw weight per player pair. NOTE the deliberate scale-dependence (review): each bot absorbs
+    * `Smoothing/2 × (N−1)` virtual games, so in a LARGE pool a barely-active bot gets squashed toward the mean. Fine at
+    * today's handful of bots; the scale-invariant upgrade path, should the pool grow to dozens, is a single virtual
+    * ANCHOR player that everyone draws against once, instead of pairwise smoothing.
+    */
   private val Smoothing     = 0.5
   private val MaxIterations = 1000
   private val Tolerance     = 1e-10
@@ -31,40 +36,39 @@ object BradleyTerry:
   /** Relative Elo per player (mean 0), fitted by MM over the given games. Empty input → empty map. */
   def ratings(games: Seq[Game]): Map[String, Double] =
     val players = games.flatMap((a, b, _) => List(a, b)).distinct.sorted
-    if players.sizeIs < 2 then return players.map(_ -> 0.0).toMap
+    if players.sizeIs < 2 then players.map(_ -> 0.0).toMap
+    else
+      // points(i)(j) = points i scored against j; the virtual draw spreads Smoothing/2 each way per pair.
+      val index  = players.zipWithIndex.toMap
+      val n      = players.size
+      val points = Array.fill(n, n)(0.0)
+      for i <- 0 until n; j <- 0 until n if i != j do points(i)(j) = Smoothing / 2.0
+      for (a, b, scoreA) <- games do
+        val i = index(a)
+        val j = index(b)
+        points(i)(j) += scoreA
+        points(j)(i) += 1.0 - scoreA
 
-    // points(i)(j) = points i scored against j; the virtual draw spreads Smoothing/2 each way per pair.
-    val index  = players.zipWithIndex.toMap
-    val n      = players.size
-    val points = Array.fill(n, n)(0.0)
-    for i <- 0 until n; j <- 0 until n if i != j do points(i)(j) = Smoothing / 2.0
-    for (a, b, scoreA) <- games do
-      val i = index(a)
-      val j = index(b)
-      points(i)(j) += scoreA
-      points(j)(i) += 1.0 - scoreA
+      val gamesBetween = Array.tabulate(n, n)((i, j) => points(i)(j) + points(j)(i))
+      val totalPoints  = Array.tabulate(n)(i => points(i).sum)
 
-    val gamesBetween = Array.tabulate(n, n)((i, j) => points(i)(j) + points(j)(i))
-    val totalPoints  = Array.tabulate(n)(i => points(i).sum)
+      var strengths = Array.fill(n)(1.0)
+      var iteration = 0
+      var moved     = Double.MaxValue
+      while iteration < MaxIterations && moved > Tolerance do
+        val next = Array.tabulate(n): i =>
+          val denominator = (0 until n).filter(_ != i).map(j => gamesBetween(i)(j) / (strengths(i) + strengths(j))).sum
+          if denominator == 0.0 then strengths(i) else totalPoints(i) / denominator
+        // Renormalise to geometric mean 1 so the iteration can't drift off to infinity as a family.
+        val logMean = next.map(math.log).sum / n
+        val scaled  = next.map(_ / math.exp(logMean))
+        moved = scaled.zip(strengths).map((a, b) => math.abs(a - b)).max
+        strengths = scaled
+        iteration += 1
 
-    var strengths = Array.fill(n)(1.0)
-    var iteration = 0
-    var moved     = Double.MaxValue
-    while iteration < MaxIterations && moved > Tolerance do
-      val next = Array.tabulate(n) { i =>
-        val denominator = (0 until n).filter(_ != i).map(j => gamesBetween(i)(j) / (strengths(i) + strengths(j))).sum
-        if denominator == 0.0 then strengths(i) else totalPoints(i) / denominator
-      }
-      // Renormalise to geometric mean 1 so the iteration can't drift off to infinity as a family.
-      val logMean = next.map(math.log).sum / n
-      val scaled  = next.map(_ / math.exp(logMean))
-      moved = scaled.zip(strengths).map((a, b) => math.abs(a - b)).max
-      strengths = scaled
-      iteration += 1
-
-    val elos = strengths.map(p => 400.0 * math.log10(p))
-    val mean = elos.sum / n
-    players.zip(elos.map(_ - mean)).toMap
+      val elos = strengths.map(p => 400.0 * math.log10(p))
+      val mean = elos.sum / n
+      players.zip(elos.map(_ - mean)).toMap
 
   /** The ranked pool with bootstrap 95% CIs and neighbour LOS. `groups` are the resampling units (see the object doc);
     * `seed` makes the whole report reproducible.
@@ -74,25 +78,28 @@ object BradleyTerry:
       iterations: Int = 1000,
       seed: Long = 42L
   ): List[Ranked] =
-    val base = ratings(groups.flatten)
-    if base.isEmpty then return Nil
-    val order = base.toList.sortBy(-_._2).map(_._1)
+    // Indexed up front: the resampling loop random-accesses `iterations × groups.size` times, which on a List
+    // would be O(N) per access (review) — on the real corpus that is millions of pointless traversal steps.
+    val indexed = groups.toIndexedSeq
+    val base    = ratings(indexed.flatten)
+    if base.isEmpty then Nil
+    else
+      val order = base.toList.sortBy(-_._2).map(_._1)
 
-    val rng     = new scala.util.Random(seed)
-    val samples = Vector.fill(iterations) {
-      val resampled = Seq.fill(groups.size)(groups(rng.nextInt(groups.size)))
-      ratings(resampled.flatten)
-    }
+      val rng     = new scala.util.Random(seed)
+      val samples = Vector.fill(iterations):
+        val resampled = Vector.fill(indexed.size)(indexed(rng.nextInt(indexed.size)))
+        ratings(resampled.flatten)
 
-    def percentile(sorted: Vector[Double], p: Double): Double =
-      if sorted.isEmpty then 0.0
-      else sorted(math.min(sorted.size - 1, math.max(0, math.round(p * (sorted.size - 1)).toInt)))
+      def percentile(sorted: Vector[Double], p: Double): Double =
+        if sorted.isEmpty then 0.0
+        else sorted(math.min(sorted.size - 1, math.max(0, math.round(p * (sorted.size - 1)).toInt)))
 
-    order.zipWithIndex.map { (player, rank) =>
-      val values = samples.flatMap(_.get(player)).sorted
-      val los    = order.lift(rank + 1).map { next =>
-        val both = samples.flatMap(s => s.get(player).zip(s.get(next)))
-        if both.isEmpty then 0.5 else both.count(_ > _).toDouble / both.size
-      }
-      Ranked(player, base(player), percentile(values, 0.025), percentile(values, 0.975), los)
-    }
+      order.zipWithIndex.map: (player, rank) =>
+        val values = samples.flatMap(_.get(player)).sorted
+        val los    = order
+          .lift(rank + 1)
+          .map: next =>
+            val both = samples.flatMap(s => s.get(player).zip(s.get(next)))
+            if both.isEmpty then 0.5 else both.count(_ > _).toDouble / both.size
+        Ranked(player, base(player), percentile(values, 0.025), percentile(values, 0.975), los)
