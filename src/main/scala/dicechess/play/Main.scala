@@ -16,11 +16,14 @@ import dicechess.play.server.{
   LeaderboardRoutes,
   Lobby,
   LobbyRoutes,
-  PlayRoutes
+  PlayRoutes,
+  WebhookRoutes,
+  Webhooks
 }
 import dicechess.play.ingest.IngestDeliverer
 import dicechess.play.rating.RatingBatch
-import dicechess.play.store.{BotStore, GameStore, PgGameStore}
+import dicechess.play.store.{BotStore, GameStore, PgGameStore, WebhookStore}
+import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
@@ -38,29 +41,29 @@ object Main extends IOApp.Simple:
   // registered bots die with the process).
   // The third slot is the concrete Postgres store when persistence is on: the rating batch and the public
   // leaderboard/profile routes both need its DB-only seams (RatingStore, LeaderboardStore) and are simply absent
-  // without a database.
-  private def appResources: Resource[IO, (GameStore, BotStore, Option[PgGameStore], IO[Unit])] =
-    PgGameStore.configFromEnv match
-      case None           => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, None, IO.never))
-      case Some(dbConfig) =>
-        PgGameStore.resource(dbConfig).flatMap { store =>
-          IngestDeliverer.configFromEnv match
-            case None =>
-              val warn = cats.effect.std
-                .Console[IO]
-                .errorln("[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games accumulate in the outbox")
-              Resource.pure((store, store, Some(store), warn *> IO.never))
-            case Some(ingestConfig) =>
-              EmberClientBuilder
-                .default[IO]
-                .build
-                .map(http => (store, store, Some(store), IngestDeliverer(store, http, ingestConfig).loop.void))
-        }
+  // without a database. The outbound HTTP client is shared by every outbound feature (ingest delivery, webhook
+  // push) and is built unconditionally — an unused pool holds no connections.
+  private def appResources: Resource[IO, (GameStore, BotStore, Option[PgGameStore], Client[IO], IO[Unit])] =
+    EmberClientBuilder.default[IO].build.flatMap { http =>
+      PgGameStore.configFromEnv match
+        case None => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, None, http, IO.never))
+        case Some(dbConfig) =>
+          PgGameStore.resource(dbConfig).map { store =>
+            val deliverer = IngestDeliverer.configFromEnv match
+              case None =>
+                cats.effect.std
+                  .Console[IO]
+                  .errorln("[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games accumulate in the outbox")
+                  *> IO.never
+              case Some(ingestConfig) => IngestDeliverer(store, http, ingestConfig).loop.void
+            (store, store, Some(store), http, deliverer)
+          }
+    }
 
   def run: IO[Unit] = appResources.use(serve)
 
-  private def serve(resources: (GameStore, BotStore, Option[PgGameStore], IO[Unit])): IO[Unit] =
-    val (store, botStore, pgStore, deliverer) = resources
+  private def serve(resources: (GameStore, BotStore, Option[PgGameStore], Client[IO], IO[Unit])): IO[Unit] =
+    val (store, botStore, pgStore, httpClient, deliverer) = resources
     for
       registry   <- GameRegistry.create(store = store)
       resumed    <- registry.resume
@@ -96,17 +99,36 @@ object Main extends IOApp.Simple:
             .as(IO.never: IO[Unit])
         case (Some(ratingConfig), Some(pg)) =>
           IO.pure(new RatingBatch(botStore, pg, ratingConfig).scheduler())
-      // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, and the ingest deliverer
-      // are scoped to the server: they run while it runs and are cancelled with it, so a failure surfaces instead of
-      // being silently dropped by a detached fiber.
-      _ <- (
-        deliverer.background,
-        lobby.sweeper().background,
-        challenges.sweeper().background,
-        ladderLoop.background,
-        ratingLoop.background
-      ).tupled
-        .surround:
+      // Registration triggers an outbound verification POST, so it shares the strict per-IP budget of /bot/register.
+      webhookLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
+      // Webhook push (F.2, #104) is opt-in the same way (WEBHOOK_TIMEOUT_SECONDS). Unlike the rating batch it does
+      // NOT require the database: in-memory mode registers webhooks for the process's lifetime, matching how
+      // registered-bot identities behave there. The service is a Resource because it owns its per-game runner
+      // fibers (a Supervisor) — releasing it cancels them all. It is threaded to the routes as an Option — absent,
+      // the /bot/webhook endpoints answer 503 and no delivery loop runs.
+      webhookResource = Webhooks.configFromEnv match
+        case None =>
+          Resource
+            .eval(IO.println("[play][webhook] WEBHOOK_TIMEOUT_SECONDS unset: webhook push disabled"))
+            .as(None: Option[Webhooks])
+        case Some(webhookConfig) =>
+          Resource
+            .eval(pgStore.fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore)))
+            .flatMap(webhookStore => Webhooks.create(registry, webhookStore, httpClient, webhookConfig))
+            .map(Some(_))
+      // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, the webhook loop, and the
+      // ingest deliverer are scoped to the server: they run while it runs and are cancelled with it, so a failure
+      // surfaces instead of being silently dropped by a detached fiber.
+      _ <- webhookResource.use { webhookService =>
+        val loops = (
+          deliverer.background,
+          lobby.sweeper().background,
+          challenges.sweeper().background,
+          ladderLoop.background,
+          ratingLoop.background,
+          webhookService.fold(IO.never: IO[Unit])(_.loop.void).background
+        ).tupled
+        loops.surround {
           // The leaderboard/profile API reads bots + game_results — DB-only seams, so without persistence the
           // routes are simply not mounted (404), same spirit as the rating batch above.
           val leaderboard =
@@ -118,6 +140,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
+                  WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
                     challenges,
@@ -131,6 +154,8 @@ object Main extends IOApp.Simple:
             )
             .build
             .useForever
+        }
+      }
     yield ()
 
   /** Per-IP hourly budget for `POST /bot/register` — a team registers a handful of identities, not thirty. */
