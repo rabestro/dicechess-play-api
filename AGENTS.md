@@ -194,12 +194,27 @@ failures cheaply. When in doubt, escalate one tier — reviewer time costs more 
 
 ## Documentation
 
-- In-repo: `README.md` (orientation; status sections stale, see Gotchas), `docs/bot-api.md`
-  (authoritative public Bot API reference: auth, endpoints, DFEN, provably-fair protocol,
-  legal-move prefix trees, time controls), `CONTRIBUTING.md`, `SECURITY.md`, `CLA.md`.
-- Design ADRs live outside this repo in the `dicechess-docs` vault: ADR-0007 (server
-  authority), ADR-0008 (dice fairness), ADR-0009 (Bot API).
-- Update-trigger map: `/bot` routes or protocol semantics changed → `docs/bot-api.md`; dice
-  protocol → bot-api.md fairness section (+ `random_bot.py` if affected); server env vars or
-  compose → README run/deploy sections; `wire/Codecs.scala` → coordinate with dicechess-play.
+Three layers, by audience (see ADR-0012 for the boundary):
+
+1. **File-head comments** — the authoritative contract for a module lives at the top of its
+   source file (cross-repo invariants, decisions). Code is the source of truth.
+2. **Public docs site** (`docs/`, Astro + Starlight → GitHub Pages, English) — the
+   authoritative **public** Bot API reference for third-party bot developers: auth tiers, REST
+   endpoints, ndjson streams, webhooks, DFEN, the legal-move tree, time controls, and the
+   provably-fair verification procedure. Pages under `docs/src/content/docs/`. Run locally with
+   `mise run docs:dev`; build with `mise run docs:build`. `docs/bot-api.md` is now a **stub**
+   pointing here (kept because AGENTS.md and external links reference the path).
+3. **Wiki** (`dicechess-docs` vault, Russian) — internal design docs, ADRs, roadmap: ADR-0007
+   (server authority), ADR-0008 (dice fairness), ADR-0009 (Bot API), ADR-0012 (this site).
+
+- Other in-repo docs: `README.md` (orientation; status sections stale, see Gotchas),
+  `CONTRIBUTING.md`, `SECURITY.md`, `CLA.md`.
+- Update-trigger map: `/bot` routes or protocol semantics changed → the matching **docs site**
+  page under `docs/src/content/docs/` (REST → `reference/rest.md`, streams →
+  `reference/streaming.md`, webhooks → `reference/webhooks.md`); dice protocol →
+  `provably-fair.md` (+ `examples/random_bot.py` if affected); a new public API surface → a new
+  site page + sidebar entry in `astro.config.mjs`; server env vars or compose → README
+  run/deploy sections; `wire/Codecs.scala` → coordinate with dicechess-play.
+- The docs site deploys independently (`deploy-docs.yaml`, paths-filtered to `docs/**`); backend
+  CI ignores docs-only changes and vice versa. `docs/package.json` is watched by Dependabot.
 - Markdown rules per `.markdownlint.yaml` (MD013 disabled). All docs in English.
