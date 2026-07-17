@@ -41,8 +41,8 @@ final class RatingBatch(botStore: BotStore, ratingStore: RatingStore, config: Ra
 
   private def applyGame(row: GameResultRow): IO[Unit] =
     (
-      RatingBatch.parseBot(row.whiteExternalId),
-      RatingBatch.parseBot(row.blackExternalId),
+      Principal.fromBotExternalId(row.whiteExternalId),
+      Principal.fromBotExternalId(row.blackExternalId),
       row.result.flatMap(RatingBatch.scores)
     ) match
       case (Some(white), Some(black), _) if white == black =>
@@ -91,15 +91,6 @@ object RatingBatch:
     */
   def configFromEnv: Option[Config] =
     Config.fromValues(sys.env.get("RATING_INTERVAL_SECONDS"), sys.env.get("RATING_BATCH_SIZE"))
-
-  /** The `(team, name)` behind a bot's canonical `external_id` (`bot:team:<team>:<name>`, `Principal.externalId`). Safe
-    * to split on `:` — team and name are colon-free slugs by the identity-issuance invariant. `None` for any other
-    * identity shape (guests, users, legacy `bot:<algorithm>` ids).
-    */
-  private[rating] def parseBot(externalId: String): Option[Principal.Bot] =
-    externalId.split(':') match
-      case Array("bot", "team", team, name) if team.nonEmpty && name.nonEmpty => Some(Principal.Bot(team, name))
-      case _                                                                  => None
 
   /** White-POV stored result → (whiteScore, blackScore) in Glicko terms; `None` for any out-of-vocabulary value. */
   private[rating] def scores(result: Int): Option[(Double, Double)] = result match
