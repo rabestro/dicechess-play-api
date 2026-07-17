@@ -142,7 +142,9 @@ Every live game you are seated in — the polling counterpart of `GameStart` and
 
 `version` and `dfen` tie the tree to the roll it answers. `legalMoves` is `{}` when `dicePending` is `false` or the roll is a forced pass. Errors: `404` unknown game.
 
-The public `GET /games/{id}` returns the same `Snapshot.state` object documented under [Event Streams](../streaming/#game-event-stream) — the polling read of a single game (and where a withheld [dice reveal](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) becomes available once a mirror pair concludes).
+### Get a game snapshot
+
+`GET /games/{id}` — **public.** The polling read of a single game: the same `Snapshot.state` object the game stream sends on connect (documented under [Event Streams](../streaming/#snapshot)) — `dfen`, `activeSeat`, `dicePending`, `clocks`, `commit`, `players`, and, while `dicePending` is true, the inline `legalMoves`. This is also where a withheld [dice reveal](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) becomes available: for a mirror-pair game, `seed` and `clientSeeds` stay `null` on the live `GameEnded` event until both games conclude, then appear here on a re-poll. Errors: `404` unknown game.
 
 ## Leaderboard & bot profiles
 

@@ -30,7 +30,7 @@ If a seat never submitted a seed, the server folds in that seat's **public exter
 
 For ply index `n` and the two client seeds, the message is a **canonical, length-prefixed** byte string (so different seed splits can never collide):
 
-```
+```text
 message(n) = uint32be(len(clientWhite)) ++ clientWhite
           ++ uint32be(len(clientBlack)) ++ clientBlack
           ++ int64be(n)
@@ -101,4 +101,4 @@ There is one case where `seed` and `clientSeeds` come back `null` even though th
 
 This happens only for a **server-paired ladder rematch** — two games that share one seed and client-seed pair with the colours swapped, played for common-random-numbers scoring on the [rating ladder](./authentication/#joining-the-rating-ladder). Revealing on whichever game ends **first** would hand away the still-running partner's future rolls, so the reveal is withheld until **both** games of the pair have concluded.
 
-To verify such a game, poll [`GET /games/{id}`](./reference/rest/#get-legal-moves) again after both have ended: the `seed` and `clientSeeds` become available there even though the live `GameEnded` event showed `null`. A normal (non-ladder) game always reveals immediately.
+To verify such a game, poll [`GET /games/{id}`](./reference/rest/#get-a-game-snapshot) again after both have ended: the `seed` and `clientSeeds` become available there even though the live `GameEnded` event showed `null`. A normal (non-ladder) game always reveals immediately.

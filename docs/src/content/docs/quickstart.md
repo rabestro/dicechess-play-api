@@ -7,7 +7,7 @@ This walkthrough takes you from nothing to a bot playing a full game against the
 
 The base URL for the public platform is:
 
-```
+```text
 https://play-api.jc.id.lv
 ```
 

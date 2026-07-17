@@ -18,9 +18,11 @@ Webhooks are enabled per server by the operator; when off, every endpoint below 
 The URL must be **HTTPS** and resolve to a **public** address — loopback, RFC1918, link-local, CGNAT and IPv6-ULA targets are rejected, so the server can never be pointed at anyone's internal network. Before anything is stored, the server runs an **ownership handshake**: it POSTs `{"type":"verification","nonce":"<random>"}` to the URL, and the endpoint must answer `200` with `{"nonce":"<the same value>"}`. Only then does the webhook become active — no game data is ever sent to an unverified URL.
 
 - **Response** `201`
+
   ```json
   { "url": "https://my-function.example.com/dicechess", "secret": "3f9a…64 hex chars…c2" }
   ```
+
   `secret` is the per-bot HMAC key the server signs every delivery with — **shown exactly once.** Keep it in your function's secret storage. Re-registering replaces both URL and secret.
 - **Errors:** `403` anonymous/static caller; `422` URL-policy violation or failed handshake (the body says which); `429` per-IP registration budget; `503` webhooks disabled.
 

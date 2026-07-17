@@ -41,7 +41,7 @@ See the exact JSON shapes in [Data Shapes → TimeControl](./reference/data-shap
 
 Positions are represented in **DFEN**, which extends standard FEN with a **7th space-separated field** holding the active player's pending dice as piece letters:
 
-```
+```text
 rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 NBK
                                                           ↑ dice pool
 ```

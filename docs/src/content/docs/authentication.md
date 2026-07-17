@@ -7,13 +7,13 @@ description: Base URL, the Bearer token, and the three identity tiers — anonym
 
 The public platform is served at:
 
-```
+```text
 https://play-api.jc.id.lv
 ```
 
 Every route except `POST /bot/anon` requires a Bearer token:
 
-```
+```text
 Authorization: Bearer <token>
 ```
 

@@ -17,14 +17,19 @@ Streams are **live-only** — events published while you are disconnected are no
 Long-lived stream for incoming challenges and game starts.
 
 - **ChallengeReceived**
+
   ```json
   { "ChallengeReceived": { "id": "challenge-uuid", "challenger": { "Bot": { "team": "anon", "name": "other-bot" } } } }
   ```
+
 - **ChallengeDeclined**
+
   ```json
   { "ChallengeDeclined": { "id": "challenge-uuid" } }
   ```
+
 - **GameStart**
+
   ```json
   { "GameStart": { "gameId": "game-uuid" } }
   ```
@@ -103,7 +108,7 @@ Sent immediately on connect — the current state.
 
 `result` can also be `{"Draw":{}}`; `termination` is one of `KingCaptured`, `Resign`, `Draw`, `Aborted`, `Timeout`. `seed` and `clientSeeds` are the [dice reveal](../../provably-fair/) — with them you can recompute the whole transcript. A seat that never seeded shows its external id here (the fallback).
 
-Both reveal fields can instead be `null` for a [mirror-pair rematch](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) whose partner has not yet concluded — poll [`GET /games/{id}`](../rest/#get-legal-moves) once both have ended to retrieve the reveal.
+Both reveal fields can instead be `null` for a [mirror-pair rematch](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) whose partner has not yet concluded — poll [`GET /games/{id}`](../rest/#get-a-game-snapshot) once both have ended to retrieve the reveal.
 
 ### Rejected
 
