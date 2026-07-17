@@ -303,7 +303,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
-  test("leaderboard: converged bots best-first with rated W-D-L; provisional bots hidden (#103)"):
+  test("the leaderboard lists converged bots best-first with their rated records and hides provisional ones (#103)"):
     withContainers { pg =>
       store(pg).use { db =>
         val strong: Principal.Bot = Principal.Bot("lb-suite", "strong")

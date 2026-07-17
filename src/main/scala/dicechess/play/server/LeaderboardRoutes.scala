@@ -79,8 +79,8 @@ object LeaderboardRoutes:
       case GET -> Root / "leaderboard" =>
         board
           .leaderboard(maxRd = Glicko2.ProvisionalDeviationThreshold)
-          .flatMap { entries =>
-            val rows = entries.zipWithIndex.map { (entry, index) =>
+          .flatMap: entries =>
+            val rows = entries.zipWithIndex.map: (entry, index) =>
               LeaderRow(
                 rank = index + 1,
                 team = entry.team,
@@ -93,9 +93,7 @@ object LeaderboardRoutes:
                 draws = entry.tally.draws,
                 losses = entry.tally.losses
               )
-            }
             Ok(Leaderboard(rows))
-          }
 
       case GET -> Root / "bots" / team / name =>
         bots
@@ -104,8 +102,8 @@ object LeaderboardRoutes:
             case None         => NotFound()
             case Some(rating) =>
               val externalId = Principal.Bot(team, name).externalId
-              (board.resultTallyFor(externalId), results.recentResultsFor(externalId, RecentGamesShown)).flatMapN {
-                (tally, recent) =>
+              (board.resultTallyFor(externalId), results.recentResultsFor(externalId, RecentGamesShown))
+                .flatMapN: (tally, recent) =>
                   Ok(
                     BotProfile(
                       team = team,
@@ -121,7 +119,6 @@ object LeaderboardRoutes:
                       recent = recent.map(recentGame(externalId, _))
                     )
                   )
-              }
 
   /** Reframe a stored white-POV row from the profiled bot's point of view. */
   private def recentGame(profiledExternalId: String, row: GameResultRow): RecentGame =
