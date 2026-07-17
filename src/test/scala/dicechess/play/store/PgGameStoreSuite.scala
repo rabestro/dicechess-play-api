@@ -138,6 +138,46 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("webhook registration round-trips, re-register replaces url+secret, delete reports truth (#104)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val at = java.time.Instant.parse("2026-07-17T12:00:00Z")
+        for
+          // A webhook row requires its bot identity (FK to bots) — dedicated namespace, same reasoning as above.
+          _        <- db.register("webhook-suite", "pusher", "hash-webhook-pusher")
+          none     <- db.get("webhook-suite", "pusher")
+          _        <- db.put(BotWebhook("webhook-suite", "pusher", "https://fn.example/turn", "secret-1", at))
+          first    <- db.get("webhook-suite", "pusher")
+          _        <- db.put(BotWebhook("webhook-suite", "pusher", "https://fn2.example/turn", "secret-2", at))
+          replaced <- db.get("webhook-suite", "pusher")
+          removed  <- db.delete("webhook-suite", "pusher")
+          gone     <- db.get("webhook-suite", "pusher")
+          again    <- db.delete("webhook-suite", "pusher")
+        yield
+          assertEquals(none, None)
+          assertEquals(first, Some(BotWebhook("webhook-suite", "pusher", "https://fn.example/turn", "secret-1", at)))
+          assertEquals(
+            replaced,
+            Some(BotWebhook("webhook-suite", "pusher", "https://fn2.example/turn", "secret-2", at)),
+            "a re-register must replace the URL and the secret together"
+          )
+          assertEquals(removed, true)
+          assertEquals(gone, None)
+          assertEquals(again, false, "deleting an absent registration must report false, not lie")
+      }
+    }
+
+  test("a webhook row cannot exist without its bot identity — the FK rejects strangers (#104)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val at = java.time.Instant.parse("2026-07-17T12:00:00Z")
+        db.put(BotWebhook("webhook-suite", "never-registered", "https://fn.example", "s", at)).attempt.map {
+          case Left(_)   => () // FK violation, as designed
+          case Right(()) => fail("a webhook for an unregistered identity must be rejected by the FK")
+        }
+      }
+    }
+
   test("finishing a game inserts exactly one game_results row with the expected fields (#98)"):
     withContainers { pg =>
       store(pg).use { db =>

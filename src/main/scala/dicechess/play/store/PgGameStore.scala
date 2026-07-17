@@ -33,7 +33,8 @@ final class PgGameStore private (xa: Transactor[IO])
     with BotStore
     with GameResultsStore
     with RatingStore
-    with LeaderboardStore:
+    with LeaderboardStore
+    with WebhookStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
@@ -156,6 +157,32 @@ final class PgGameStore private (xa: Transactor[IO])
       .transact(xa)
       .timeout(SaveTimeout)
       .map(_.map(Principal.Bot(_, _)))
+
+  // ── WebhookStore (F.2, #104) ────────────────────────────────────────────────
+
+  /** Upsert: a re-register replaces URL and secret together (the old secret stops signing immediately). */
+  def put(webhook: BotWebhook): IO[Unit] =
+    sql"""INSERT INTO play.bot_webhooks (team, name, url, secret, verified_at)
+          VALUES (${webhook.team}, ${webhook.name}, ${webhook.url}, ${webhook.secret}, ${webhook.verifiedAt})
+          ON CONFLICT (team, name)
+          DO UPDATE SET url = EXCLUDED.url, secret = EXCLUDED.secret, verified_at = EXCLUDED.verified_at""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .void
+
+  def get(team: String, name: String): IO[Option[BotWebhook]] =
+    sql"""SELECT team, name, url, secret, verified_at FROM play.bot_webhooks
+          WHERE team = $team AND name = $name"""
+      .query[BotWebhook]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+
+  def delete(team: String, name: String): IO[Boolean] =
+    sql"""DELETE FROM play.bot_webhooks WHERE team = $team AND name = $name""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
 
   /** Every live game, decoded row by row: one corrupt snapshot is logged and skipped, never aborting the batch — a
     * single bad row must not stop every other game from resuming.

@@ -176,6 +176,38 @@ object BotStore:
           ratings.get.map(_.toList.collect { case ((team, name), r) if r.onLadder => Principal.Bot(team, name) })
     }
 
+/** A registered bot's verified webhook (F.2, #104): rows exist only after the ownership handshake succeeded, so
+  * `verifiedAt` is total. `secret` is the per-bot HMAC key the server signs outbound deliveries with — readable by
+  * design (it signs, it does not authenticate into play-api); see the V7 migration comment.
+  */
+final case class BotWebhook(team: String, name: String, url: String, secret: String, verifiedAt: java.time.Instant)
+
+/** Persistence seam for webhook registrations (F.2, #104). One webhook per bot identity; `put` replaces (re-register
+  * rotates the URL and secret together). Deliveries re-read the row per turn, so a delete or re-register takes effect
+  * mid-game, not at the next game.
+  */
+trait WebhookStore:
+  def put(webhook: BotWebhook): IO[Unit]
+  def get(team: String, name: String): IO[Option[BotWebhook]]
+
+  /** Remove the registration. False when the bot had none. */
+  def delete(team: String, name: String): IO[Boolean]
+
+object WebhookStore:
+  /** In-memory mode (no `PLAY_DB_URL`): registrations last for the process's lifetime, matching `BotStore.inMemory` —
+    * the identities these webhooks belong to die with the process too.
+    */
+  def inMemory: IO[WebhookStore] =
+    cats.effect.Ref.of[IO, Map[(String, String), BotWebhook]](Map.empty).map { hooks =>
+      new WebhookStore:
+        def put(webhook: BotWebhook): IO[Unit] =
+          hooks.update(_.updated((webhook.team, webhook.name), webhook))
+        def get(team: String, name: String): IO[Option[BotWebhook]] =
+          hooks.get.map(_.get((team, name)))
+        def delete(team: String, name: String): IO[Boolean] =
+          hooks.modify(m => (m.removed((team, name)), m.contains((team, name))))
+    }
+
 /** An undelivered analytics handoff: the game's `GameIngest` payload plus its retry bookkeeping. */
 final case class OutboxRow(gameId: GameId, payload: io.circe.Json, attempts: Int)
 

@@ -338,8 +338,10 @@ object BotRoutes:
         case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
         case None         => Forbidden("only a registered bot can join the rating ladder")
 
-  /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. */
-  private def withBot(auth: BotAuth, req: Request[IO])(f: Principal.Bot => IO[Response[IO]]): IO[Response[IO]] =
+  /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. Package-visible so sibling route
+    * modules of the same Bot API surface (`WebhookRoutes`) authenticate identically instead of re-deriving this.
+    */
+  private[server] def withBot(auth: BotAuth, req: Request[IO])(f: Principal.Bot => IO[Response[IO]]): IO[Response[IO]] =
     asBot(auth, req).flatMap:
       case Some(bot) => f(bot)
       case None      => Unauthorized(bearerChallenge)
@@ -358,7 +360,7 @@ object BotRoutes:
   /** Client IP for rate-limiting. Behind the Cloudflare tunnel the socket peer is the tunnel, so the real client is in
     * `CF-Connecting-IP` (then `X-Forwarded-For`, then the direct peer for local/dev).
     */
-  private def clientIp(req: Request[IO]): String =
+  private[server] def clientIp(req: Request[IO]): String =
     req.headers
       .get(ci"CF-Connecting-IP")
       .map(_.head.value)
