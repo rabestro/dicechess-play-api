@@ -23,7 +23,7 @@ for _ in $(seq 1 30); do
 done
 [ -n "$ok" ] || { echo "smoke: /health never served"; docker logs "$API" | tail -60; exit 1; }
 
-# 2) Core path: creating a game returns a gameId + dice commitment + join tokens.
+# white/black must be UUIDs (dicechess-play-api#141 — Principal.guest rejects anything else with 400).
 # white/black must be UUIDs (dicechess-play-api#14 — Principal.guest rejects anything else with 400).
 body=$(curl -fsS -X POST "http://localhost:$PORT/games" \
   -H 'content-type: application/json' \
