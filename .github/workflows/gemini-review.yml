@@ -3,7 +3,9 @@ name: 'CI: Gemini Review'
 # Automated PR review via the official run-gemini-cli action (replaces the
 # consumer Gemini Code Assist GitHub app, sunset 2026-07-17).
 # - Reviews every non-fork PR on open, reopen, new pushes (synchronize), and
-#   when a draft is marked ready. Fork PRs are excluded (see the job `if`).
+#   when a draft is marked ready. Fork PRs and Dependabot PRs are excluded
+#   (see the job `if`): a dependency-version bump has no author-written code to
+#   review, and CI (build/tests) is the real gate for those.
 # - Auth: Vertex AI via Workload Identity Federation (keyless). Usage bills to
 #   the Google Cloud project's billing account (trial + GDP credits) — the
 #   AI Studio API-key path cannot use those credits (prepay-only), so we use
@@ -31,7 +33,11 @@ jobs:
     # Fork PRs are excluded: WIF id-tokens are not minted for forks, and fork
     # code must never be checked out with workspace trust enabled. To re-review
     # without a new commit, toggle the PR draft/ready state.
-    if: github.event.pull_request.head.repo.fork == false
+    # Dependabot PRs are excluded too: the diff is a dependency-version bump with
+    # no author-written code to review — CI (build/tests) is the gate for those.
+    if: >-
+      github.event.pull_request.head.repo.fork == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
