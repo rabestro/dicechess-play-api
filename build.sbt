@@ -34,7 +34,7 @@ val CirceVersion           = "0.14.10"
 val LogbackVersion         = "1.5.38"
 val Http4sJdkClientVersion = "0.10.0"
 val MunitVersion           = "1.3.4"
-val MunitCatsEffectVersion = "2.1.0"
+val MunitCatsEffectVersion = "2.2.0"
 // Persistence stack — kept in lockstep with dicechess-analytics so both backends
 // share one operational profile (same driver, migrations, test harness).
 val DoobieVersion             = "1.0.0-RC9"
