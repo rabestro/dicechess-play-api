@@ -47,6 +47,7 @@ object Codecs:
   given Codec[Players]         = deriveCodec
   given Codec[PublicGameState] = deriveCodec
   given Codec[GameMoves]       = deriveCodec
+  given Codec[SnapshotTurn]    = deriveCodec
   given Codec[GameCommand]     = deriveCodec
   given Codec[GameEvent]       = deriveCodec
   given Codec[Challenge]       = deriveCodec

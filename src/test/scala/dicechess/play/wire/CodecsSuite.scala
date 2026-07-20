@@ -29,7 +29,12 @@ class CodecsSuite extends munit.FunSuite:
         seed = None,       // active game: seed not yet revealed
         clientSeeds = None // ditto for the client seeds
       )
-    roundtrip[GameEvent](GameEvent.Snapshot(3L, ps))
+    // The snapshot carries the completed-turn history; a forced pass is an entry with empty `moves`.
+    val history = List(
+      SnapshotTurn(Seat.White, List(1, 2, 6), List("e2e4", "g1f3"), "fen-after-1"),
+      SnapshotTurn(Seat.Black, List(3), Nil, "fen-after-2")
+    )
+    roundtrip[GameEvent](GameEvent.Snapshot(3L, ps, history))
     // An ended snapshot reveals the seeds so a late (re)joiner can still open the commitment.
     val endedPs = PublicGameState(
       9L,
@@ -43,7 +48,7 @@ class CodecsSuite extends munit.FunSuite:
       seed = Some("ab12"),
       clientSeeds = Some(ClientSeeds("w-seed", "b-seed"))
     )
-    roundtrip[GameEvent](GameEvent.Snapshot(9L, endedPs))
+    roundtrip[GameEvent](GameEvent.Snapshot(9L, endedPs, Nil))
     val tree = MoveTree(Map("e2e4" -> MoveTree(Map("g1f3" -> MoveTree.empty)), "a2a3" -> MoveTree.empty))
     roundtrip[GameEvent](
       GameEvent.DiceRolled(1L, Seat.White, List(1, 2, 6), "dfen", Some(Clocks(180000, 175000)), Some(tree))
@@ -169,8 +174,8 @@ class CodecsSuite extends munit.FunSuite:
       clientSeeds = Some(ClientSeeds("w", "b"))
     )
     assertEquals(
-      (GameEvent.Snapshot(9L, terminal): GameEvent).asJson.noSpaces,
-      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"},"legalMoves":null,"players":null}}}"""
+      (GameEvent.Snapshot(9L, terminal, Nil): GameEvent).asJson.noSpaces,
+      """{"Snapshot":{"v":9,"state":{"version":9,"dfen":"fen","activeSeat":"White","dicePending":false,"status":{"Ended":{"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"}}},"timeControl":{"Unlimited":{}},"clocks":null,"commit":"c0ffee","seed":"ab12","clientSeeds":{"white":"w","black":"b"},"legalMoves":null,"players":null},"history":[]}}"""
     )
 
   test("Seek and Players pin their wire shapes (who a lobby row / board is looking at)"):

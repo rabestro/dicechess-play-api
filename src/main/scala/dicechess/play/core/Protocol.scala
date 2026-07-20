@@ -108,6 +108,12 @@ final case class PublicGameState(
   */
 final case class GameMoves(version: Long, dfen: String, dicePending: Boolean, legalMoves: MoveTree)
 
+/** One completed turn, replayed to a (re)joining client in a `Snapshot` so its move history starts at move 1 rather
+  * than at connect time. `dice` is the roll; `moves` are the UCI micro-moves played (empty for a forced pass);
+  * `fenAfter` is the resulting position (also the next turn's starting position — the client chains from the opening).
+  */
+final case class SnapshotTurn(seat: Seat, dice: List[Int], moves: List[String], fenAfter: String)
+
 /** Transport-neutral commands a player submits. NOT WebSocket/HTTP frames — the website WS edge and the Bot API are
   * codecs over this vocabulary. Kept minimal for 3a-core; draw/double/resync arrive in later milestones.
   */
@@ -124,7 +130,9 @@ enum GameCommand:
   * de-duplicate, and resync.
   */
 enum GameEvent:
-  case Snapshot(v: Long, state: PublicGameState)
+  // `history` is every completed turn so far, so a client that (re)joins mid-game renders the whole move list, not
+  // just what happens after it connected. Atomically consistent with `v` — no separate fetch, no version race.
+  case Snapshot(v: Long, state: PublicGameState, history: List[SnapshotTurn])
   // `legalMoves` carries the roll's legal turns (see MoveTree); `None` only when the enumeration exceeded the inline
   // cap — fetch `GET /games/{id}/moves` then. The empty tree announces a forced pass the server plays itself.
   case DiceRolled(

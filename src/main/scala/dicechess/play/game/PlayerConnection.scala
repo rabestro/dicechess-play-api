@@ -48,9 +48,9 @@ final class BotConnection(
 
   /** Extracts (version, dfen-with-dice) when it is this seat's turn to move. */
   private def turnFor(event: GameEvent): Option[(Long, String)] = event match
-    case GameEvent.DiceRolled(v, s, _, dfen, _, _) if s == seat               => Some((v, dfen))
-    case GameEvent.Snapshot(v, ps) if ps.dicePending && ps.activeSeat == seat => Some((v, ps.dfen))
-    case _                                                                    => None
+    case GameEvent.DiceRolled(v, s, _, dfen, _, _) if s == seat                  => Some((v, dfen))
+    case GameEvent.Snapshot(v, ps, _) if ps.dicePending && ps.activeSeat == seat => Some((v, ps.dfen))
+    case _                                                                       => None
 
   private def chooseAndSubmit(room: GameRoom, dfen: String): IO[Unit] =
     EngineOps.parse(dfen) match
