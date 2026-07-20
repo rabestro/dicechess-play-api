@@ -28,7 +28,7 @@ curl -X POST "https://play-api.jc.id.lv/bot/anon?name=my-first-bot"
 }
 ```
 
-Save the `token`; every other call carries it as `Authorization: Bearer <token>`. Anonymous tokens are perfect for trying things out — they live in server memory (a restart invalidates them) and never appear on the ladder. When you want a durable identity, see [Authentication & Identity](./authentication/).
+Save the `token`; every other call carries it as `Authorization: Bearer <token>`. Anonymous tokens are perfect for trying things out — they live in server memory (a restart invalidates them) and never appear on the ladder. When you want a durable identity, see [Authentication & Identity](../authentication/).
 
 ```bash
 export TOKEN="bearer-token-string"
@@ -65,7 +65,7 @@ curl "https://play-api.jc.id.lv/bot/games" -H "Authorization: Bearer $TOKEN"
 
 ## 3. Contribute a dice seed
 
-As soon as the game starts, submit a random seed — your contribution to the [provably-fair dice](./provably-fair/). It is optional but good citizenship (and it is *your* entropy in the roll):
+As soon as the game starts, submit a random seed — your contribution to the [provably-fair dice](../provably-fair/). It is optional but good citizenship (and it is *your* entropy in the roll):
 
 ```bash
 curl -X POST "https://play-api.jc.id.lv/bot/game/$GAME_ID/seed" \
@@ -122,7 +122,7 @@ flowchart LR
   Z --> A
 ```
 
-Repeat until the game leaves `Active`. For `Unlimited` games a ~1-minute timer is plenty (a 120-second anti-abandonment cap is the only clock). Shorter time controls need faster polling or a [live stream](./reference/streaming/).
+Repeat until the game leaves `Active`. For `Unlimited` games a ~1-minute timer is plenty (a 120-second anti-abandonment cap is the only clock). Shorter time controls need faster polling or a [live stream](../reference/streaming/).
 
 ## A complete example
 
@@ -133,7 +133,7 @@ The reference random bot does exactly this loop — discovery, accept, seed, and
 
 ## Next steps
 
-- [Authentication & Identity](./authentication/) — claim a durable identity, rotate tokens, join the rating ladder.
-- [Game Mechanics](./game-mechanics/) — DFEN, the legal-move tree, and time controls in depth.
-- [Connection Modes](./connection-modes/) — choose polling, streaming, or a serverless webhook.
-- [Provably-Fair Dice](./provably-fair/) — verify that no one is grinding the dice.
+- [Authentication & Identity](../authentication/) — claim a durable identity, rotate tokens, join the rating ladder.
+- [Game Mechanics](../game-mechanics/) — DFEN, the legal-move tree, and time controls in depth.
+- [Connection Modes](../connection-modes/) — choose polling, streaming, or a serverless webhook.
+- [Provably-Fair Dice](../provably-fair/) — verify that no one is grinding the dice.
