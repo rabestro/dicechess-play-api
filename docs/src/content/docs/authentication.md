@@ -55,13 +55,13 @@ Both `team` and `name` are lowercase slugs (`[a-z0-9][a-z0-9-]*`, ≤ 32 chars),
 Store it the moment you receive it — there is no way to retrieve it again, only to [rotate](#rotating-a-token) it. Losing it means rotating via a still-valid session or abandoning the identity.
 :::
 
-A registered identity is the gateway to everything durable: it **survives restarts** (pair it with [`GET /bot/games`](./reference/rest/#list-my-games) to pick games back up after a deploy), it can **rotate its token**, it can **join the rating ladder**, and it can **register a webhook**.
+A registered identity is the gateway to everything durable: it **survives restarts** (pair it with [`GET /bot/games`](../reference/rest/#list-my-games) to pick games back up after a deploy), it can **rotate its token**, it can **join the rating ladder**, and it can **register a webhook**.
 
 Encode a bot's **version in its name** (`smaug-v3`), not anywhere else — the platform ranks named identities, so a new version is a new entrant.
 
 ### Static (house)
 
-Built-in bots the operator configures in the server environment — the `house/greedy` sparring partner you meet in the [Quickstart](./quickstart/) is one. You cannot create these; you only play against them. They authenticate via a fixed token and cannot rotate or join the ladder.
+Built-in bots the operator configures in the server environment — the `house/greedy` sparring partner you meet in the [Quickstart](../quickstart/) is one. You cannot create these; you only play against them. They authenticate via a fixed token and cannot rotate or join the ladder.
 
 ## Rotating a token
 
@@ -95,9 +95,9 @@ curl -X POST "https://play-api.jc.id.lv/bot/ladder/join" -H "Authorization: Bear
 { "onLadder": true, "glickoRating": 1500.0, "glickoRd": 350.0 }
 ```
 
-Opting in is **passive**: the server periodically starts games between on-ladder bots on its own. Pairings are **server-chosen** — you cannot pick your opponent, which is what stops an owner from farming rating with two colluding bots. Expect unsolicited `GameStart` events (or discover games via [`GET /bot/games`](./reference/rest/#list-my-games)); the ladder plays a fixed Fischer time control.
+Opting in is **passive**: the server periodically starts games between on-ladder bots on its own. Pairings are **server-chosen** — you cannot pick your opponent, which is what stops an owner from farming rating with two colluding bots. Expect unsolicited `GameStart` events (or discover games via [`GET /bot/games`](../reference/rest/#list-my-games)); the ladder plays a fixed Fischer time control.
 
-A fresh bot starts at Glickman's defaults (`1500 ± 350`) and off the ladder until it joins. Ratings are recomputed by a periodic **offline Glicko-2 batch**, not live at game end — expect a finished game to move your rating within about a minute. Until your deviation converges (RD ≤ 110, typically a few dozen games), you are rated internally but hidden from the public [leaderboard](./reference/rest/#leaderboard) to keep it free of noise.
+A fresh bot starts at Glickman's defaults (`1500 ± 350`) and off the ladder until it joins. Ratings are recomputed by a periodic **offline Glicko-2 batch**, not live at game end — expect a finished game to move your rating within about a minute. Until your deviation converges (RD ≤ 110, typically a few dozen games), you are rated internally but hidden from the public [leaderboard](../reference/rest/#leaderboard) to keep it free of noise — see [Rating & Ladder](../rating/) for what RD and volatility actually mean, and why a bot with erratic results can stay provisional far longer than the game count alone would suggest.
 
 Leave with `POST /bot/ladder/leave`; your rating freezes and you stay listed with `onLadder: false`. Registered bots only.
 

@@ -154,7 +154,7 @@ Public, no `Authorization`. Both exist only when the server runs with persistenc
 
 `GET /leaderboard`
 
-Registered bots whose rating has **converged** (RD ≤ 110), best first. Provisional bots are counted internally but absent by policy. `wins`/`draws`/`losses` count **rated, decided** games only.
+Registered bots whose rating has **converged** (RD ≤ 110), best first. Provisional bots are counted internally but absent by policy — see [Rating & Ladder](../../rating/) for what that means and why it can take longer than expected. `wins`/`draws`/`losses` count **rated, decided** games only.
 
 ```json
 { "leaders": [{ "rank": 1, "team": "acme", "name": "alice", "rating": 1720.5, "rd": 85.2, "onLadder": true, "games": 42, "wins": 30, "draws": 2, "losses": 10 }] }
