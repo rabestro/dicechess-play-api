@@ -29,8 +29,9 @@ enum Principal:
     * play SPA (`guest:<uuidv7>`, `user:<uuid>`, `bot:team:<team>:<name>`) — it must NOT be re-encoded (e.g. Base64), or
     * a guest would get a different id than the SPA mints and the player would split into two rows.
     *
-    * Invariant (enforced at the identity-issuance boundary, not here): ids are UUIDs and bot `team`/`name` are
-    * colon-free slugs, so the `:`-joined form is unambiguous.
+    * Invariant: ids are UUIDs and bot `team`/`name` are colon-free slugs, so the `:`-joined form is unambiguous.
+    * Enforced at the identity-issuance boundary — `Principal.guest` for guests, `BotAuth.isSlug` for bots — not by this
+    * case class itself (which stays a plain constructor for internal/test use).
     */
   def externalId: String = this match
     case Guest(id)       => s"guest:$id"
@@ -47,3 +48,13 @@ object Principal:
     externalId.split(':') match
       case Array("bot", "team", team, name) if team.nonEmpty && name.nonEmpty => Some(Principal.Bot(team, name))
       case _                                                                  => None
+
+  /** Validates a client-supplied guest id at the identity-issuance boundary (`POST /games`, `/lobby/seeks`,
+    * `/lobby/seeks/{id}/accept`) before it can ever reach `externalId`: it must be a UUID, per the invariant
+    * `externalId` documents. Rejects empty and colon-containing ids in particular — either would otherwise produce a
+    * malformed or ambiguous `guest:...` external_id that collides with the `user:`/`bot:team:` conventions (see
+    * dicechess-play-api#14).
+    */
+  def guest(id: String): Either[String, Principal.Guest] =
+    if scala.util.Try(java.util.UUID.fromString(id)).isSuccess then Right(Principal.Guest(id))
+    else Left(s"'$id' is not a valid guest id (must be a UUID)")

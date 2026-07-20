@@ -53,12 +53,15 @@ object LobbyRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              lobby
-                .create(Principal.Guest(body.creator), body.timeControl.getOrElse(TimeControl.Unlimited))
-                .flatMap:
-                  case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
-                  // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
-                  case Left(Lobby.CreateRejected.TooManyOpenSeeks) => TooManyRequests("too many open seeks")
+              Principal.guest(body.creator) match
+                case Left(err)      => BadRequest(s"creator: $err")
+                case Right(creator) =>
+                  lobby
+                    .create(creator, body.timeControl.getOrElse(TimeControl.Unlimited))
+                    .flatMap:
+                      case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
+                      // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
+                      case Left(Lobby.CreateRejected.TooManyOpenSeeks) => TooManyRequests("too many open seeks")
 
       case GET -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>
         secret match
@@ -79,14 +82,17 @@ object LobbyRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              lobby
-                .accept(id, Principal.Guest(body.accepter))
-                .flatMap:
-                  case Right(m)                           => Created(SeekMatch(m.gameId, m.token, m.seat))
-                  case Left(Lobby.Rejected.NotFound)      => NotFound()
-                  case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
-                  case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
-                  case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
+              Principal.guest(body.accepter) match
+                case Left(err)       => BadRequest(s"accepter: $err")
+                case Right(accepter) =>
+                  lobby
+                    .accept(id, accepter)
+                    .flatMap:
+                      case Right(m)                           => Created(SeekMatch(m.gameId, m.token, m.seat))
+                      case Left(Lobby.Rejected.NotFound)      => NotFound()
+                      case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
+                      case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
+                      case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case DELETE -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>
         secret match

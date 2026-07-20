@@ -69,17 +69,17 @@ object PlayRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              registry
-                .create(
-                  Principal.Guest(body.white),
-                  Principal.Guest(body.black),
-                  body.timeControl.getOrElse(TimeControl.Unlimited)
-                )
-                .flatMap:
-                  case Left(error)       => BadRequest(error)
-                  case Right((id, room)) =>
-                    val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
-                    room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
+              (Principal.guest(body.white), Principal.guest(body.black)) match
+                case (Left(err), _)               => BadRequest(s"white: $err")
+                case (_, Left(err))               => BadRequest(s"black: $err")
+                case (Right(white), Right(black)) =>
+                  registry
+                    .create(white, black, body.timeControl.getOrElse(TimeControl.Unlimited))
+                    .flatMap:
+                      case Left(error)       => BadRequest(error)
+                      case Right((id, room)) =>
+                        val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
+                        room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
 
       // Public like the per-game snapshot: everything here is already public information. Feeds the Watch page, the
       // lobby's "top game" preview, and the live-games counter; sorted by version (most action first) and capped —

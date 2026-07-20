@@ -290,7 +290,8 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
           // A guest accepts over the existing lobby route and receives its seat token.
           matched <- service
             .run(
-              Request[IO](Method.POST, uri"/lobby/seeks" / created.seekId / "accept").withEntity(AcceptSeek("guest-h1"))
+              Request[IO](Method.POST, uri"/lobby/seeks" / created.seekId / "accept")
+                .withEntity(AcceptSeek("33333333-3333-3333-3333-333333333333"))
             )
             .flatMap(_.as[SeekMatch])
           // The bot needs no token: the game appears in its listing, seated White (the seek creator's seat).
@@ -315,7 +316,9 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     app.flatMap: service =>
       for
         created <- service
-          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek("guest-h2")))
+          .run(
+            Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek("44444444-4444-4444-4444-444444444444"))
+          )
           .flatMap(_.as[CreatedSeek])
         accepted <- service.run(request(Method.POST, uri"/bot/seeks" / created.seekId / "accept", Some("tok-bob")))
         game     <- accepted.as[BotGame]
