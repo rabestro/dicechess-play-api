@@ -265,11 +265,16 @@ class WebhooksSuite extends munit.CatsEffectSuite:
           _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
           _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
           _ <- webhooks.attachSweep
-          // Generous but bounded: under the full `check` this runs with scoverage instrumentation AND alongside
+          // Bounded, per house convention (AGENTS.md: "bound every effectful wait with timeoutTo") — but 150s, not
+          // the original 30s (#140): under the full `check` this runs with scoverage instrumentation AND alongside
           // the testcontainers suites, so the delivery fiber can be starved well past a tight bound without any
-          // logic being wrong — 30s tolerates that while still failing loudly if delivery truly never happens.
+          // logic being wrong — that's what flaked on #136's unrelated CI run. There's no designed sleep to
+          // virtualize here (the delay is real fiber-scheduling latency, not a timer), so the fix isn't to remove
+          // the bound but to widen it to the same generous ceiling this suite's own full-game test already uses
+          // below, which gives ~5x the original headroom while still failing loudly — and with a specific,
+          // actionable message — if delivery genuinely never happens.
           _ <- answered.get
-            .timeoutTo(30.seconds, IO.raiseError(new RuntimeException("delivery never reached the endpoint")))
+            .timeoutTo(150.seconds, IO.raiseError(new RuntimeException("delivery never reached the endpoint")))
           state <- room.snapshot
           _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
         yield state
