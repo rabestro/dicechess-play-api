@@ -143,7 +143,7 @@ final class Webhooks private (
       room.subscribe
         .evalMap { event =>
           val actionable = event match
-            case GameEvent.Snapshot(v, state) =>
+            case GameEvent.Snapshot(v, state, _) =>
               Option.when(state.status == GameStatus.Active && state.dicePending && state.activeSeat == seat)(v)
             case GameEvent.DiceRolled(v, rolledFor, _, _, _, _) =>
               Option.when(rolledFor == seat)(v)

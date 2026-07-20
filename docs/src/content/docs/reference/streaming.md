@@ -63,12 +63,18 @@ Sent immediately on connect — the current state.
       "clientSeeds": null,
       "legalMoves": null,
       "players": { "white": { "kind": "Bot", "name": "house greedy" }, "black": { "kind": "Human", "name": null } }
-    }
+    },
+    "history": [
+      { "seat": "White", "dice": [2, 3, 6], "moves": ["b1c3", "g1f3", "e2e4"], "fenAfter": "rnbqkbnr/pppppppp/8/8/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 0 1" },
+      { "seat": "Black", "dice": [4, 4, 5], "moves": [], "fenAfter": "rnbqkbnr/pppppppp/8/8/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 0 1" }
+    ]
   }
 }
 ```
 
 `commit` is the dice commitment (constant for the game). `seed`/`clientSeeds` stay `null` until the game ends, then carry the [reveal](../../provably-fair/) — except a mirror-pair rematch, which withholds them until its partner also ends. While `dicePending` is `true`, `legalMoves` carries the pending roll's [tree](../../game-mechanics/#legal-moves) (or `null` if too large — fetch [`GET /games/{id}/moves`](../rest/#get-legal-moves)). `players` is both seats' public faces.
+
+`history` is every completed turn so far — so a client that joins mid-game renders the full move list, not just what happens after it connected. It is consistent with `v`. Each entry is `{ seat, dice, moves, fenAfter }`: `dice` is the roll, `moves` the UCI micro-moves (empty for a forced pass), and `fenAfter` the resulting position (also the next turn's start). Empty for a game with no completed turns yet.
 
 ### DiceRolled
 

@@ -70,6 +70,29 @@ class GameRoomSuite extends munit.CatsEffectSuite:
           case GameResult.Win(_) => assertEquals(over.termination, Termination.KingCaptured)
           case GameResult.Draw   => assertEquals(over.termination, Termination.Draw)
 
+  test("a joining client's snapshot replays the completed-turn history (#129)"):
+    val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)
+    val black = BotConnection(Principal.Bot("acme", "greedy"), Seat.Black, greedy)
+    val dice  = DiceSource.commitReveal("server-seed-fixture".getBytes("UTF-8"))
+
+    GameRoom
+      .create(Map(Seat.White -> white.principal, Seat.Black -> black.principal), dice)
+      .flatMap {
+        case Left(error) => IO.raiseError(RuntimeException(s"room creation failed: $error"))
+        case Right(room) =>
+          val play = (white.run(room).background, black.run(room).background).tupled.use: _ =>
+            room.start *> room.result
+          // Play the game out, THEN join fresh: the first event is a Snapshot that must carry the whole game,
+          // not an empty history — the fix for a spectator who joins mid-game and sees no prior moves.
+          play.timeoutTo(20.seconds, IO.raiseError(RuntimeException("game did not finish in time"))) *>
+            room.subscribe.collectFirst { case s: GameEvent.Snapshot => s }.compile.lastOrError
+      }
+      .map: snap =>
+        assert(snap.history.nonEmpty, "a completed game's snapshot must replay its turn history")
+        assert(snap.history.forall(_.fenAfter.nonEmpty), "every history entry carries a resulting position")
+        // The last recorded turn lands on the same position the snapshot itself shows (board field of the DFEN).
+        assertEquals(snap.history.last.fenAfter.split(" ").head, snap.state.dfen.split(" ").head)
+
   test("a stalled subscriber is dropped and never freezes the room"):
     val white = BotConnection(Principal.Guest("white"), Seat.White, greedy)
     val black = BotConnection(Principal.Bot("acme", "greedy"), Seat.Black, greedy)
@@ -261,7 +284,7 @@ class GameRoomSuite extends munit.CatsEffectSuite:
   private def firstMovableRoll(room: GameRoom): IO[MovableRoll] =
     val movable = room.subscribe
       .collectFirst:
-        case GameEvent.Snapshot(v, s) if s.dicePending && s.legalMoves.exists(_.children.nonEmpty) =>
+        case GameEvent.Snapshot(v, s, _) if s.dicePending && s.legalMoves.exists(_.children.nonEmpty) =>
           MovableRoll(s.activeSeat, s.dfen, s.legalMoves, v)
         case GameEvent.DiceRolled(v, seat, _, dfen, _, Some(tree)) if tree.children.nonEmpty =>
           MovableRoll(seat, dfen, Some(tree), v)
@@ -322,7 +345,7 @@ class GameRoomSuite extends munit.CatsEffectSuite:
         case Right(room) =>
           val elided = room.subscribe
             .collectFirst:
-              case GameEvent.Snapshot(v, s) if s.dicePending && s.legalMoves.isEmpty =>
+              case GameEvent.Snapshot(v, s, _) if s.dicePending && s.legalMoves.isEmpty =>
                 MovableRoll(s.activeSeat, s.dfen, None, v)
               case GameEvent.DiceRolled(v, seat, _, dfen, _, None) =>
                 MovableRoll(seat, dfen, None, v)

@@ -60,7 +60,9 @@ final class GameRoom private (
         val snapshot =
           Stream.eval(
             (stateRef.get, IO.monotonic, partnerEnded)
-              .mapN((s, now, eligible) => GameEvent.Snapshot(s.version, s.publicAt(now, maxInlinePaths, eligible)))
+              .mapN((s, now, eligible) =>
+                GameEvent.Snapshot(s.version, s.publicAt(now, maxInlinePaths, eligible), snapshotHistory(s))
+              )
           )
         val live = Stream.fromQueueUnterminated(sub.queue)
         (snapshot ++ live)
@@ -92,7 +94,7 @@ final class GameRoom private (
 
   private def isTerminal(event: GameEvent): Boolean = event match
     case GameEvent.GameEnded(_, _, _, _) => true
-    case GameEvent.Snapshot(_, ps)       =>
+    case GameEvent.Snapshot(_, ps, _)    =>
       ps.status match
         case GameStatus.Ended(_) => true
         case GameStatus.Active   => false
@@ -832,6 +834,12 @@ object GameRoom:
 
   /** Analytics colour letter for a *player* seat (turn records are only ever created for the side that moved). */
   private def colorLetter(seat: Seat): String = if seat == Seat.White then "w" else "b"
+
+  /** The completed-turn history for a joining client's `Snapshot`, mapped from the room's analytics `turns`. */
+  private def snapshotHistory(s: Session): List[SnapshotTurn] =
+    s.turns.iterator
+      .map(t => SnapshotTurn(if t.activeColor == "w" then Seat.White else Seat.Black, t.dice, t.moves, t.fenAfter))
+      .toList
 
   /** Remaining time per side as of `now`, in millis — the mover's in-progress turn already subtracted so a snapshot is
     * live, not frozen at the last completed turn. `None` for Unlimited (no clock).

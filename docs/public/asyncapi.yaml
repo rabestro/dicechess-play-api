@@ -112,6 +112,12 @@ components:
             properties:
               v: { type: integer }
               state: { $ref: '#/components/schemas/PublicGameState' }
+              history:
+                type: array
+                items: { $ref: '#/components/schemas/SnapshotTurn' }
+                description: >-
+                  Every completed turn so far, consistent with `v`, so a client that joins mid-game renders the
+                  full move list rather than only what happens after it connected. Empty before the first turn.
     DiceRolled:
       name: DiceRolled
       title: The server rolled the dice for a turn.
@@ -181,6 +187,19 @@ components:
     Seat:
       type: string
       enum: [White, Black]
+    SnapshotTurn:
+      type: object
+      description: One completed turn, replayed in a Snapshot's history so a joining client starts at move 1.
+      properties:
+        seat: { $ref: '#/components/schemas/Seat' }
+        dice: { type: array, items: { type: integer, minimum: 1, maximum: 6 } }
+        moves:
+          type: array
+          items: { type: string }
+          description: UCI micro-moves played; empty for a forced pass.
+        fenAfter:
+          type: string
+          description: The position after the turn (also the next turn's starting position).
     Clocks:
       type: [object, 'null']
       properties:
