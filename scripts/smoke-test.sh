@@ -24,9 +24,10 @@ done
 [ -n "$ok" ] || { echo "smoke: /health never served"; docker logs "$API" | tail -60; exit 1; }
 
 # 2) Core path: creating a game returns a gameId + dice commitment + join tokens.
+# white/black must be UUIDs (dicechess-play-api#14 — Principal.guest rejects anything else with 400).
 body=$(curl -fsS -X POST "http://localhost:$PORT/games" \
   -H 'content-type: application/json' \
-  -d '{"white":"smoke-white","black":"smoke-black"}')
+  -d '{"white":"77777777-7777-7777-7777-777777777777","black":"88888888-8888-8888-8888-888888888888"}')
 echo "smoke: POST /games -> $body"
 echo "$body" | grep -q '"gameId"' || { echo "smoke: POST /games missing gameId"; exit 1; }
 echo "$body" | grep -q '"commit"' || { echo "smoke: POST /games missing dice commit"; exit 1; }
