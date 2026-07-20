@@ -28,7 +28,7 @@ ThisBuild / credentials ++= (for {
 
 val DiceChessEngineVersion = "1.6.1"
 val CatsEffectVersion      = "3.6.3"
-val Fs2Version             = "3.12.0"
+val Fs2Version             = "3.13.0"
 val Http4sVersion          = "0.23.30"
 val CirceVersion           = "0.14.10"
 val LogbackVersion         = "1.5.38"
