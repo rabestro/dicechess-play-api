@@ -29,6 +29,10 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
   // White resign once it has played a few real turns, so it always reaches a terminal quickly.
   private val WhiteTurnCap = 8
 
+  // Principal.guest requires a UUID (dicechess-play-api#14) — these stand in for two distinct guests.
+  private val WhiteId = "11111111-1111-1111-1111-111111111111"
+  private val BlackId = "22222222-2222-2222-2222-222222222222"
+
   private def greedy: SearchAlgorithm =
     BotRegistry.getAlgorithm("greedy").getOrElse(sys.error("greedy bot not registered"))
 
@@ -62,7 +66,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       val httpBase         = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       val wsBase           = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
       for
-        created  <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        created  <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         snapshot <- http.expect[PublicGameState](httpBase / "games" / created.gameId)
         // Don't assert the active seat: the opening roll may have no legal move and auto-pass to Black.
         _        = assertEquals(snapshot.status, GameStatus.Active)
@@ -86,9 +90,11 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     resources.use: (port, http) =>
       val base = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       for
-        dflt   <- http.expect[CreatedGame](POST(CreateGame("w", "b"), base / "games"))
+        dflt   <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), base / "games"))
         dState <- http.expect[PublicGameState](base / "games" / dflt.gameId)
-        timed <- http.expect[CreatedGame](POST(CreateGame("w", "b", Some(TimeControl.Fischer(300, 3))), base / "games"))
+        timed  <- http.expect[CreatedGame](
+          POST(CreateGame(WhiteId, BlackId, Some(TimeControl.Fischer(300, 3))), base / "games")
+        )
         tState <- http.expect[PublicGameState](base / "games" / timed.gameId)
       yield
         assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
@@ -109,7 +115,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       def listing: IO[LiveGames] = http.expect[LiveGames](httpBase / "games")
 
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         listed  <- listing
         entry = listed.games.find(_.gameId == created.gameId).getOrElse(fail("created game not listed"))
         // Who plays is public: two anonymous humans here (bots would carry their names).
@@ -137,7 +143,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     resources.use: (port, http) =>
       val base = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), base / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), base / "games"))
         // Creation alone never rolls (the room waits for Begin via a WS attach or the seed grace), so the tree is
         // empty while no roll is pending — and the endpoint says so instead of 404ing.
         idle    <- http.expect[GameMoves](base / "games" / created.gameId / "moves")
@@ -168,7 +174,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
             else IO.sleep(100.millis) *> pollMovable(uri)
 
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("w", "b"), httpBase / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
         blackUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.Black))
         moves <- (
@@ -205,6 +211,27 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(missingFields, Status.BadRequest)
         assertEquals(notJson, Status.BadRequest)
 
+  test("POST /games rejects a non-UUID white/black id with 400 (dicechess-play-api#14)"):
+    val resources =
+      for
+        port <- server
+        http <- JdkHttpClient.simple[IO]
+      yield (port, http)
+
+    resources.use: (port, http) =>
+      val games = Uri.unsafeFromString(s"http://127.0.0.1:$port") / "games"
+      for
+        empty <- http.status(POST(CreateGame("", BlackId), games))
+        // A value containing `:` would otherwise produce an ambiguous, colon-joined external_id.
+        colonJoined <- http.status(POST(CreateGame("guest:not-a-uuid", BlackId), games))
+        garbage     <- http.status(POST(CreateGame(WhiteId, "not-a-uuid"), games))
+        valid       <- http.status(POST(CreateGame(WhiteId, BlackId), games))
+      yield
+        assertEquals(empty, Status.BadRequest)
+        assertEquals(colonJoined, Status.BadRequest)
+        assertEquals(garbage, Status.BadRequest)
+        assertEquals(valid, Status.Created)
+
   test("a WebSocket upgrade with an invalid join token is forbidden"):
     val resources =
       for
@@ -215,7 +242,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
     resources.use: (port, http) =>
       val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         // A plain GET (no upgrade) with a bogus token still exercises the auth gate before the upgrade.
         wsPath = httpBase / "games" / created.gameId / "ws"
         status <- http.status(GET(wsPath +? ("token" -> "not-a-real-token")))
@@ -233,7 +260,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
         specUri  = wsBase / "games" / created.gameId / "ws" // tokenless spectator watches
         over <- ws
@@ -258,7 +285,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
       val httpBase = Uri.unsafeFromString(s"http://127.0.0.1:$port")
       val wsBase   = Uri.unsafeFromString(s"ws://127.0.0.1:$port")
       for
-        created <- http.expect[CreatedGame](POST(CreateGame("white", "black"), httpBase / "games"))
+        created <- http.expect[CreatedGame](POST(CreateGame(WhiteId, BlackId), httpBase / "games"))
         whiteUri = wsBase / "games" / created.gameId / "ws" +? ("token" -> tokenOf(created, Seat.White))
         specUri  = wsBase / "games" / created.gameId / "ws" // tokenless spectator watches for the terminal
         ended <- ws
@@ -274,7 +301,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(sha256Hex(ended.seed.getOrElse(fail("expected a revealed seed"))), created.commit)
         // Neither seat seeded (white only connected then dropped), so each client seed is the seat's external-id
         // fallback — assert the exact pair, which also catches a white/black swap.
-        assertEquals(ended.clientSeeds, Some(ClientSeeds("guest:white", "guest:black")))
+        assertEquals(ended.clientSeeds, Some(ClientSeeds(s"guest:$WhiteId", s"guest:$BlackId")))
 
   test("clientFrames interleaves keep-alive pings into a quiet game"):
     // A room that is created but never started stays quiet after its initial Snapshot, so the only
