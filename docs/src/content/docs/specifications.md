@@ -36,11 +36,11 @@ Prefer a ready-to-run starter over generating from scratch? Two MIT-licensed "Us
 - **[dicechess-bot-python](https://github.com/rabestro/dicechess-bot-python)** — dependency-free Python.
 - **[dicechess-bot-typescript](https://github.com/rabestro/dicechess-bot-typescript)** — zero-dependency TypeScript.
 
-See [Licensing for Bots](./licensing/) for how they are licensed.
+See [Licensing for Bots](../licensing/) for how they are licensed.
 
 ## Browse the event streams
 
-The ndjson streams are documented narratively under [Event Streams](./reference/streaming/). For the machine-readable version, download [`asyncapi.yaml`](../asyncapi.yaml) and open it in [AsyncAPI Studio](https://studio.asyncapi.com/), or render it locally:
+The ndjson streams are documented narratively under [Event Streams](../reference/streaming/). For the machine-readable version, download [`asyncapi.yaml`](../asyncapi.yaml) and open it in [AsyncAPI Studio](https://studio.asyncapi.com/), or render it locally:
 
 ```bash
 npx @asyncapi/cli start studio -f asyncapi.yaml

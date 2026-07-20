@@ -35,7 +35,7 @@ Time controls are **enforced** — the server is the only timekeeper. The side t
 
 The clock runs **per turn** (a turn is several micro-moves, one per die). A forced pass is instant and free. Remaining time rides on the wire in **milliseconds** (`clocks` on `Snapshot` and `DiceRolled`); the side to move keeps ticking, so subtract your own elapsed time since the event. On a flag-fall the game ends `Timeout` with the loser's clock at `0`.
 
-See the exact JSON shapes in [Data Shapes → TimeControl](./reference/data-shapes/#timecontrol).
+See the exact JSON shapes in [Data Shapes → TimeControl](../reference/data-shapes/#timecontrol).
 
 ## DFEN — Dice Forsyth–Edwards Notation
 
@@ -64,12 +64,12 @@ Reading the tree:
 
 - **A node with no children (`{}`) is a complete legal turn.** Walk any root-to-leaf path and submit that path as `moves`. Every legal turn already uses the maximum number of dice (the *Maximum Micro-moves Rule* is applied for you) — except a king capture, which ends the game and is always a leaf.
 - **An empty tree (`{}` at the top level)** means the roll has no legal move: the server auto-passes, so submit nothing.
-- **`null`** (only on the inline copies carried by events) means the enumeration was too large to inline — fetch the full tree from [`GET /games/{id}/moves`](./reference/rest/#get-legal-moves).
+- **`null`** (only on the inline copies carried by events) means the enumeration was too large to inline — fetch the full tree from [`GET /games/{id}/moves`](../reference/rest/#get-legal-moves).
 
 The tree appears in three places:
 
-1. `DiceRolled.legalMoves` — with every roll (see [Event Streams](./reference/streaming/)).
+1. `DiceRolled.legalMoves` — with every roll (see [Event Streams](../reference/streaming/)).
 2. `Snapshot.state.legalMoves` (and the public `GET /games/{id}` snapshot) — while `dicePending` is true, so a joining or polling bot can act from the snapshot alone.
-3. [`GET /games/{id}/moves`](./reference/rest/#get-legal-moves) — always the full tree, never capped.
+3. [`GET /games/{id}/moves`](../reference/rest/#get-legal-moves) — always the full tree, never capped.
 
 A complete random bot is therefore: read the tree, walk root→leaf picking a random child at each node, and `POST` the path — no engine, no DFEN parsing. That is exactly what [`examples/random_bot.py`](https://github.com/rabestro/dicechess-play-api/blob/main/docs/examples/random_bot.py) does, end to end, in ~100 lines.

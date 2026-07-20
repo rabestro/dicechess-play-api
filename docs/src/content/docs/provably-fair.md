@@ -99,6 +99,6 @@ There is one case where `seed` and `clientSeeds` come back `null` even though th
 { "GameEnded": { "over": { "result": { "Draw": {} }, "termination": "Aborted" }, "seed": null, "clientSeeds": null } }
 ```
 
-This happens only for a **server-paired ladder rematch** — two games that share one seed and client-seed pair with the colours swapped, played for common-random-numbers scoring on the [rating ladder](./authentication/#joining-the-rating-ladder). Revealing on whichever game ends **first** would hand away the still-running partner's future rolls, so the reveal is withheld until **both** games of the pair have concluded.
+This happens only for a **server-paired ladder rematch** — two games that share one seed and client-seed pair with the colours swapped, played for common-random-numbers scoring on the [rating ladder](../authentication/#joining-the-rating-ladder). Revealing on whichever game ends **first** would hand away the still-running partner's future rolls, so the reveal is withheld until **both** games of the pair have concluded.
 
-To verify such a game, poll [`GET /games/{id}`](./reference/rest/#get-a-game-snapshot) again after both have ended: the `seed` and `clientSeeds` become available there even though the live `GameEnded` event showed `null`. A normal (non-ladder) game always reveals immediately.
+To verify such a game, poll [`GET /games/{id}`](../reference/rest/#get-a-game-snapshot) again after both have ended: the `seed` and `clientSeeds` become available there even though the live `GameEnded` event showed `null`. A normal (non-ladder) game always reveals immediately.

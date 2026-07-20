@@ -46,6 +46,7 @@ export default defineConfig({
 						{ label: 'Game Mechanics', link: '/game-mechanics/' },
 						{ label: 'Connection Modes', link: '/connection-modes/' },
 						{ label: 'Provably-Fair Dice', link: '/provably-fair/' },
+						{ label: 'Rating & Ladder', link: '/rating/' },
 					],
 				},
 				{
