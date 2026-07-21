@@ -1,14 +1,23 @@
-# dicechess-play-api
+# Dice Chess Play API 🎲♟️
 
-Authoritative real-time server for **Dice Chess** — human-vs-human play, the doubling
-cube, and a third-party **Bot API**. This is **phase 3** of the play platform: the pivot
-from client-authoritative (vs-bot, phases 1–2 in [`dicechess-play`](https://github.com/rabestro/dicechess-play))
-to a server that owns the truth.
+[![CI Pipeline](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml/badge.svg)](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml)
+[![Play Live](https://img.shields.io/badge/Play-Live-success)](https://play.jc.id.lv/)
+[![Bot API Docs](https://img.shields.io/badge/Docs-Bot%20API-orange)](https://jc.id.lv/dicechess-play-api/)
+[![Leaderboard](https://img.shields.io/badge/Bots-Leaderboard-blue)](https://play.jc.id.lv/leaderboard)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-lightgrey)](./LICENSE)
 
-> **Status: 3a complete** (authoritative game core + human WebSocket transport); **3b in
-> progress** — transport hardening done (fan-out, fiber supervision, seat auth, turn
-> deadline); Bot API and durability under way. Design: ADR-0007 (server authority),
-> ADR-0008 (dice fairness), ADR-0009 (Bot API & tournaments) in the `dicechess-docs` vault.
+Authoritative real-time server for **Dice Chess** — human-vs-human play, a third-party
+**Bot API**, and an automatic **Glicko-2 rating ladder**. Phase 3 of the play platform: the
+pivot from client-authoritative (vs-bot, phases 1–2 in
+[`dicechess-play`](https://github.com/rabestro/dicechess-play)) to a server that owns the
+truth. **Live in production** at [play-api.jc.id.lv](https://play-api.jc.id.lv/health),
+pairing the bots on the [leaderboard](https://play.jc.id.lv/leaderboard) around the clock.
+
+> **Status: live.** Authoritative HvH over WebSocket, the full Bot API (REST + ndjson event
+> streams + webhooks), Postgres durability with crash recovery, analytics hand-off, and a
+> continuously-paired Glicko-2 rating ladder have all shipped and run in production. Design
+> records: ADR-0007 (server authority), ADR-0008 (dice fairness), ADR-0009 (Bot API) in the
+> `dicechess-docs` vault. What's live vs. planned is spelled out [below](#status-whats-live).
 
 ## Why a server now
 
@@ -50,22 +59,40 @@ rolls; no blockchain. See ADR-0008.
 
 ### Bot API
 
-Third-party bots connect via a dedicated, Lichess-shaped API (token + ndjson event stream
-+ REST move commands), not the website's WebSocket — language-agnostic and reconnect-safe.
-Our own engine bots are the **first clients** (a `reference-bot` wrapping the JVM engine),
-which dogfoods the exact API external teams will use and provides always-online opponents.
-See ADR-0009.
+Third-party bots connect via a dedicated, Lichess-shaped API — a token plus any of three
+connection modes: REST polling, an ndjson event stream, or a single serverless **webhook**
+(the server POSTs each turn, the HTTP response is the move). Language-agnostic and
+reconnect-safe. Our own engine bots dogfood the exact same API and provide always-online
+opponents; anyone can register a bot, self-test it, and opt into the rating ladder.
 
-## Roadmap (milestones)
+- **Docs:** <https://jc.id.lv/dicechess-play-api/> — quickstart, REST/stream/webhook
+  reference, DFEN, the legal-move tree, and the provably-fair verification procedure.
+- **Starters** (fork and run): [Python](https://github.com/rabestro/dicechess-bot-python),
+  [TypeScript](https://github.com/rabestro/dicechess-bot-typescript) (both MIT, no engine),
+  and [Scala](https://github.com/rabestro/dicechess-bot-scala) (engine-optional, on the
+  shared [`dicechess-bot-runtime`](https://github.com/rabestro/dicechess-bot-runtime)).
 
-| Milestone | Deliverable |
-|-----------|-------------|
-| **3a-core** | Authoritative `GameRoom` + transport-agnostic seams + engine + commit-reveal `DiceSource`, proven by an in-memory self-play test (no HTTP) |
-| **3a-net** | Human WebSocket transport — two browsers play HvH end-to-end on one node |
-| **3b** | Durability (Postgres `play` schema, crash recovery) + analytics hand-off + **Bot API** + reference bot + bot accounts/tokens |
-| **3c** | Edge split (`play-ws`) + Redis pub/sub + reconnection polish + account claim-flow |
-| **3d** | Share-link challenges + live spectating + doubling cube UX |
-| **3e** | Open seek lobby + cross-team bot tournaments (double round-robin, mirrored dice, Glicko-2) |
+## Status: what's live
+
+Shipped and running in production:
+
+- **Authoritative game core** — the server owns dice, clocks, and move legality (validated
+  through the JVM engine); clients only send intents.
+- **Human vs human** over WebSocket, end-to-end.
+- **Bot API** — REST + ndjson event streams + webhooks; anonymous (ephemeral) and registered
+  (durable) tokens. Full reference at <https://jc.id.lv/dicechess-play-api/>.
+- **Durability** — Postgres `play` schema (Flyway `V1`–`V7`) with crash recovery; opt-in via
+  `PLAY_DB_URL` (unset = in-memory dev mode, see [Running](#running)).
+- **Analytics hand-off** — finished games flow to
+  [`dicechess-analytics`](https://github.com/rabestro/dicechess-analytics) via a transactional
+  outbox.
+- **Rating ladder** — a continuously-paired, mirrored-dice scheduler with Glicko-2 ratings, a
+  public [leaderboard](https://play.jc.id.lv/leaderboard), and per-bot profiles.
+- **Open seek lobby** — bots and humans meet and start games.
+
+Planned: the doubling cube; a dedicated WebSocket edge tier + Redis pub/sub for horizontal
+scale; formal cross-team tournaments (brackets / round-robin) layered on the ladder. The
+detailed milestone roadmap lives in the `dicechess-docs` vault.
 
 ## Stack
 
@@ -77,9 +104,14 @@ Scala 3 · cats-effect · fs2 · http4s · doobie · Circe · PostgreSQL · the 
 Local (JVM) — reads `GITHUB_TOKEN` via the `gh` CLI for the engine artifact:
 
 ```bash
-sbt run                      # serves on :8080
-curl localhost:8080/health   # {"status":"ok","version":"dev"}
+sbt run                      # serves on :8080 (in-memory — no DB needed)
+curl localhost:8080/health   # {"status":"ok","version":"dev-<sha>"}
 ```
+
+By default `sbt run` starts fully in-memory: no database, no analytics, no ladder — perfect
+for local development, and a restart drops live games. Every persistent or outbound feature
+is **opt-in via env vars** (`PLAY_DB_URL` for durability, `INGEST_URL`/`INGEST_TOKEN` for
+analytics, `PLAY_BOT_TOKENS` for static bots) — see the deploy section below.
 
 Container — the engine artifact needs a `read:packages` token, passed as a BuildKit secret so it never lands in a layer:
 
@@ -110,11 +142,9 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
 4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
 5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.
 
-**Endpoints:** `GET /health`, `GET /version`, `POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`, and the Bot API under `/bot/…` (`POST /bot/anon`, `/bot/account`, `/bot/stream/event`, `POST /bot/challenge`). See [Bot API Reference](docs/bot-api.md) for the complete integration guide and payload schemas.
+**Endpoints:** `GET /health` · `GET /version` · the human game surface (`POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`) · public discovery (`GET /games`, `GET /leaderboard`, `GET /bots/{team}/{name}`) · and the full Bot API under `/bot/…` (identity, challenges, seeks, gameplay, streams, webhooks, ladder). The **complete, authoritative reference** — every route, payload, and the provably-fair procedure — is the docs site: **<https://jc.id.lv/dicechess-play-api/>**.
 
-**Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Static/official bots stay on `PLAY_BOT_TOKENS`.
-
-> Game state is **in-memory** for now — a restart drops live games. Durability (Postgres `play` schema) lands later in 3b.
+**Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Registered, durable identities come from `POST /bot/register` (or static `PLAY_BOT_TOKENS`), and only they can hold webhooks and join the ladder.
 
 ## License
 
