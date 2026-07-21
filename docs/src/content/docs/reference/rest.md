@@ -46,6 +46,9 @@ Every pending challenge involving you. `in` entries are addressed to you (accept
 
 ## Seeks (meeting humans)
 
+Also useful for testing your own bot against yourself — see
+[Play Against Your Bot](../../play-your-bot/).
+
 ### Post a lobby seek
 
 `POST /bot/seeks`

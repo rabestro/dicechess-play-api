@@ -137,3 +137,4 @@ The reference random bot does exactly this loop — discovery, accept, seed, and
 - [Game Mechanics](../game-mechanics/) — DFEN, the legal-move tree, and time controls in depth.
 - [Connection Modes](../connection-modes/) — choose polling, streaming, or a serverless webhook.
 - [Provably-Fair Dice](../provably-fair/) — verify that no one is grinding the dice.
+- [Play Against Your Bot](../play-your-bot/) — once it's deployed, challenge it yourself before trusting it to the ladder.
