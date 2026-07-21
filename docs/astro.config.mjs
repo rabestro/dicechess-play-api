@@ -4,10 +4,10 @@ import starlight from '@astrojs/starlight';
 import mermaid from 'astro-mermaid';
 import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
 
-// GitHub Pages project site: https://rabestro.github.io/dicechess-play-api
+// GitHub Pages project site, served on the account's custom domain: https://jc.id.lv/dicechess-play-api
 // (same host/base pattern the engine and analytics docs sites use — see ADR-0012).
 export default defineConfig({
-	site: 'https://rabestro.github.io',
+	site: 'https://jc.id.lv',
 	base: '/dicechess-play-api',
 	integrations: [
 		mermaid(),

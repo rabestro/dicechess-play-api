@@ -4,7 +4,7 @@ info:
   version: '1.0'
   description: >
     REST contract for connecting a bot to the Dice Chess play platform. This is the
-    machine-readable companion to the guides at https://rabestro.github.io/dicechess-play-api/ —
+    machine-readable companion to the guides at https://jc.id.lv/dicechess-play-api/ —
     use it to generate a client (`openapi-generator`, `openapi-typescript`, etc.). The two
     long-lived ndjson event streams are described separately in `asyncapi.yaml`.
   license:
