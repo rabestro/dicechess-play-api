@@ -66,7 +66,11 @@ build uses a BuildKit secret (see README); smoke test: `IMAGE=... scripts/smoke-
 Server env vars (all opt-in): `PLAY_DB_URL`/`PLAY_DB_USER`/`PLAY_DB_PASSWORD` (persistence;
 unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpoint URL) +
 `INGEST_TOKEN` (outbox delivery to analytics), `PLAY_BOT_TOKENS` (`team|name|token` CSV),
-`PLAY_CORS_ORIGINS` (empty = allow any), `APP_VERSION` (surfaced at GET /version).
+`PLAY_CORS_ORIGINS` (empty = allow any), `APP_VERSION` (surfaced at GET /version),
+`LADDER_INTERVAL_SECONDS` (+ optional `LADDER_MAX_CONCURRENT_PAIRS`, default `4`) — unset
+disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optional
+`RATING_BATCH_SIZE`, default `100`) — unset disables Glicko-2 rating updates entirely,
+`WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher).
 
 ## Quality gates — Definition of Done
 
@@ -135,6 +139,14 @@ unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpo
   tags via the CD workflow (`APP_VERSION` build-arg → GET /version). Do not bump it.
 - `PLAY_DB_URL` set without `INGEST_URL`/`INGEST_TOKEN`: finished games silently accumulate in
   the outbox (boot warns on stderr); a 4xx from analytics parks the row as `failed_permanently`.
+- `LADDER_INTERVAL_SECONDS`, `RATING_INTERVAL_SECONDS`, and `WEBHOOK_TIMEOUT_SECONDS` all follow
+  an "absence silently disables the feature" idiom, with **no error surfaced anywhere** — the
+  server starts clean, `/health` returns 200, but ladder pairing / rating updates / webhook push
+  just never happen. A deployment that copies `PLAY_DB_URL`/`INGEST_URL`/`PLAY_BOT_TOKENS` to a
+  new host but misses these looks completely healthy while quietly doing nothing (hit this
+  moving to a second environment: all three were missed, independently, one at a time). Verify
+  a new deployment with a live check — `GET /games` becomes non-empty and `/leaderboard` counts
+  increase over a minute — not just `/health`.
 - README status banner, the "in-memory for now" callout, and the roadmap placement of the seek
   lobby are stale — durability and the lobby shipped. Trust the code and `docs/bot-api.md`.
 - The house bot that opposes quickstart users is deployed outside this repo (via
