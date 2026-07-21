@@ -115,7 +115,8 @@ is **opt-in via env vars** (`PLAY_DB_URL` for durability, `INGEST_URL`/`INGEST_T
 analytics, `PLAY_BOT_TOKENS` for static bots, `LADDER_INTERVAL_SECONDS` for automatic ladder
 pairing, `RATING_INTERVAL_SECONDS` for Glicko-2 updates, `WEBHOOK_TIMEOUT_SECONDS` for bot
 webhook push) — see the deploy section below. Leaving any of these unset disables that one
-feature **silently**: the server starts clean and `/health` stays green, the feature just never
+analytics, `PLAY_BOT_TOKENS` for static bots, `LADDER_INTERVAL_SECONDS` (plus optional `LADDER_MAX_CONCURRENT_PAIRS`, default `4`) for automatic ladder
+pairing, `RATING_INTERVAL_SECONDS` (plus optional `RATING_BATCH_SIZE`, default `100`) for Glicko-2 updates, `WEBHOOK_TIMEOUT_SECONDS` for bot
 does anything. When standing up a new deployment, confirm the ladder is actually alive with a
 live check — `GET /games` becomes non-empty and `/leaderboard` counts increase within a
 minute — not just `/health`.
