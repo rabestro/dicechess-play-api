@@ -109,6 +109,9 @@ object Main extends IOApp.Simple:
       // The catalog wake probe (E3) also POSTs outward (the same unauthenticated handshake), but a visitor browsing
       // the catalog may reasonably click several bots — the generous anon-mint budget, not the strict register one.
       wakeLimit <- AnonMintLimiter.create()
+      // Starting a catalog game (E4) is a heavier action than a mere wake ping, but playing several bot games in an
+      // hour is completely normal usage — the same generous budget, not the strict register one.
+      playBotLimit <- AnonMintLimiter.create()
       // Webhook push (F.2, #104) is opt-in the same way (WEBHOOK_TIMEOUT_SECONDS). Unlike the rating batch it does
       // NOT require the database: in-memory mode registers webhooks for the process's lifetime, matching how
       // registered-bot identities behave there. The service is a Resource because it owns its per-game runner
@@ -142,8 +145,9 @@ object Main extends IOApp.Simple:
           val leaderboard =
             pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg))
           // Same DB-only gating: the human catalog reads the bots table's rating + description columns (ADR-0014).
-          val catalog =
-            pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => CatalogRoutes(pg, botStore, webhookService, wakeLimit))
+          val catalog = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg =>
+            CatalogRoutes(pg, botStore, webhookService, registry, wakeLimit, playBotLimit)
+          )
           EmberServerBuilder
             .default[IO]
             .withHost(host)
