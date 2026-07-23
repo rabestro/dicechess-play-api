@@ -34,6 +34,7 @@ final class PgGameStore private (xa: Transactor[IO])
     with GameResultsStore
     with RatingStore
     with LeaderboardStore
+    with BotCatalogStore
     with WebhookStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
@@ -187,6 +188,21 @@ final class PgGameStore private (xa: Transactor[IO])
       .transact(xa)
       .timeout(SaveTimeout)
       .map(_.map(Principal.Bot(_, _)))
+
+  /** Catalog cards for `GET /lobby/bots` (ADR-0014): the open-to-humans bots with their rating summary and blurb, best
+    * rating first. Reads only `bots`, so unlike the leaderboard it needs no `game_results` join.
+    */
+  def catalogBots: IO[List[BotCatalogListing]] =
+    sql"""SELECT team, name, glicko_rating, glicko_rd, description
+          FROM play.bots WHERE open_to_humans = true
+          ORDER BY glicko_rating DESC, team, name"""
+      .query[(String, String, Double, Double, Option[String])]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (team, name, rating, rd, description) =>
+        BotCatalogListing(team, name, rating, rd, description)
+      })
 
   // ── WebhookStore (F.2, #104) ────────────────────────────────────────────────
 

@@ -166,6 +166,16 @@ Registered bots whose rating has **converged** (RD ≤ 110), best first. Provisi
 
 A bot that left the ladder keeps its frozen rating and stays listed with `onLadder: false`.
 
+### Bot catalog
+
+`GET /lobby/bots`
+
+Bots that opened themselves to human play via [`POST /bot/open-to-humans`](#identity), each with the rating summary its catalog card shows. Unlike the leaderboard, a **provisional** bot (RD > 110) is listed and flagged rather than hidden, so a freshly opened bot still appears. `description` is the bot's own blurb (may be `null`).
+
+```json
+{ "bots": [{ "team": "acme", "name": "alice", "rating": 1720.5, "rd": 85.0, "provisional": false, "description": "aggressive + book" }] }
+```
+
 ### Bot profile
 
 `GET /bots/{team}/{name}`

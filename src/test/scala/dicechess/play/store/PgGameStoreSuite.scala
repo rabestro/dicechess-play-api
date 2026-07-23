@@ -173,6 +173,24 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("catalogBots lists open bots with their rating summary + description, and omits closed ones (ADR-0014, E2)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _       <- db.register("cat2", "shown", "hash-cat2-shown")
+          _       <- db.register("cat2", "hidden", "hash-cat2-hidden")
+          _       <- db.openToHumans("cat2", "shown", Some("monte-carlo, 3-move book"))
+          listing <- db.catalogBots
+        yield
+          assertEquals(
+            listing.find(l => l.team == "cat2" && l.name == "shown"),
+            Some(BotCatalogListing("cat2", "shown", 1500.0, 350.0, Some("monte-carlo, 3-move book"))),
+            "a freshly registered open bot lists at the initial rating with its description"
+          )
+          assert(!listing.exists(_.name == "hidden"), s"a bot not open to humans must be absent, got $listing")
+      }
+    }
+
   test("webhook registration round-trips, re-register replaces url+secret, delete reports truth (#104)"):
     withContainers { pg =>
       store(pg).use { db =>
