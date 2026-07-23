@@ -28,6 +28,9 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     def ratingOf(team: String, name: String): IO[Option[BotRating]]                 = IO.pure(known.get((team, name)))
     def setOnLadder(team: String, name: String, on: Boolean): IO[Option[BotRating]] = IO.pure(None)
     def onLadderBots: IO[List[Principal.Bot]]                                       = IO.pure(Nil)
+    def setOpenToHumans(team: String, name: String, open: Boolean): IO[Boolean]     = IO.pure(false)
+    def setDescription(team: String, name: String, description: Option[String]): IO[Boolean] = IO.pure(false)
+    def openToHumansBots: IO[List[Principal.Bot]]                                            = IO.pure(Nil)
 
   private def stubBoard(entries: List[LeaderboardEntry], tallies: Map[String, ResultTally]): LeaderboardStore =
     new LeaderboardStore:

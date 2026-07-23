@@ -158,6 +158,26 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map(Principal.Bot(_, _)))
 
+  def setOpenToHumans(team: String, name: String, open: Boolean): IO[Boolean] =
+    sql"""UPDATE play.bots SET open_to_humans = $open WHERE team = $team AND name = $name""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
+
+  def setDescription(team: String, name: String, description: Option[String]): IO[Boolean] =
+    sql"""UPDATE play.bots SET description = $description WHERE team = $team AND name = $name""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
+
+  def openToHumansBots: IO[List[Principal.Bot]] =
+    sql"""SELECT team, name FROM play.bots WHERE open_to_humans = true"""
+      .query[(String, String)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(Principal.Bot(_, _)))
+
   // ── WebhookStore (F.2, #104) ────────────────────────────────────────────────
 
   /** Upsert: a re-register replaces URL and secret together (the old secret stops signing immediately). */

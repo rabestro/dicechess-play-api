@@ -157,6 +157,30 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(anonNo, Status.Forbidden)
         assertEquals(staticNo, Status.Forbidden)
 
+  test("POST /bot/open-to-humans and /leave toggle a registered bot (with description); anon and static get 403"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        opened <- service
+          .run(
+            request(Method.POST, uri"/bot/open-to-humans", Some(created.token))
+              .withEntity(SetOpenToHumans(Some("aggressive + book")))
+          )
+          .flatMap(_.as[OpenToHumans])
+        closed <- service
+          .run(request(Method.POST, uri"/bot/open-to-humans/leave", Some(created.token)))
+          .flatMap(_.as[OpenToHumans])
+        anon     <- service.run(Request[IO](Method.POST, uri"/bot/anon")).flatMap(_.as[AnonBot])
+        anonNo   <- service.run(request(Method.POST, uri"/bot/open-to-humans", Some(anon.token))).map(_.status)
+        staticNo <- service.run(request(Method.POST, uri"/bot/open-to-humans", Some("tok-alice"))).map(_.status)
+      yield
+        assertEquals(opened, OpenToHumans(openToHumans = true, description = Some("aggressive + book")))
+        assertEquals(closed, OpenToHumans(openToHumans = false, description = None))
+        assertEquals(anonNo, Status.Forbidden)
+        assertEquals(staticNo, Status.Forbidden)
+
   test("an unknown / no Bearer token is unauthorized"):
     app.flatMap: service =>
       for

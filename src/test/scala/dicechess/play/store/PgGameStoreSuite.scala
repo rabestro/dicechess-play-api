@@ -138,6 +138,29 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test(
+    "open_to_humans + description toggle; openToHumansBots lists only opted-in; unregistered reports false (ADR-0014)"
+  ):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _         <- db.register("catalog-suite", "on-bot", "hash-catalog-on")
+          _         <- db.register("catalog-suite", "off-bot", "hash-catalog-off")
+          opened    <- db.setOpenToHumans("catalog-suite", "on-bot", true)
+          described <- db.setDescription("catalog-suite", "on-bot", Some("aggressive + book"))
+          catalog   <- db.openToHumansBots
+          ghost     <- db.setOpenToHumans("catalog-suite", "nobody", true)
+          ghostDesc <- db.setDescription("catalog-suite", "nobody", Some("x"))
+        yield
+          assert(opened, "opening a registered identity must report true")
+          assert(described, "setting a registered identity's description must report true")
+          assert(catalog.contains(Principal.Bot("catalog-suite", "on-bot")), s"expected on-bot in $catalog")
+          assert(!catalog.contains(Principal.Bot("catalog-suite", "off-bot")), s"expected off-bot absent from $catalog")
+          assert(!ghost, "opening an unregistered identity must report false")
+          assert(!ghostDesc, "describing an unregistered identity must report false")
+      }
+    }
+
   test("webhook registration round-trips, re-register replaces url+secret, delete reports truth (#104)"):
     withContainers { pg =>
       store(pg).use { db =>

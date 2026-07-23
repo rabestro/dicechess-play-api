@@ -40,6 +40,12 @@ final case class RotatedToken(token: String) derives Codec.AsObject
 /** The caller's rating-ladder state after `POST /bot/ladder/join` or `/leave`. */
 final case class LadderStatus(onLadder: Boolean, glickoRating: Double, glickoRd: Double) derives Codec.AsObject
 
+/** `POST /bot/open-to-humans` body — optional: a catalog description to set while opening the bot (ADR-0014). */
+final case class SetOpenToHumans(description: Option[String] = None) derives Codec.AsObject
+
+/** The catalog opt-in state returned by `POST /bot/open-to-humans[/leave]` (ADR-0014). */
+final case class OpenToHumans(openToHumans: Boolean, description: Option[String]) derives Codec.AsObject
+
 /** A bot's open-seek offer: just the time control — the identity comes from the Bearer token. */
 final case class BotCreateSeek(timeControl: Option[TimeControl] = None) derives Codec.AsObject
 
@@ -169,6 +175,13 @@ object BotRoutes:
 
       case req @ POST -> Root / "bot" / "ladder" / "leave" =>
         withBot(auth, req)(bot => setLadder(auth, bot, onLadder = false))
+
+      // Catalog opt-in (ADR-0014, #152): a registered bot advertises itself as playable by humans. Optional body sets
+      // the catalog description. Independent of the ladder — a bot can be on either, both, or neither.
+      case req @ POST -> Root / "bot" / "open-to-humans" =>
+        withBot(auth, req)(bot => openToHumans(auth, req, bot))
+      case req @ POST -> Root / "bot" / "open-to-humans" / "leave" =>
+        withBot(auth, req)(bot => respondOpenToHumans(auth, bot, open = false, description = None))
 
       case req @ GET -> Root / "bot" / "stream" / "event" =>
         withBot(auth, req): bot =>
@@ -337,6 +350,27 @@ object BotRoutes:
       .flatMap:
         case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
         case None         => Forbidden("only a registered bot can join the rating ladder")
+
+  /** Open the bot to human catalog games; an absent or unparseable body just means "no description". */
+  private def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
+    req
+      .attemptAs[SetOpenToHumans]
+      .value
+      .flatMap: parsed =>
+        respondOpenToHumans(auth, bot, open = true, description = parsed.toOption.flatMap(_.description))
+
+  private def respondOpenToHumans(
+      auth: BotAuth,
+      bot: Principal.Bot,
+      open: Boolean,
+      description: Option[String]
+  ): IO[Response[IO]] =
+    auth
+      .setOpenToHumans(bot, open)
+      .flatMap:
+        case false => Forbidden("only a registered bot can open itself to human games")
+        case true  =>
+          description.fold(IO.unit)(d => auth.setDescription(bot, Some(d)).void) *> Ok(OpenToHumans(open, description))
 
   /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. Package-visible so sibling route
     * modules of the same Bot API surface (`WebhookRoutes`) authenticate identically instead of re-deriving this.

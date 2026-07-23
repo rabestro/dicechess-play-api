@@ -92,6 +92,16 @@ final class BotAuth private (
   def setOnLadder(bot: Principal.Bot, onLadder: Boolean): IO[Option[BotRating]] =
     store.setOnLadder(bot.team, bot.name, onLadder)
 
+  /** Open a registered bot to human catalog games, or close it (ADR-0014). `false` when the caller is not a registered
+    * identity — static (house) and anonymous bots have no row to flag.
+    */
+  def setOpenToHumans(bot: Principal.Bot, open: Boolean): IO[Boolean] =
+    store.setOpenToHumans(bot.team, bot.name, open)
+
+  /** Set or clear a registered bot's catalog description (ADR-0014). `false` when not a registered identity. */
+  def setDescription(bot: Principal.Bot, description: Option[String]): IO[Boolean] =
+    store.setDescription(bot.team, bot.name, description)
+
   /** Mint an ephemeral, unranked anonymous bot — `bot:team:anon:<uuid>`. An optional display label becomes a readable,
     * collision-proof prefix (the uuid suffix guarantees uniqueness and the slug keeps the externalId colon-free).
     * Pruning expired entries on mint keeps the registry from accumulating tokens that are never presented again.
