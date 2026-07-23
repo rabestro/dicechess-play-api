@@ -14,6 +14,9 @@ services:
       PLAY_BOT_TOKENS: ${PLAY_BOT_TOKENS:-}
       # Browser CORS allow-list (comma-separated full origins); empty = allow any origin.
       PLAY_CORS_ORIGINS: ${PLAY_CORS_ORIGINS:-}
+      # Catalog roster (ADR-0014): ;-separated `team|name|description` entries opened to human games at startup —
+      # the admin path for bots that can't self-flag via POST /bot/open-to-humans (a lost token).
+      PLAY_OPEN_TO_HUMANS: ${PLAY_OPEN_TO_HUMANS:-}
       JAVA_OPTS: "-Dcats.effect.warnOnNonMainThreadDetected=false --sun-misc-unsafe-memory-access=allow"
     # Host port 8040 (analytics owns 8020/8030 on aurora). The tunnel reaches the api over the
     # compose network at api:8080, so this mapping is only for local curl / debugging.

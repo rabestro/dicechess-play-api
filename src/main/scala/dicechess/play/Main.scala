@@ -8,6 +8,7 @@ import dicechess.play.server.{
   BotAuth,
   BotEvents,
   BotRoutes,
+  CatalogRoster,
   CatalogRoutes,
   Challenges,
   Cors,
@@ -66,10 +67,13 @@ object Main extends IOApp.Simple:
   private def serve(resources: (GameStore, BotStore, Option[PgGameStore], Client[IO], IO[Unit])): IO[Unit] =
     val (store, botStore, pgStore, httpClient, deliverer) = resources
     for
-      registry   <- GameRegistry.create(store = store)
-      resumed    <- registry.resume
-      _          <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
-      botAuth    <- BotAuth.fromEnv(botStore)
+      registry <- GameRegistry.create(store = store)
+      resumed  <- registry.resume
+      _        <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
+      botAuth  <- BotAuth.fromEnv(botStore)
+      // Admin/env catalog roster (ADR-0014): open configured bots to human games at startup — the path for a bot that
+      // can't self-flag via POST /bot/open-to-humans (e.g. a lost token). Persistence-only, like the catalog it feeds.
+      _          <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyFromEnv(pg).void)
       botEvents  <- BotEvents.create
       challenges <- Challenges.create(botEvents, registry)
       mintLimit  <- AnonMintLimiter.create()
