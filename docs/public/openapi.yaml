@@ -428,6 +428,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BotCatalog' }
         '404': { description: Server runs without persistence. }
+  /lobby/bots/{team}/{name}/wake:
+    post:
+      tags: [Leaderboard]
+      summary: Wake a catalog bot (public)
+      description: >
+        Pings the bot's registered webhook to force a cold start and confirm it answers, before a
+        visitor commits to a game. 200 always for a catalog bot (alive covers "no webhook" and
+        "didn't answer" alike); 404 for a name outside the catalog; 503 if webhooks are disabled.
+      security: []
+      parameters:
+        - { name: team, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The liveness outcome.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Wake' }
+        '404': { description: No such name in the catalog. }
+        '429': { description: Rate limit exceeded. }
+        '503': { description: Webhooks are not enabled on this server. }
   /bot/webhook:
     post:
       tags: [Webhooks]
@@ -574,6 +595,11 @@ components:
           type: array
           items: { $ref: '#/components/schemas/CatalogBot' }
       required: [bots]
+    Wake:
+      type: object
+      properties:
+        alive: { type: boolean }
+      required: [alive]
     CreateChallengeRequest:
       type: object
       properties:

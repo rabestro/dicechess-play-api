@@ -176,6 +176,16 @@ Bots that opened themselves to human play via [`POST /bot/open-to-humans`](#iden
 { "bots": [{ "team": "acme", "name": "alice", "rating": 1720.5, "rd": 85.0, "provisional": false, "description": "aggressive + book" }] }
 ```
 
+### Wake a catalog bot
+
+`POST /lobby/bots/{team}/{name}/wake`
+
+Before starting a game against a scale-to-zero bot, ping it to force a cold start and confirm it actually answers — the SPA calls this on catalog click, before offering the game-config panel. `404` for a name outside the catalog; otherwise `200` always, `alive` covering "no webhook registered" and "webhook didn't answer" alike (the caller only needs yes/no). `503` if the server runs without webhooks enabled. Rate-limited per IP.
+
+```json
+{ "alive": true }
+```
+
 ### Bot profile
 
 `GET /bots/{team}/{name}`
