@@ -51,23 +51,24 @@ object CatalogRoutes:
       // A visitor clicks a catalog card to start a game (ADR-0014): this wakes a scale-to-zero endpoint and reports
       // whether it answered, so the SPA knows whether to offer the game-config panel. 404 for a name outside the
       // catalog (not eligible to be woken here, whatever its webhook state); 200 alive:false covers "no webhook" and
-      // "webhook didn't answer" alike — the caller only needs yes/no.
+      // "webhook didn't answer" alike — the caller only needs yes/no. The rate limit (an in-memory check) gates
+      // BEFORE the catalog-membership read (a database query, in Pg mode) — this endpoint is fully unauthenticated,
+      // so the cheapest defense must run first, rather than letting anonymous spam reach the database at all.
       case req @ POST -> Root / "lobby" / "bots" / team / name / "wake" =>
-        bots.openToHumansBots.flatMap { open =>
-          if !open.contains(Principal.Bot(team, name)) then NotFound()
-          else
-            webhooks match
-              case None          => ServiceUnavailable("webhooks are not enabled on this server")
-              case Some(service) =>
-                wakeLimiter
-                  .attempt(BotRoutes.clientIp(req))
-                  .flatMap:
-                    case Left(retryAfter) =>
-                      TooManyRequests("wake rate limit exceeded — retry later")
-                        .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
-                    case Right(()) =>
-                      service.wake(Principal.Bot(team, name)).flatMap(alive => Ok(Wake(alive)))
-        }
+        wakeLimiter
+          .attempt(BotRoutes.clientIp(req))
+          .flatMap:
+            case Left(retryAfter) =>
+              TooManyRequests("wake rate limit exceeded — retry later")
+                .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
+            case Right(()) =>
+              bots.openToHumansBots.flatMap { open =>
+                if !open.contains(Principal.Bot(team, name)) then NotFound()
+                else
+                  webhooks match
+                    case None          => ServiceUnavailable("webhooks are not enabled on this server")
+                    case Some(service) => service.wake(Principal.Bot(team, name)).flatMap(alive => Ok(Wake(alive)))
+              }
 
   /** Derive the catalog card from a stored listing, flagging (not hiding) a not-yet-converged rating — the same RD
     * threshold the leaderboard uses to hide provisional bots.
