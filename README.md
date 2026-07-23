@@ -114,7 +114,7 @@ for local development, and a restart drops live games. Every persistent or outbo
 is **opt-in via env vars** (`PLAY_DB_URL` for durability, `INGEST_URL`/`INGEST_TOKEN` for
 analytics, `PLAY_BOT_TOKENS` for static bots, `LADDER_INTERVAL_SECONDS` for automatic ladder
 pairing, `RATING_INTERVAL_SECONDS` for Glicko-2 updates, `WEBHOOK_TIMEOUT_SECONDS` for bot
-webhook push) — see the deploy section below. Leaving any of these unset disables that one
+webhook push, `PLAY_OPEN_TO_HUMANS` for the human-catalog roster) — see the deploy section below. Leaving any of these unset disables that one
 analytics, `PLAY_BOT_TOKENS` for static bots, `LADDER_INTERVAL_SECONDS` (plus optional `LADDER_MAX_CONCURRENT_PAIRS`, default `4`) for automatic ladder
 pairing, `RATING_INTERVAL_SECONDS` (plus optional `RATING_BATCH_SIZE`, default `100`) for Glicko-2 updates, `WEBHOOK_TIMEOUT_SECONDS` for bot
 does anything. When standing up a new deployment, confirm the ladder is actually alive with a
@@ -146,6 +146,7 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
    PLAY_CORS_ORIGINS=https://play.jc.id.lv,https://dicechess-play.pages.dev
    CF_TUNNEL_TOKEN=eyJ...         # account-scoped — never commit
    # PLAY_BOT_TOKENS=team|name|token
+   # PLAY_OPEN_TO_HUMANS=gcp|expectimax-onnx-3|ONNX expectimax v3, with book   # ;-separated; opens bots to the human catalog
    ```
 4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
 5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.
