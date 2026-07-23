@@ -449,6 +449,31 @@ paths:
         '404': { description: No such name in the catalog. }
         '429': { description: Rate limit exceeded. }
         '503': { description: Webhooks are not enabled on this server. }
+  /lobby/play-bot:
+    post:
+      tags: [Leaderboard]
+      summary: Start a guest-vs-bot game from the catalog (public)
+      description: >
+        Starts a game between a guest and a catalog bot. timeControl is mandatory (no unlimited
+        catalog games); preferredColor is optional (omitted = random seat). No fresh liveness
+        check runs here — wake already confirmed the bot; a bot gone quiet since is handled the
+        same as any registered-webhook bot going quiet mid-game: the clock forfeits it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlayBotRequest' }
+      responses:
+        '201':
+          description: The guest's seat in the new game.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayBotMatch' }
+        '400': { description: Bad body, invalid guestId, or an unlimited time control. }
+        '404': { description: No such name in the catalog. }
+        '409': { description: The guest already has an unfinished catalog game. }
+        '429': { description: Rate limit exceeded. }
   /bot/webhook:
     post:
       tags: [Webhooks]
@@ -600,6 +625,27 @@ components:
       properties:
         alive: { type: boolean }
       required: [alive]
+    Side:
+      type: string
+      enum: [White, Black]
+    PlayBotRequest:
+      type: object
+      properties:
+        guestId: { type: string, format: uuid }
+        team: { type: string }
+        name: { type: string }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        preferredColor:
+          allOf: [{ $ref: '#/components/schemas/Side' }]
+          description: Omitted = random seat.
+      required: [guestId, team, name, timeControl]
+    PlayBotMatch:
+      type: object
+      properties:
+        gameId: { type: string }
+        token: { type: string, description: The guest's seat capability token. }
+        seat: { $ref: '#/components/schemas/Seat' }
+      required: [gameId, token, seat]
     CreateChallengeRequest:
       type: object
       properties:

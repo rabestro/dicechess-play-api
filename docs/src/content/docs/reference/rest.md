@@ -186,6 +186,24 @@ Before starting a game against a scale-to-zero bot, ping it to force a cold star
 { "alive": true }
 ```
 
+### Play a catalog bot
+
+`POST /lobby/play-bot`
+
+Starts a guest-vs-bot game from the catalog:
+
+```json
+{ "guestId": "0a1b2c3d-...", "team": "acme", "name": "alice", "timeControl": { "Fischer": { "initialSeconds": 300, "incrementSeconds": 5 } }, "preferredColor": "White" }
+```
+
+`guestId` is the SPA's stable per-browser identity (a UUID, same convention as `POST /lobby/seeks`'s `creator`). `timeControl` is **mandatory** — a catalog game is never unlimited, `400` if it is. `preferredColor` (`"White"` / `"Black"`) is optional; omitted, the seat is random. Responds `201` with the guest's seat:
+
+```json
+{ "gameId": "g-42", "token": "seat-secret", "seat": "White" }
+```
+
+Errors: `400` bad body, invalid `guestId`, or an unlimited time control; `404` a name outside the catalog; `409` the guest already has an unfinished catalog game (one at a time, for now); `429` rate limit. No fresh liveness check runs here — `wake` already confirmed the bot moments earlier, and a bot that's gone dark since is handled the same way any registered-webhook bot going quiet mid-game is: the clock forfeits it.
+
 ### Bot profile
 
 `GET /bots/{team}/{name}`

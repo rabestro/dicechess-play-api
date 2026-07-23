@@ -1,7 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.Principal
+import cats.syntax.all.*
+import dicechess.play.core.{Principal, Seat, Side, TimeControl}
 import dicechess.play.store.{
   BotCatalogListing,
   BotCatalogState,
@@ -22,11 +23,12 @@ import org.http4s.{HttpApp, HttpRoutes, Method, Request, Status, Uri}
 
 import scala.concurrent.duration.*
 
-/** The public bot-catalog wire (ADR-0014, E2/E3) over stub stores — the SQL behind the listing is covered against real
-  * Postgres in `PgGameStoreSuite`, and the webhook delivery mechanics (signing, timeouts, size caps) in
+/** The public bot-catalog wire (ADR-0014, E2/E3/E4) over stub stores — the SQL behind the listing is covered against
+  * real Postgres in `PgGameStoreSuite`, and the webhook delivery mechanics (signing, timeouts, size caps) in
   * `WebhooksSuite`; here the subject is the HTTP layer: the response shapes (pinned as JSON), the provisional flag
-  * derived from RD, that a bot open to humans stays visible even while its rating is provisional, and the wake route's
-  * gating (catalog membership, feature-disabled, rate limit) plus its liveness outcome against a scripted endpoint.
+  * derived from RD, the wake route's gating (catalog membership, feature-disabled, rate limit) plus its liveness
+  * outcome against a scripted endpoint, and play-bot's gating (validation, the 1-active-game limit, catalog membership,
+  * rate limit) plus its seat assignment against a real `GameRegistry`.
   */
 class CatalogRoutesSuite extends munit.CatsEffectSuite:
 
@@ -34,6 +36,8 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     url => IO.pure(Uri.fromString(url).left.map(_ => "not a valid URL"))
 
   private val webhookConfig = Webhooks.Config(timeout = 5.seconds)
+
+  private val guestA = "11111111-1111-1111-1111-111111111111"
 
   private def stubBots(open: Set[(String, String)]): BotStore = new BotStore:
     def register(team: String, name: String, tokenHash: String): IO[Boolean]              = IO.pure(false)
@@ -53,14 +57,19 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
   private def request(method: Method, uri: String): Request[IO] = Request[IO](method, Uri.unsafeFromString(uri))
 
   private def app(
+      registry: GameRegistry,
       listings: List[BotCatalogListing] = Nil,
       open: Set[(String, String)] = Set.empty,
       webhooks: Option[Webhooks] = None,
-      limiter: Option[AnonMintLimiter] = None
+      wakeLimiter: Option[AnonMintLimiter] = None,
+      playBotLimiter: Option[AnonMintLimiter] = None
   ): IO[HttpRoutes[IO]] =
-    limiter
-      .fold(AnonMintLimiter.create())(IO.pure)
-      .map(lim => CatalogRoutes(stubCatalog(listings), stubBots(open), webhooks, lim))
+    (
+      wakeLimiter.fold(AnonMintLimiter.create())(IO.pure),
+      playBotLimiter.fold(AnonMintLimiter.create())(IO.pure)
+    ).mapN((wake, playBot) => CatalogRoutes(stubCatalog(listings), stubBots(open), webhooks, registry, wake, playBot))
+
+  private def freshRegistry: IO[GameRegistry] = GameRegistry.create(store = GameStore.noop)
 
   /** A fake bot endpoint that only ever answers the ownership/wake handshake — echoes whatever nonce it is sent, real
     * `yourTurn` delivery is out of scope here (covered end-to-end in `WebhooksSuite`).
@@ -86,36 +95,48 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
            {"team":"acme","name":"fresh","rating":1500.0,"rd":350.0,"provisional":true,"description":null}
          ]}"""
     ).toOption.get
-    app(listings).flatMap(_.orNotFound.run(request(Method.GET, "/lobby/bots"))).flatMap { resp =>
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, listings)
+      resp     <- routes.orNotFound.run(request(Method.GET, "/lobby/bots"))
+      body     <- resp.as[Json]
+    yield
       assertEquals(resp.status, Status.Ok)
-      resp.as[Json].map(assertEquals(_, expected, "the catalog shape is a contract — pin it"))
-    }
+      assertEquals(body, expected, "the catalog shape is a contract — pin it")
 
   test("GET /lobby/bots is an empty list when no bot is open to humans"):
-    app().flatMap(_.orNotFound.run(request(Method.GET, "/lobby/bots"))).flatMap { resp =>
+    for
+      registry <- freshRegistry
+      routes   <- app(registry)
+      resp     <- routes.orNotFound.run(request(Method.GET, "/lobby/bots"))
+      body     <- resp.as[Json]
+    yield
       assertEquals(resp.status, Status.Ok)
-      resp.as[Json].map(body => assertEquals(body.hcursor.downField("bots").values.map(_.size), Some(0)))
-    }
+      assertEquals(body.hcursor.downField("bots").values.map(_.size), Some(0))
 
   test("POST /lobby/bots/{team}/{name}/wake is 404 for a name outside the catalog"):
-    app(open = Set(("acme", "alice")))
-      .flatMap(_.orNotFound.run(request(Method.POST, "/lobby/bots/acme/ghost/wake")))
-      .map(resp => assertEquals(resp.status, Status.NotFound))
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/ghost/wake"))
+    yield assertEquals(resp.status, Status.NotFound)
 
   test("POST /lobby/bots/{team}/{name}/wake is 503 when webhooks are disabled on the server"):
-    app(open = Set(("acme", "alice")), webhooks = None)
-      .flatMap(_.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake")))
-      .map(resp => assertEquals(resp.status, Status.ServiceUnavailable))
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")), webhooks = None)
+      resp     <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+    yield assertEquals(resp.status, Status.ServiceUnavailable)
 
   test("POST /lobby/bots/{team}/{name}/wake is alive:true when the endpoint echoes the nonce"):
     for
-      registry <- GameRegistry.create(store = GameStore.noop)
+      registry <- freshRegistry
       store    <- WebhookStore.inMemory
       outcome  <- Webhooks.create(registry, store, Client.fromHttpApp(echoingEndpoint), webhookConfig, allowAll).use {
         webhooks =>
           for
             _      <- webhooks.register(Principal.Bot("acme", "alice"), "https://bot.example/hook")
-            routes <- app(open = Set(("acme", "alice")), webhooks = Some(webhooks))
+            routes <- app(registry, open = Set(("acme", "alice")), webhooks = Some(webhooks))
             resp   <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
             body   <- resp.as[Wake]
           yield (resp.status, body)
@@ -126,13 +147,13 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
 
   test("POST /lobby/bots/{team}/{name}/wake is alive:false for a catalog bot with no registered webhook"):
     for
-      registry <- GameRegistry.create(store = GameStore.noop)
+      registry <- freshRegistry
       store    <- WebhookStore.inMemory
       outcome  <- Webhooks.create(registry, store, Client.fromHttpApp(deadEndpoint), webhookConfig, allowAll).use {
         webhooks =>
           // Deliberately not registered: a catalog-eligible bot whose webhook was never (or no longer) wired.
           for
-            routes <- app(open = Set(("acme", "alice")), webhooks = Some(webhooks))
+            routes <- app(registry, open = Set(("acme", "alice")), webhooks = Some(webhooks))
             resp   <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
             body   <- resp.as[Wake]
           yield (resp.status, body)
@@ -143,18 +164,112 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
 
   test("POST /lobby/bots/{team}/{name}/wake is 429 once the rate limit is spent"):
     for
-      registry <- GameRegistry.create(store = GameStore.noop)
+      registry <- freshRegistry
       store    <- WebhookStore.inMemory
       outcome  <- Webhooks.create(registry, store, Client.fromHttpApp(echoingEndpoint), webhookConfig, allowAll).use {
         webhooks =>
           for
             _       <- webhooks.register(Principal.Bot("acme", "alice"), "https://bot.example/hook")
             limiter <- AnonMintLimiter.create(limit = 1)
-            routes  <- app(open = Set(("acme", "alice")), webhooks = Some(webhooks), limiter = Some(limiter))
-            first   <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
-            second  <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+            routes  <- app(
+              registry,
+              open = Set(("acme", "alice")),
+              webhooks = Some(webhooks),
+              wakeLimiter = Some(limiter)
+            )
+            first  <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+            second <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
           yield (first.status, second.status)
       }
     yield
       assertEquals(outcome._1, Status.Ok)
       assertEquals(outcome._2, Status.TooManyRequests)
+
+  private def playBotBody(
+      guestId: String = guestA,
+      team: String = "acme",
+      name: String = "alice",
+      timeControl: TimeControl = TimeControl.Fischer(300, 5),
+      preferredColor: Option[Side] = None
+  ): Request[IO] =
+    request(Method.POST, "/lobby/play-bot").withEntity(PlayBot(guestId, team, name, timeControl, preferredColor))
+
+  test("POST /lobby/play-bot seats the guest on its preferred color and the bot on the other"):
+    val guestB = "22222222-2222-2222-2222-222222222222"
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      white    <- routes.orNotFound
+        .run(playBotBody(guestId = guestA, preferredColor = Some(Side.White)))
+        .flatMap(_.as[SeekMatch])
+      // A different guest: the first guest's now-active game must not block this one, and this pins the OTHER branch
+      // of seatAssignment in the same test.
+      black <- routes.orNotFound
+        .run(playBotBody(guestId = guestB, preferredColor = Some(Side.Black)))
+        .flatMap(_.as[SeekMatch])
+    yield
+      assertEquals(white.seat, Seat.White)
+      assert(white.gameId.nonEmpty && white.token.nonEmpty)
+      assertEquals(black.seat, Seat.Black)
+
+  test("POST /lobby/play-bot picks a seat when no color is preferred"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(playBotBody(preferredColor = None))
+      body     <- resp.as[SeekMatch]
+    yield
+      assertEquals(resp.status, Status.Created)
+      assert(body.seat == Seat.White || body.seat == Seat.Black, s"expected a playing seat, got ${body.seat}")
+
+  test("POST /lobby/play-bot is 400 for an unlimited time control"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(playBotBody(timeControl = TimeControl.Unlimited))
+    yield assertEquals(resp.status, Status.BadRequest)
+
+  test("POST /lobby/play-bot is 400 for a guestId that isn't a UUID"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(playBotBody(guestId = "not-a-uuid"))
+    yield assertEquals(resp.status, Status.BadRequest)
+
+  test("POST /lobby/play-bot is 400 for a malformed body"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(
+        request(Method.POST, "/lobby/play-bot").withEntity(Json.obj("guestId" -> Json.fromInt(123)))
+      )
+    yield assertEquals(resp.status, Status.BadRequest)
+
+  test("POST /lobby/play-bot is 404 for a name outside the catalog"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      resp     <- routes.orNotFound.run(playBotBody(team = "acme", name = "ghost"))
+    yield assertEquals(resp.status, Status.NotFound)
+
+  test("POST /lobby/play-bot is 409 for a guest that already has an active game — checked before catalog membership"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")))
+      first    <- routes.orNotFound.run(playBotBody()).map(_.status)
+      // Targets a name outside the catalog: still 409, not 404 — the active-game gate runs first.
+      second <- routes.orNotFound.run(playBotBody(team = "acme", name = "ghost")).map(_.status)
+    yield
+      assertEquals(first, Status.Created)
+      assertEquals(second, Status.Conflict)
+
+  test("POST /lobby/play-bot is 429 once the rate limit is spent"):
+    for
+      registry <- freshRegistry
+      limiter  <- AnonMintLimiter.create(limit = 1)
+      routes   <- app(registry, open = Set(("acme", "alice")), playBotLimiter = Some(limiter))
+      first    <- routes.orNotFound.run(playBotBody()).map(_.status)
+      second   <- routes.orNotFound.run(playBotBody(guestId = "22222222-2222-2222-2222-222222222222")).map(_.status)
+    yield
+      assertEquals(first, Status.Created)
+      assertEquals(second, Status.TooManyRequests)
