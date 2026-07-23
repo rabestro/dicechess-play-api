@@ -413,6 +413,21 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BotProfile' }
         '404': { description: No registered bot with that team/name. }
+  /lobby/bots:
+    get:
+      tags: [Leaderboard]
+      summary: Bot catalog (public)
+      description: >
+        Bots open to human play (via POST /bot/open-to-humans), each with its rating summary and
+        optional description. A provisional bot (RD > 110) is listed and flagged, not hidden.
+      security: []
+      responses:
+        '200':
+          description: The human-play catalog.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotCatalog' }
+        '404': { description: Server runs without persistence. }
   /bot/webhook:
     post:
       tags: [Webhooks]
@@ -542,6 +557,23 @@ components:
         openToHumans: { type: boolean }
         description: { type: string }
       required: [openToHumans]
+    CatalogBot:
+      type: object
+      properties:
+        team: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        rd: { type: number }
+        provisional: { type: boolean }
+        description: { type: string }
+      required: [team, name, rating, rd, provisional]
+    BotCatalog:
+      type: object
+      properties:
+        bots:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogBot' }
+      required: [bots]
     CreateChallengeRequest:
       type: object
       properties:

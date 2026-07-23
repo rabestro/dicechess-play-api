@@ -8,6 +8,7 @@ import dicechess.play.server.{
   BotAuth,
   BotEvents,
   BotRoutes,
+  CatalogRoutes,
   Challenges,
   Cors,
   GameRegistry,
@@ -133,6 +134,8 @@ object Main extends IOApp.Simple:
           // routes are simply not mounted (404), same spirit as the rating batch above.
           val leaderboard =
             pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg))
+          // Same DB-only gating: the human catalog reads the bots table's rating + description columns (ADR-0014).
+          val catalog = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => CatalogRoutes(pg))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -140,7 +143,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
+                  catalog <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
                     challenges,

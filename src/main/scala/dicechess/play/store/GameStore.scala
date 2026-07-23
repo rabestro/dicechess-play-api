@@ -379,3 +379,16 @@ trait LeaderboardStore:
 
   /** The rated, decided W-D-L record of one participant (either seat), for the profile endpoint. */
   def resultTallyFor(externalId: String): IO[ResultTally]
+
+/** One human-catalog card's data (ADR-0014, E2): a bot that opened itself to human games, with the rating summary its
+  * card shows. `provisional` is derived by the route from `rd`, not stored here.
+  */
+final case class BotCatalogListing(team: String, name: String, rating: Double, rd: Double, description: Option[String])
+
+/** Read seam for the human-facing bot catalog (ADR-0014) — Postgres only, like [[LeaderboardStore]]: it reads the
+  * `bots` table (the rating and description columns), absent in the in-memory mode, so the catalog endpoint is simply
+  * not mounted without persistence.
+  */
+trait BotCatalogStore:
+  /** Every bot currently open to human games (`open_to_humans = true`), best rating first — the catalog's cards. */
+  def catalogBots: IO[List[BotCatalogListing]]
