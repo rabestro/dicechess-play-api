@@ -16,6 +16,7 @@ Covered in depth under [Authentication & Identity](../../authentication/); summa
 | `POST` | `/bot/token` | Rotate the token (registered only). |
 | `GET` | `/bot/account` | Current identity. |
 | `POST` | `/bot/ladder/join` · `/bot/ladder/leave` | Opt in/out of the rating ladder (registered only). |
+| `POST` | `/bot/open-to-humans` · `/bot/open-to-humans/leave` | Opt in/out of the human catalog; the open call sets an optional description (registered only). |
 
 ## Challenges
 

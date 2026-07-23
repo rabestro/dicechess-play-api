@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import dicechess.play.core.Principal
-import dicechess.play.store.{BotRating, BotStore}
+import dicechess.play.store.{BotCatalogState, BotRating, BotStore}
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.{MessageDigest, SecureRandom}
@@ -91,6 +91,18 @@ final class BotAuth private (
     */
   def setOnLadder(bot: Principal.Bot, onLadder: Boolean): IO[Option[BotRating]] =
     store.setOnLadder(bot.team, bot.name, onLadder)
+
+  /** Open a registered bot to human catalog games, setting its description in the same write (ADR-0014). `None` when
+    * the caller is not a registered identity — static (house) and anonymous bots have no row to flag.
+    */
+  def openToHumans(bot: Principal.Bot, description: Option[String]): IO[Option[BotCatalogState]] =
+    store.openToHumans(bot.team, bot.name, description)
+
+  /** Close a registered bot to human catalog games, leaving its description intact (ADR-0014). `None` when not a
+    * registered identity.
+    */
+  def closeToHumans(bot: Principal.Bot): IO[Option[BotCatalogState]] =
+    store.closeToHumans(bot.team, bot.name)
 
   /** Mint an ephemeral, unranked anonymous bot — `bot:team:anon:<uuid>`. An optional display label becomes a readable,
     * collision-proof prefix (the uuid suffix guarantees uniqueness and the slug keeps the externalId colon-free).

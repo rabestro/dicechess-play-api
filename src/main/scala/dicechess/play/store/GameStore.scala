@@ -106,6 +106,12 @@ object BotRating:
     */
   val initial: BotRating = BotRating(glickoRating = 1500, glickoRd = 350, glickoVol = 0.06, onLadder = false, None)
 
+/** A registered bot's catalog opt-in state (ADR-0014): whether it is advertised to human players and its optional
+  * one-line description. Returned by the open/close store methods, read back atomically so the caller sees exactly the
+  * persisted state (no separate read a concurrent write could make stale).
+  */
+final case class BotCatalogState(openToHumans: Boolean, description: Option[String])
+
 /** Persistence seam for durable self-service bot identities (#70). Only token *hashes* cross this boundary — hashing
   * (and token minting) is the caller's job, so the store stays a dumb map from hash to identity.
   */
@@ -132,6 +138,19 @@ trait BotStore:
   /** Every registered bot currently opted into the rating ladder — the pairing scheduler's candidate pool (#102). */
   def onLadderBots: IO[List[Principal.Bot]]
 
+  /** Open a registered bot to human catalog games, replacing its catalog description in the same write (ADR-0014).
+    * `None` if no such registered identity; otherwise the resulting state, read back atomically.
+    */
+  def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]]
+
+  /** Close a registered bot to human catalog games, leaving its description untouched (ADR-0014). `None` if no such
+    * registered identity; otherwise the resulting state.
+    */
+  def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]]
+
+  /** Every registered bot currently open to human catalog games — the catalog's candidate pool (ADR-0014). */
+  def openToHumansBots: IO[List[Principal.Bot]]
+
 object BotStore:
   /** In-memory mode (no `PLAY_DB_URL`): registration works for the process's lifetime — durability, like game
     * persistence, is what the database adds. Two refs: identity by token hash (as before), and rating state keyed by
@@ -140,8 +159,9 @@ object BotStore:
   def inMemory: IO[BotStore] =
     (
       cats.effect.Ref.of[IO, Map[String, Principal.Bot]](Map.empty),
-      cats.effect.Ref.of[IO, Map[(String, String), BotRating]](Map.empty)
-    ).mapN { (byHash, ratings) =>
+      cats.effect.Ref.of[IO, Map[(String, String), BotRating]](Map.empty),
+      cats.effect.Ref.of[IO, Map[(String, String), (Boolean, Option[String])]](Map.empty)
+    ).mapN { (byHash, ratings, catalog) =>
       new BotStore:
         def register(team: String, name: String, tokenHash: String): IO[Boolean] =
           byHash
@@ -149,7 +169,10 @@ object BotStore:
               if bots.values.exists(b => b.team == team && b.name == name) then (bots, false)
               else (bots.updated(tokenHash, Principal.Bot(team, name)), true)
             }
-            .flatTap(claimed => ratings.update(_.updated((team, name), BotRating.initial)).whenA(claimed))
+            .flatTap { claimed =>
+              (ratings.update(_.updated((team, name), BotRating.initial)) *>
+                catalog.update(_.updated((team, name), (false, None)))).whenA(claimed)
+            }
 
         def authenticate(tokenHash: String): IO[Option[Principal.Bot]] = byHash.get.map(_.get(tokenHash))
 
@@ -174,6 +197,25 @@ object BotStore:
 
         def onLadderBots: IO[List[Principal.Bot]] =
           ratings.get.map(_.toList.collect { case ((team, name), r) if r.onLadder => Principal.Bot(team, name) })
+
+        def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
+          catalog.modify { current =>
+            if current.contains((team, name)) then
+              val state = BotCatalogState(openToHumans = true, description)
+              (current.updated((team, name), (true, description)), Some(state))
+            else (current, None)
+          }
+
+        def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] =
+          catalog.modify { current =>
+            current.get((team, name)) match
+              case Some((_, desc)) =>
+                (current.updated((team, name), (false, desc)), Some(BotCatalogState(openToHumans = false, desc)))
+              case None => (current, None)
+          }
+
+        def openToHumansBots: IO[List[Principal.Bot]] =
+          catalog.get.map(_.toList.collect { case ((team, name), (open, _)) if open => Principal.Bot(team, name) })
     }
 
 /** A registered bot's verified webhook (F.2, #104): rows exist only after the ownership handshake succeeded, so

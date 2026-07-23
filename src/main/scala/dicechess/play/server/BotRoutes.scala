@@ -40,6 +40,23 @@ final case class RotatedToken(token: String) derives Codec.AsObject
 /** The caller's rating-ladder state after `POST /bot/ladder/join` or `/leave`. */
 final case class LadderStatus(onLadder: Boolean, glickoRating: Double, glickoRd: Double) derives Codec.AsObject
 
+/** `POST /bot/open-to-humans` body — optional: a catalog description to set while opening the bot (ADR-0014). */
+final case class SetOpenToHumans(description: Option[String] = None) derives Codec.AsObject:
+  /** Cap the free-text blurb before it reaches the `text` column or a catalog card: unchanged when within the limit, a
+    * `Left` message otherwise, which the route turns into a 400.
+    */
+  def validate: Either[String, SetOpenToHumans] =
+    if description.exists(_.length > SetOpenToHumans.MaxDescriptionLength) then
+      Left(s"description must be at most ${SetOpenToHumans.MaxDescriptionLength} characters")
+    else Right(this)
+
+object SetOpenToHumans:
+  /** Upper bound on a catalog description — room for a sentence or two, short enough to keep catalog cards tidy. */
+  val MaxDescriptionLength = 200
+
+/** The catalog opt-in state returned by `POST /bot/open-to-humans[/leave]` (ADR-0014). */
+final case class OpenToHumans(openToHumans: Boolean, description: Option[String]) derives Codec.AsObject
+
 /** A bot's open-seek offer: just the time control — the identity comes from the Bearer token. */
 final case class BotCreateSeek(timeControl: Option[TimeControl] = None) derives Codec.AsObject
 
@@ -169,6 +186,13 @@ object BotRoutes:
 
       case req @ POST -> Root / "bot" / "ladder" / "leave" =>
         withBot(auth, req)(bot => setLadder(auth, bot, onLadder = false))
+
+      // Catalog opt-in (ADR-0014, #152): a registered bot advertises itself as playable by humans. Optional body sets
+      // the catalog description. Independent of the ladder — a bot can be on either, both, or neither.
+      case req @ POST -> Root / "bot" / "open-to-humans" =>
+        withBot(auth, req)(bot => openToHumans(auth, req, bot))
+      case req @ POST -> Root / "bot" / "open-to-humans" / "leave" =>
+        withBot(auth, req)(bot => closeToHumans(auth, bot))
 
       case req @ GET -> Root / "bot" / "stream" / "event" =>
         withBot(auth, req): bot =>
@@ -337,6 +361,34 @@ object BotRoutes:
       .flatMap:
         case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
         case None         => Forbidden("only a registered bot can join the rating ladder")
+
+  /** `POST /bot/open-to-humans` — opt in and (re)set the catalog description in one atomic write. A blank body means
+    * "no description" (and clears any previous one); any other body is parsed, and a malformed or over-long one is a
+    * 400. Unlike the required-body routes, the body is read directly rather than via `attemptAs` + `Content-Length`:
+    * the description is optional, and `Content-Length` is absent on chunked/HTTP-2 requests, so keying off it would
+    * either 400 a legitimate empty body or silently drop a chunked one. Reading the bytes is transport-independent.
+    */
+  private def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
+    req.bodyText.compile.string.flatMap: raw =>
+      if raw.isBlank then respondCatalog(auth.openToHumans(bot, None))
+      else
+        io.circe.parser.decode[SetOpenToHumans](raw) match
+          case Left(_)     => BadRequest("invalid JSON body")
+          case Right(body) =>
+            body.validate match
+              case Left(message) => BadRequest(message)
+              case Right(valid)  => respondCatalog(auth.openToHumans(bot, valid.description))
+
+  /** `POST /bot/open-to-humans/leave` — opt out, leaving the description intact. */
+  private def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
+    respondCatalog(auth.closeToHumans(bot))
+
+  /** Shared reply: the resulting catalog state as `OpenToHumans`, or 403 for a non-registered caller (no row to flag).
+    */
+  private def respondCatalog(state: IO[Option[dicechess.play.store.BotCatalogState]]): IO[Response[IO]] =
+    state.flatMap:
+      case Some(s) => Ok(OpenToHumans(s.openToHumans, s.description))
+      case None    => Forbidden("only a registered bot can open itself to human games")
 
   /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. Package-visible so sibling route
     * modules of the same Bot API surface (`WebhookRoutes`) authenticate identically instead of re-deriving this.
