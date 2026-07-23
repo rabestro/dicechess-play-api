@@ -97,6 +97,29 @@ final class Webhooks private (
 
   def remove(bot: Principal.Bot): IO[Boolean] = store.delete(bot.team, bot.name)
 
+  /** Liveness probe for the human catalog (E3, ADR-0014): does the bot's registered webhook still answer? Reuses the
+    * exact `verification` envelope every implementation of this protocol already understands — the runtime library's
+    * handshake answers it unconditionally and unsigned (it must, since a fresh registration has no shared secret yet),
+    * so a wake probe never touches game state or needs a valid signature. The POST itself is what "wakes" a
+    * scale-to-zero endpoint (e.g. Cloud Run): merely reaching it forces a cold start before a human commits to a game.
+    * `false` for no registration, a network failure, a non-200, or a wrong/garbled echo — the caller only needs yes/no.
+    */
+  def wake(bot: Principal.Bot): IO[Boolean] =
+    store
+      .get(bot.team, bot.name)
+      .flatMap:
+        case None       => IO.pure(false)
+        case Some(hook) =>
+          WebhookSecurity.randomHex(NonceBytes).flatMap { nonce =>
+            val body = WebhookVerification("verification", nonce).asJson.noSpaces
+            post(hook.url, hook.secret, body, config.timeout).map:
+              case Left(_)       => false
+              case Right(answer) =>
+                decode[WebhookNonceEcho](answer) match
+                  case Right(WebhookNonceEcho(echoed)) => echoed == nonce
+                  case Left(_)                         => false
+          }
+
   // ── delivery ────────────────────────────────────────────────────────────────
 
   /** Scan → attach → sleep, forever. Scoped to the server by the caller (`.background`), like the other loops. */
