@@ -181,7 +181,7 @@ object BotRoutes:
       case req @ POST -> Root / "bot" / "open-to-humans" =>
         withBot(auth, req)(bot => openToHumans(auth, req, bot))
       case req @ POST -> Root / "bot" / "open-to-humans" / "leave" =>
-        withBot(auth, req)(bot => respondOpenToHumans(auth, bot, open = false, description = None))
+        withBot(auth, req)(bot => closeToHumans(auth, bot))
 
       case req @ GET -> Root / "bot" / "stream" / "event" =>
         withBot(auth, req): bot =>
@@ -351,26 +351,29 @@ object BotRoutes:
         case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
         case None         => Forbidden("only a registered bot can join the rating ladder")
 
-  /** Open the bot to human catalog games; an absent or unparseable body just means "no description". */
+  /** `POST /bot/open-to-humans` — opt in and (re)set the catalog description in one atomic write. An empty body means
+    * "no description" (and clears any previous one); a present-but-unparseable body is a 400, as on `/bot/register`.
+    */
   private def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
-    req
-      .attemptAs[SetOpenToHumans]
-      .value
-      .flatMap: parsed =>
-        respondOpenToHumans(auth, bot, open = true, description = parsed.toOption.flatMap(_.description))
+    if req.contentLength.forall(_ == 0L) then respondCatalog(auth.openToHumans(bot, None))
+    else
+      req
+        .attemptAs[SetOpenToHumans]
+        .value
+        .flatMap:
+          case Left(failure) => BadRequest(failure.message)
+          case Right(body)   => respondCatalog(auth.openToHumans(bot, body.description))
 
-  private def respondOpenToHumans(
-      auth: BotAuth,
-      bot: Principal.Bot,
-      open: Boolean,
-      description: Option[String]
-  ): IO[Response[IO]] =
-    auth
-      .setOpenToHumans(bot, open)
-      .flatMap:
-        case false => Forbidden("only a registered bot can open itself to human games")
-        case true  =>
-          description.fold(IO.unit)(d => auth.setDescription(bot, Some(d)).void) *> Ok(OpenToHumans(open, description))
+  /** `POST /bot/open-to-humans/leave` — opt out, leaving the description intact. */
+  private def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
+    respondCatalog(auth.closeToHumans(bot))
+
+  /** Shared reply: the resulting catalog state as `OpenToHumans`, or 403 for a non-registered caller (no row to flag).
+    */
+  private def respondCatalog(state: IO[Option[dicechess.play.store.BotCatalogState]]): IO[Response[IO]] =
+    state.flatMap:
+      case Some(s) => Ok(OpenToHumans(s.openToHumans, s.description))
+      case None    => Forbidden("only a registered bot can open itself to human games")
 
   /** Run `f` with the authenticated bot, or answer 401 with a Bearer challenge. Package-visible so sibling route
     * modules of the same Bot API surface (`WebhookRoutes`) authenticate identically instead of re-deriving this.

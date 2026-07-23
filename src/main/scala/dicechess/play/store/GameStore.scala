@@ -106,6 +106,12 @@ object BotRating:
     */
   val initial: BotRating = BotRating(glickoRating = 1500, glickoRd = 350, glickoVol = 0.06, onLadder = false, None)
 
+/** A registered bot's catalog opt-in state (ADR-0014): whether it is advertised to human players and its optional
+  * one-line description. Returned by the open/close store methods, read back atomically so the caller sees exactly the
+  * persisted state (no separate read a concurrent write could make stale).
+  */
+final case class BotCatalogState(openToHumans: Boolean, description: Option[String])
+
 /** Persistence seam for durable self-service bot identities (#70). Only token *hashes* cross this boundary — hashing
   * (and token minting) is the caller's job, so the store stays a dumb map from hash to identity.
   */
@@ -132,11 +138,15 @@ trait BotStore:
   /** Every registered bot currently opted into the rating ladder — the pairing scheduler's candidate pool (#102). */
   def onLadderBots: IO[List[Principal.Bot]]
 
-  /** Open a registered bot to human catalog games, or close it (ADR-0014). `false` if no such registered identity. */
-  def setOpenToHumans(team: String, name: String, open: Boolean): IO[Boolean]
+  /** Open a registered bot to human catalog games, replacing its catalog description in the same write (ADR-0014).
+    * `None` if no such registered identity; otherwise the resulting state, read back atomically.
+    */
+  def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]]
 
-  /** Set or clear a registered bot's catalog description (ADR-0014). `false` if no such registered identity. */
-  def setDescription(team: String, name: String, description: Option[String]): IO[Boolean]
+  /** Close a registered bot to human catalog games, leaving its description untouched (ADR-0014). `None` if no such
+    * registered identity; otherwise the resulting state.
+    */
+  def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]]
 
   /** Every registered bot currently open to human catalog games — the catalog's candidate pool (ADR-0014). */
   def openToHumansBots: IO[List[Principal.Bot]]
@@ -188,18 +198,20 @@ object BotStore:
         def onLadderBots: IO[List[Principal.Bot]] =
           ratings.get.map(_.toList.collect { case ((team, name), r) if r.onLadder => Principal.Bot(team, name) })
 
-        def setOpenToHumans(team: String, name: String, open: Boolean): IO[Boolean] =
+        def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
           catalog.modify { current =>
-            current.get((team, name)) match
-              case Some((_, desc)) => (current.updated((team, name), (open, desc)), true)
-              case None            => (current, false)
+            if current.contains((team, name)) then
+              val state = BotCatalogState(openToHumans = true, description)
+              (current.updated((team, name), (true, description)), Some(state))
+            else (current, None)
           }
 
-        def setDescription(team: String, name: String, description: Option[String]): IO[Boolean] =
+        def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] =
           catalog.modify { current =>
             current.get((team, name)) match
-              case Some((open, _)) => (current.updated((team, name), (open, description)), true)
-              case None            => (current, false)
+              case Some((_, desc)) =>
+                (current.updated((team, name), (false, desc)), Some(BotCatalogState(openToHumans = false, desc)))
+              case None => (current, None)
           }
 
         def openToHumansBots: IO[List[Principal.Bot]] =

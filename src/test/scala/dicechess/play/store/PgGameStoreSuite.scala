@@ -139,25 +139,37 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
     }
 
   test(
-    "open_to_humans + description toggle; openToHumansBots lists only opted-in; unregistered reports false (ADR-0014)"
+    "openToHumans/closeToHumans round-trip the description atomically; the pool lists only opted-in; unregistered -> None (ADR-0014)"
   ):
     withContainers { pg =>
       store(pg).use { db =>
         for
-          _         <- db.register("catalog-suite", "on-bot", "hash-catalog-on")
-          _         <- db.register("catalog-suite", "off-bot", "hash-catalog-off")
-          opened    <- db.setOpenToHumans("catalog-suite", "on-bot", true)
-          described <- db.setDescription("catalog-suite", "on-bot", Some("aggressive + book"))
-          catalog   <- db.openToHumansBots
-          ghost     <- db.setOpenToHumans("catalog-suite", "nobody", true)
-          ghostDesc <- db.setDescription("catalog-suite", "nobody", Some("x"))
+          _          <- db.register("catalog-suite", "on-bot", "hash-catalog-on")
+          _          <- db.register("catalog-suite", "off-bot", "hash-catalog-off")
+          opened     <- db.openToHumans("catalog-suite", "on-bot", Some("aggressive + book"))
+          pool       <- db.openToHumansBots
+          closed     <- db.closeToHumans("catalog-suite", "on-bot")
+          poolAfter  <- db.openToHumansBots
+          cleared    <- db.openToHumans("catalog-suite", "on-bot", None)
+          ghostOpen  <- db.openToHumans("catalog-suite", "nobody", Some("x"))
+          ghostClose <- db.closeToHumans("catalog-suite", "nobody")
         yield
-          assert(opened, "opening a registered identity must report true")
-          assert(described, "setting a registered identity's description must report true")
-          assert(catalog.contains(Principal.Bot("catalog-suite", "on-bot")), s"expected on-bot in $catalog")
-          assert(!catalog.contains(Principal.Bot("catalog-suite", "off-bot")), s"expected off-bot absent from $catalog")
-          assert(!ghost, "opening an unregistered identity must report false")
-          assert(!ghostDesc, "describing an unregistered identity must report false")
+          assertEquals(opened, Some(BotCatalogState(openToHumans = true, Some("aggressive + book"))))
+          assert(pool.contains(Principal.Bot("catalog-suite", "on-bot")), s"expected on-bot in $pool")
+          assert(!pool.contains(Principal.Bot("catalog-suite", "off-bot")), s"expected off-bot absent from $pool")
+          assertEquals(
+            closed,
+            Some(BotCatalogState(openToHumans = false, Some("aggressive + book"))),
+            "close keeps the description"
+          )
+          assert(!poolAfter.contains(Principal.Bot("catalog-suite", "on-bot")), "a closed bot leaves the pool")
+          assertEquals(
+            cleared,
+            Some(BotCatalogState(openToHumans = true, None)),
+            "re-open with None clears description"
+          )
+          assertEquals(ghostOpen, None, "opening an unregistered identity yields None")
+          assertEquals(ghostClose, None, "closing an unregistered identity yields None")
       }
     }
 

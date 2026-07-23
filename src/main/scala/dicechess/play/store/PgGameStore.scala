@@ -158,17 +158,27 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map(Principal.Bot(_, _)))
 
-  def setOpenToHumans(team: String, name: String, open: Boolean): IO[Boolean] =
-    sql"""UPDATE play.bots SET open_to_humans = $open WHERE team = $team AND name = $name""".update.run
+  /** `RETURNING` in the same statement (same no-stale-window reasoning as `setOnLadder`): open the bot and set its
+    * description in one write, then read the persisted state back. `None` if no such registered identity.
+    */
+  def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
+    sql"""UPDATE play.bots SET open_to_humans = true, description = $description
+          WHERE team = $team AND name = $name
+          RETURNING open_to_humans, description"""
+      .query[(Boolean, Option[String])]
+      .option
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_ == 1)
+      .map(_.map { case (open, desc) => BotCatalogState(open, desc) })
 
-  def setDescription(team: String, name: String, description: Option[String]): IO[Boolean] =
-    sql"""UPDATE play.bots SET description = $description WHERE team = $team AND name = $name""".update.run
+  def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] =
+    sql"""UPDATE play.bots SET open_to_humans = false WHERE team = $team AND name = $name
+          RETURNING open_to_humans, description"""
+      .query[(Boolean, Option[String])]
+      .option
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_ == 1)
+      .map(_.map { case (open, desc) => BotCatalogState(open, desc) })
 
   def openToHumansBots: IO[List[Principal.Bot]] =
     sql"""SELECT team, name FROM play.bots WHERE open_to_humans = true"""
