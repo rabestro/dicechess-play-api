@@ -133,6 +133,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LadderState' }
         '403': { $ref: '#/components/responses/RegisteredOnly' }
+  /bot/open-to-humans:
+    post:
+      tags: [Identity]
+      summary: Open to human catalog games
+      description: >
+        Advertises a registered bot in the human-facing catalog and, in the same write, sets its
+        optional description. A zero-length or field-absent body clears the description. Registered
+        bots only.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetOpenToHumans' }
+      responses:
+        '200':
+          description: Catalog opt-in state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenToHumansState' }
+        '400':
+          description: Description longer than 200 characters, or a malformed body.
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+  /bot/open-to-humans/leave:
+    post:
+      tags: [Identity]
+      summary: Close to human catalog games
+      description: Removes the bot from the human catalog, leaving its description intact. Registered bots only.
+      responses:
+        '200':
+          description: Catalog opt-in state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenToHumansState' }
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
   /bot/challenge:
     post:
       tags: [Challenges]
@@ -498,6 +532,16 @@ components:
         glickoRating: { type: number }
         glickoRd: { type: number }
       required: [onLadder, glickoRating, glickoRd]
+    SetOpenToHumans:
+      type: object
+      properties:
+        description: { type: string, maxLength: 200, description: 'Optional catalog blurb; omit or empty to clear.' }
+    OpenToHumansState:
+      type: object
+      properties:
+        openToHumans: { type: boolean }
+        description: { type: string }
+      required: [openToHumans]
     CreateChallengeRequest:
       type: object
       properties:

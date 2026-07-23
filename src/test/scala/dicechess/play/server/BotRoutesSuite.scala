@@ -183,6 +183,12 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
               .withEntity(io.circe.Json.obj("description" -> io.circe.Json.fromInt(123)))
           )
           .map(_.status)
+        tooLong <- service
+          .run(
+            request(Method.POST, uri"/bot/open-to-humans", Some(created.token))
+              .withEntity(SetOpenToHumans(Some("x".repeat(201))))
+          )
+          .map(_.status)
         anon     <- service.run(Request[IO](Method.POST, uri"/bot/anon")).flatMap(_.as[AnonBot])
         anonNo   <- service.run(request(Method.POST, uri"/bot/open-to-humans", Some(anon.token))).map(_.status)
         staticNo <- service.run(request(Method.POST, uri"/bot/open-to-humans", Some("tok-alice"))).map(_.status)
@@ -191,6 +197,7 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(closed, OpenToHumans(openToHumans = false, description = Some("aggressive + book")))
         assertEquals(reopened, OpenToHumans(openToHumans = true, description = None))
         assertEquals(badBody, Status.BadRequest)
+        assertEquals(tooLong, Status.BadRequest)
         assertEquals(anonNo, Status.Forbidden)
         assertEquals(staticNo, Status.Forbidden)
 

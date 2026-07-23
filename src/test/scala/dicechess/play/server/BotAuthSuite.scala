@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.IO
 import dicechess.play.core.Principal
-import dicechess.play.store.{BotRating, BotStore}
+import dicechess.play.store.{BotCatalogState, BotRating, BotStore}
 
 import scala.concurrent.duration.*
 
@@ -145,5 +145,23 @@ class BotAuthSuite extends munit.CatsEffectSuite:
         yield
           assert(joined.exists(_.onLadder), s"joining must persist onLadder=true, got $joined")
           assert(left.exists(r => !r.onLadder), s"leaving must persist onLadder=false, got $left")
+          assertEquals(staticNo, None)
+          assertEquals(anonNo, None)
+
+  test("opening and closing to human games round-trips the description, and is registered-only"):
+    fromSpec("acme|greedy|tok")
+      .flatMap: auth =>
+        for
+          registered <- auth.register("dragons", "smaug")
+          (_, bot) = registered.toOption.get
+          opened <- auth.openToHumans(bot, Some("aggressive + book"))
+          closed <- auth.closeToHumans(bot)
+          // Static and anon callers have no registered row to flag — same gate as the ladder.
+          staticNo <- auth.openToHumans(Principal.Bot("acme", "greedy"), None)
+          anon     <- auth.mintAnon(None)
+          anonNo   <- auth.closeToHumans(anon._2)
+        yield
+          assertEquals(opened, Some(BotCatalogState(openToHumans = true, Some("aggressive + book"))))
+          assertEquals(closed, Some(BotCatalogState(openToHumans = false, Some("aggressive + book"))))
           assertEquals(staticNo, None)
           assertEquals(anonNo, None)

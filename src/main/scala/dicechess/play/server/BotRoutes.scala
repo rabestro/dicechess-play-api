@@ -41,7 +41,18 @@ final case class RotatedToken(token: String) derives Codec.AsObject
 final case class LadderStatus(onLadder: Boolean, glickoRating: Double, glickoRd: Double) derives Codec.AsObject
 
 /** `POST /bot/open-to-humans` body — optional: a catalog description to set while opening the bot (ADR-0014). */
-final case class SetOpenToHumans(description: Option[String] = None) derives Codec.AsObject
+final case class SetOpenToHumans(description: Option[String] = None) derives Codec.AsObject:
+  /** Cap the free-text blurb before it reaches the `text` column or a catalog card: unchanged when within the limit, a
+    * `Left` message otherwise, which the route turns into a 400.
+    */
+  def validate: Either[String, SetOpenToHumans] =
+    if description.exists(_.length > SetOpenToHumans.MaxDescriptionLength) then
+      Left(s"description must be at most ${SetOpenToHumans.MaxDescriptionLength} characters")
+    else Right(this)
+
+object SetOpenToHumans:
+  /** Upper bound on a catalog description — room for a sentence or two, short enough to keep catalog cards tidy. */
+  val MaxDescriptionLength = 200
 
 /** The catalog opt-in state returned by `POST /bot/open-to-humans[/leave]` (ADR-0014). */
 final case class OpenToHumans(openToHumans: Boolean, description: Option[String]) derives Codec.AsObject
@@ -351,18 +362,22 @@ object BotRoutes:
         case Some(rating) => Ok(LadderStatus(rating.onLadder, rating.glickoRating, rating.glickoRd))
         case None         => Forbidden("only a registered bot can join the rating ladder")
 
-  /** `POST /bot/open-to-humans` — opt in and (re)set the catalog description in one atomic write. An empty body means
-    * "no description" (and clears any previous one); a present-but-unparseable body is a 400, as on `/bot/register`.
+  /** `POST /bot/open-to-humans` — opt in and (re)set the catalog description in one atomic write. A blank body means
+    * "no description" (and clears any previous one); any other body is parsed, and a malformed or over-long one is a
+    * 400. Unlike the required-body routes, the body is read directly rather than via `attemptAs` + `Content-Length`:
+    * the description is optional, and `Content-Length` is absent on chunked/HTTP-2 requests, so keying off it would
+    * either 400 a legitimate empty body or silently drop a chunked one. Reading the bytes is transport-independent.
     */
   private def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
-    if req.contentLength.forall(_ == 0L) then respondCatalog(auth.openToHumans(bot, None))
-    else
-      req
-        .attemptAs[SetOpenToHumans]
-        .value
-        .flatMap:
-          case Left(failure) => BadRequest(failure.message)
-          case Right(body)   => respondCatalog(auth.openToHumans(bot, body.description))
+    req.bodyText.compile.string.flatMap: raw =>
+      if raw.isBlank then respondCatalog(auth.openToHumans(bot, None))
+      else
+        io.circe.parser.decode[SetOpenToHumans](raw) match
+          case Left(_)     => BadRequest("invalid JSON body")
+          case Right(body) =>
+            body.validate match
+              case Left(message) => BadRequest(message)
+              case Right(valid)  => respondCatalog(auth.openToHumans(bot, valid.description))
 
   /** `POST /bot/open-to-humans/leave` — opt out, leaving the description intact. */
   private def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
