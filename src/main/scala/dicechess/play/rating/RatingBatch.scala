@@ -46,8 +46,10 @@ final class RatingBatch(
     )).foreverM
 
   private def checkAndParkBotIfNeeded(bot: Principal.Bot): IO[Unit] =
+    // Fetch enough recent games to cover N pairs plus some slack for casual games in between.
+    // A limit of N*4 is generous: it allows up to N casual games interspersed with N ladder pairs.
     resultsStore
-      .recentResultsFor(bot.externalId, limit = Int.MaxValue)
+      .recentResultsFor(bot.externalId, limit = config.ladderTimeoutParkPairs * 4)
       .flatMap: results =>
         // Only consider ladder games (those with a pairingId) to avoid false positives from casual/challenge timeouts.
         // Each mirrored ladder pairing produces exactly two results sharing the same pairingId.
