@@ -103,7 +103,7 @@ object Main extends IOApp.Simple:
             .errorln("[play][rating] RATING_INTERVAL_SECONDS set but PLAY_DB_URL unset: rating batch disabled")
             .as(IO.never: IO[Unit])
         case (Some(ratingConfig), Some(pg)) =>
-          IO.pure(new RatingBatch(botStore, pg, ratingConfig).scheduler())
+          IO.pure(new RatingBatch(botStore, pg, pg, ratingConfig).scheduler())
       // Registration triggers an outbound verification POST, so it shares the strict per-IP budget of /bot/register.
       webhookLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       // The catalog wake probe (E3) also POSTs outward (the same unauthenticated handshake), but a visitor browsing

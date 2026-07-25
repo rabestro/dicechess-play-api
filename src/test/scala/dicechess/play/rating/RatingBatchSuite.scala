@@ -26,7 +26,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
   private def store(pg: PostgreSQLContainer) =
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
-  private def batch(db: PgGameStore): RatingBatch = new RatingBatch(db, db, RatingBatch.Config.Default)
+  private def batch(db: PgGameStore): RatingBatch = new RatingBatch(db, db, db, RatingBatch.Config.Default)
 
   private def endedFixture(
       white: Principal,
@@ -215,13 +215,22 @@ class RatingBatchPureSuite extends munit.FunSuite:
     assertEquals(RatingBatch.scores(-1), Some((0.0, 1.0)))
     assertEquals(RatingBatch.scores(2), None)
 
-  test("a non-positive or unparseable interval disables the batch; a bad batch size falls back to the default"):
-    assertEquals(RatingBatch.Config.fromValues(Some("0"), None), None)
-    assertEquals(RatingBatch.Config.fromValues(Some("-5"), None), None)
-    assertEquals(RatingBatch.Config.fromValues(Some("junk"), None), None)
-    assertEquals(RatingBatch.Config.fromValues(None, Some("50")), None)
+  test(
+    "a non-positive or unparseable interval disables the batch; a bad batch size or park pairs falls back to the default"
+  ):
+    assertEquals(RatingBatch.Config.fromValues(Some("0"), None, None), None)
+    assertEquals(RatingBatch.Config.fromValues(Some("-5"), None, None), None)
+    assertEquals(RatingBatch.Config.fromValues(Some("junk"), None, None), None)
+    assertEquals(RatingBatch.Config.fromValues(None, Some("50"), None), None)
     assertEquals(
-      RatingBatch.Config.fromValues(Some("60"), Some("0")).map(_.batchSize),
+      RatingBatch.Config.fromValues(Some("60"), Some("0"), None).map(_.batchSize),
       Some(RatingBatch.Config.DefaultBatchSize)
     )
-    assertEquals(RatingBatch.Config.fromValues(Some("45"), Some("7")), Some(RatingBatch.Config(45.seconds, 7)))
+    assertEquals(
+      RatingBatch.Config.fromValues(Some("60"), None, Some("0")).map(_.ladderTimeoutParkPairs),
+      Some(RatingBatch.Config.DefaultLadderTimeoutParkPairs)
+    )
+    assertEquals(
+      RatingBatch.Config.fromValues(Some("45"), Some("7"), Some("3")),
+      Some(RatingBatch.Config(45.seconds, 7, 3))
+    )

@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.std.Console
 import cats.syntax.all.*
 import dicechess.play.core.Principal
-import dicechess.play.store.{BotStore, GameResultRow, RatingStore}
+import dicechess.play.store.{BotStore, GameResultRow, GameResultsStore, RatingStore}
 
 import scala.concurrent.duration.*
 
@@ -22,7 +22,12 @@ import scala.concurrent.duration.*
   * missing result, self-play — are logged and stamped applied anyway: left unstamped they would sit at the head of the
   * queue forever.
   */
-final class RatingBatch(botStore: BotStore, ratingStore: RatingStore, config: RatingBatch.Config):
+final class RatingBatch(
+    botStore: BotStore,
+    ratingStore: RatingStore,
+    resultsStore: GameResultsStore,
+    config: RatingBatch.Config
+):
 
   /** One batch tick: process the queue page by page until a short page says it is drained. */
   def tick: IO[Unit] =
@@ -39,6 +44,29 @@ final class RatingBatch(botStore: BotStore, ratingStore: RatingStore, config: Ra
       Console[IO].errorln(s"[play][rating] tick failed, retrying next interval: $error")
     )).foreverM
 
+  private def checkAndParkBotIfNeeded(bot: Principal.Bot): IO[Unit] =
+    resultsStore.recentResultsFor(bot.externalId, limit = config.ladderTimeoutParkPairs * 2).flatMap { results =>
+      val timeoutLosses = results.filter { row =>
+        val isBotWhite = row.whiteExternalId == bot.externalId
+        val isBotBlack = row.blackExternalId == bot.externalId
+        val isBotLoser =
+          if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
+        isBotLoser && row.termination == "timeout"
+      }
+      // Group by pairingId to count consecutive mirrored pairs with timeout losses
+      val timeoutPairings = timeoutLosses.groupBy(_.pairingId).filter(_._2.size == 2).size
+      if timeoutPairings >= config.ladderTimeoutParkPairs then
+        botStore.setOnLadder(bot.team, bot.name, onLadder = false).flatMap {
+          case Some(_) =>
+            Console[IO].println(
+              s"[play][rating] auto-parked bot ${bot.team}/${bot.name} after $timeoutPairings consecutive timeout pairings"
+            )
+          case None =>
+            Console[IO].errorln(s"[play][rating] failed to auto-park bot ${bot.team}/${bot.name}: not found")
+        }
+      else IO.unit
+    }
+
   private def applyGame(row: GameResultRow): IO[Unit] =
     (
       Principal.fromBotExternalId(row.whiteExternalId),
@@ -52,11 +80,21 @@ final class RatingBatch(botStore: BotStore, ratingStore: RatingStore, config: Ra
           case (Some(whiteRating), Some(blackRating)) =>
             val whiteNew = Glicko2.update(whiteRating.glicko, List(Glicko2.Result(blackRating.glicko, whiteScore)))
             val blackNew = Glicko2.update(blackRating.glicko, List(Glicko2.Result(whiteRating.glicko, blackScore)))
-            ratingStore.applyRatingUpdate(row.gameId, white, whiteNew, black, blackNew)
+            ratingStore.applyRatingUpdate(row.gameId, white, whiteNew, black, blackNew) *>
+              checkTimeoutAndPark(white, row) *>
+              checkTimeoutAndPark(black, row)
           case _ => skip(row, "a participant is not a REGISTERED bot")
         }
       case (Some(_), Some(_), None) => skip(row, "no definite result")
       case _                        => skip(row, "a participant is not a bot identity")
+
+  private def checkTimeoutAndPark(bot: Principal.Bot, row: GameResultRow): IO[Unit] =
+    val isBotWhite = row.whiteExternalId == bot.externalId
+    val isBotBlack = row.blackExternalId == bot.externalId
+    val isBotLoser =
+      if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
+    if isBotLoser && row.termination == "timeout" then checkAndParkBotIfNeeded(bot)
+    else IO.unit
 
   private def skip(row: GameResultRow, why: String): IO[Unit] =
     Console[IO].errorln(s"[play][rating] game ${row.gameId.value} skipped ($why); stamped applied") *>
@@ -67,30 +105,47 @@ object RatingBatch:
   /** `interval` between queue polls; `batchSize` is the page size of one poll (the tick keeps paging until a short
     * page, so the backlog after downtime still drains in one tick).
     */
-  final case class Config(interval: FiniteDuration, batchSize: Int)
+  final case class Config(
+      interval: FiniteDuration,
+      batchSize: Int,
+      ladderTimeoutParkPairs: Int
+  )
 
   object Config:
-    val DefaultInterval: FiniteDuration = 60.seconds
-    val DefaultBatchSize: Int           = 100
-    val Default: Config                 = Config(DefaultInterval, DefaultBatchSize)
+    val DefaultInterval: FiniteDuration    = 60.seconds
+    val DefaultBatchSize: Int              = 100
+    val DefaultLadderTimeoutParkPairs: Int = 2
+    val Default: Config                    = Config(DefaultInterval, DefaultBatchSize, DefaultLadderTimeoutParkPairs)
 
     /** Parse from explicit optional raw values (also used by tests — same split, and the same strictly-positive
       * validation, as `LadderScheduler.Config.fromValues`): a non-positive interval would busy-spin the loop, a
       * non-positive batch size would make every tick a no-op; either is treated as absent/unparseable. An invalid
-      * interval disables the batch entirely; an invalid batch size falls back to the default, since it is a tuning
-      * knob, not the on/off switch.
+      * interval disables the batch entirely; an invalid batch size or ladder timeout park pairs falls back to the
+      * default, since they are tuning knobs, not the on/off switch.
       */
-    def fromValues(intervalSecondsRaw: Option[String], batchSizeRaw: Option[String]): Option[Config] =
+    def fromValues(
+        intervalSecondsRaw: Option[String],
+        batchSizeRaw: Option[String],
+        ladderTimeoutParkPairsRaw: Option[String]
+    ): Option[Config] =
       intervalSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map { seconds =>
-        val size = batchSizeRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultBatchSize)
-        Config(seconds.seconds, size)
+        val size      = batchSizeRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultBatchSize)
+        val parkPairs = ladderTimeoutParkPairsRaw
+          .flatMap(_.toIntOption)
+          .filter(_ > 0)
+          .getOrElse(DefaultLadderTimeoutParkPairs)
+        Config(seconds.seconds, size, parkPairs)
       }
 
   /** Opt-in by env, same "absence disables" idiom as `LADDER_INTERVAL_SECONDS`: with `RATING_INTERVAL_SECONDS` unset,
     * no ratings are ever recomputed.
     */
   def configFromEnv: Option[Config] =
-    Config.fromValues(sys.env.get("RATING_INTERVAL_SECONDS"), sys.env.get("RATING_BATCH_SIZE"))
+    Config.fromValues(
+      sys.env.get("RATING_INTERVAL_SECONDS"),
+      sys.env.get("RATING_BATCH_SIZE"),
+      sys.env.get("LADDER_TIMEOUT_PARK_PAIRS")
+    )
 
   /** White-POV stored result → (whiteScore, blackScore) in Glicko terms; `None` for any out-of-vocabulary value. */
   private[rating] def scores(result: Int): Option[(Double, Double)] = result match
