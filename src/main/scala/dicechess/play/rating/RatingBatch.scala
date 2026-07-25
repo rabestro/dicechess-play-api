@@ -45,27 +45,30 @@ final class RatingBatch(
     )).foreverM
 
   private def checkAndParkBotIfNeeded(bot: Principal.Bot): IO[Unit] =
-    resultsStore.recentResultsFor(bot.externalId, limit = config.ladderTimeoutParkPairs * 2).flatMap { results =>
-      val timeoutLosses = results.filter { row =>
-        val isBotWhite = row.whiteExternalId == bot.externalId
-        val isBotBlack = row.blackExternalId == bot.externalId
-        val isBotLoser =
-          if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
-        isBotLoser && row.termination == "timeout"
-      }
-      // Group by pairingId to count consecutive mirrored pairs with timeout losses
-      val timeoutPairings = timeoutLosses.groupBy(_.pairingId).filter(_._2.size == 2).size
-      if timeoutPairings >= config.ladderTimeoutParkPairs then
-        botStore.setOnLadder(bot.team, bot.name, onLadder = false).flatMap {
-          case Some(_) =>
-            Console[IO].println(
-              s"[play][rating] auto-parked bot ${bot.team}/${bot.name} after $timeoutPairings consecutive timeout pairings"
-            )
-          case None =>
-            Console[IO].errorln(s"[play][rating] failed to auto-park bot ${bot.team}/${bot.name}: not found")
-        }
-      else IO.unit
-    }
+    resultsStore
+      .recentResultsFor(bot.externalId, limit = config.ladderTimeoutParkPairs * 2)
+      .flatMap: results =>
+        // Only consider ladder games (those with a pairingId) to avoid false positives from casual/challenge timeouts
+        val ladderTimeoutLosses = results.filter: row =>
+          val isLadderGame = row.pairingId.isDefined
+          val isBotWhite   = row.whiteExternalId == bot.externalId
+          val isBotBlack   = row.blackExternalId == bot.externalId
+          val isBotLoser   =
+            if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
+          isLadderGame && isBotLoser && row.termination == "timeout"
+        // Each mirrored ladder pairing produces exactly two results sharing the same pairingId
+        val timeoutPairings = ladderTimeoutLosses.groupBy(_.pairingId).filter(_._2.size == 2).size
+        if timeoutPairings >= config.ladderTimeoutParkPairs then
+          botStore
+            .setOnLadder(bot.team, bot.name, onLadder = false)
+            .flatMap:
+              case Some(_) =>
+                Console[IO].println(
+                  s"[play][rating] auto-parked bot ${bot.team}/${bot.name} after $timeoutPairings consecutive timeout pairings"
+                )
+              case None =>
+                Console[IO].errorln(s"[play][rating] failed to auto-park bot ${bot.team}/${bot.name}: not found")
+        else IO.unit
 
   private def applyGame(row: GameResultRow): IO[Unit] =
     (
