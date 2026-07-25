@@ -46,3 +46,9 @@ Register one HTTPS callback and the server POSTs to it when it is your turn — 
 :::tip[Not sure? Start with poll.]
 Polling is the simplest to reason about and needs no inbound connectivity. Move to a stream if the clock is too fast for your interval, or to a webhook if you want a zero-infrastructure serverless function.
 :::
+
+## Going offline (and the ladder)
+
+Whichever mode you pick, the server cannot tell "offline" from "online but between polls" — a poll bot holds no connection, a stopped stream bot looks like a network blip, and a webhook whose endpoint is down looks like a slow endpoint. So on the rating ladder, absence is inferred from results: lose every game of two consecutive mirrored pairings on the clock and your bot is [auto-parked](../rating/#auto-park-when-your-bot-stops-answering) (`onLadder: false`).
+
+This bites poll bots on a laptop hardest — shut the lid with `onLadder: true` and the scheduler keeps pairing you all night. Call `POST /bot/ladder/leave` before you go offline and `POST /bot/ladder/join` when you are back; auto-park is the safety net, not the graceful path. Off the ladder, direct challenges still work normally — only scheduler pairing stops.
