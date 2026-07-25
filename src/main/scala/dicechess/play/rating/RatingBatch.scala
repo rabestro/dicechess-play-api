@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import dicechess.play.core.Principal
 import dicechess.play.store.{BotStore, GameResultRow, GameResultsStore, RatingStore}
 
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** The Glicko-2 rating batch (#119): a single background fiber that drains the claim queue of rated, not-yet-applied
@@ -46,25 +47,34 @@ final class RatingBatch(
 
   private def checkAndParkBotIfNeeded(bot: Principal.Bot): IO[Unit] =
     resultsStore
-      .recentResultsFor(bot.externalId, limit = config.ladderTimeoutParkPairs * 2)
+      .recentResultsFor(bot.externalId, limit = Int.MaxValue)
       .flatMap: results =>
-        // Only consider ladder games (those with a pairingId) to avoid false positives from casual/challenge timeouts
-        val ladderTimeoutLosses = results.filter: row =>
-          val isLadderGame = row.pairingId.isDefined
-          val isBotWhite   = row.whiteExternalId == bot.externalId
-          val isBotBlack   = row.blackExternalId == bot.externalId
-          val isBotLoser   =
-            if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
-          isLadderGame && isBotLoser && row.termination == "timeout"
-        // Each mirrored ladder pairing produces exactly two results sharing the same pairingId
-        val timeoutPairings = ladderTimeoutLosses.groupBy(_.pairingId).filter(_._2.size == 2).size
-        if timeoutPairings >= config.ladderTimeoutParkPairs then
+        // Only consider ladder games (those with a pairingId) to avoid false positives from casual/challenge timeouts.
+        // Each mirrored ladder pairing produces exactly two results sharing the same pairingId.
+        val ladderGames = results.filter(_.pairingId.isDefined)
+        // Group by pairingId and keep only complete pairs (exactly 2 results)
+        val completePairs = ladderGames
+          .groupBy(_.pairingId)
+          .collect { case (Some(id), games) if games.size == 2 => (id, games) }
+          .toList
+        // Sort pairs by most recent finished_at (descending) to check consecutiveness from newest to oldest
+        val sortedPairs = completePairs.sortBy(_._2.head.finishedAt)(using Ordering[Instant].reverse)
+        // Check if the most recent N pairs are all timeout losses for this bot
+        val recentPairs               = sortedPairs.take(config.ladderTimeoutParkPairs)
+        val allRecentAreTimeoutLosses = recentPairs.forall: (_, games) =>
+          games.forall: row =>
+            val isBotWhite = row.whiteExternalId == bot.externalId
+            val isBotBlack = row.blackExternalId == bot.externalId
+            val isBotLoser =
+              if isBotWhite then row.result.contains(-1) else if isBotBlack then row.result.contains(1) else false
+            isBotLoser && row.termination == "timeout"
+        if allRecentAreTimeoutLosses && recentPairs.size == config.ladderTimeoutParkPairs then
           botStore
             .setOnLadder(bot.team, bot.name, onLadder = false)
             .flatMap:
               case Some(_) =>
                 Console[IO].println(
-                  s"[play][rating] auto-parked bot ${bot.team}/${bot.name} after $timeoutPairings consecutive timeout pairings"
+                  s"[play][rating] auto-parked bot ${bot.team}/${bot.name} after ${recentPairs.size} consecutive timeout pairings"
                 )
               case None =>
                 Console[IO].errorln(s"[play][rating] failed to auto-park bot ${bot.team}/${bot.name}: not found")
