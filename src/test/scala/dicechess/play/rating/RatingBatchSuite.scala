@@ -55,6 +55,29 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       pairingId = pairingId.map(_.value)
     )
 
+  /** One mirrored ladder pairing (#101) that `loser` loses BOTH halves of — the shape the auto-park streak counts.
+    * `loser` sits White in one game and Black in the other, so the stored white-POV result flips between them.
+    */
+  private def saveLostPairing(
+      db: PgGameStore,
+      loser: Principal.Bot,
+      winner: Principal.Bot,
+      termination: Termination
+  ): IO[Unit] =
+    for
+      pairingId  <- GameId.random
+      loserWhite <- GameId.random
+      loserBlack <- GameId.random
+      _          <- db.save(
+        loserWhite,
+        endedFixture(loser, winner, rated = true, GameResult.Win(Side.Black), termination, Some(pairingId))
+      )
+      _ <- db.save(
+        loserBlack,
+        endedFixture(winner, loser, rated = true, GameResult.Win(Side.White), termination, Some(pairingId))
+      )
+    yield ()
+
   private def registerPair(db: PgGameStore, team: String): IO[(Principal.Bot, Principal.Bot)] =
     for
       _ <- db.register(team, "alice", s"hash-$team-alice")
@@ -194,81 +217,160 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
-  test("auto-park bot after repeated timeout losses in ladder games"):
+  test("the batch parks a bot that lost both games of two consecutive ladder pairings on the clock (#150)"):
     withContainers { pg =>
       store(pg).use { db =>
         for
           (alice, bob) <- registerPair(db, "rb8")
-          // Set both bots on ladder
-          _ <- db.setOnLadder("rb8", "alice", onLadder = true)
-          _ <- db.setOnLadder("rb8", "bob", onLadder = true)
-          // Create two mirrored pairs where alice times out in both games of each pair
-          // In a mirrored pair, alice plays white in one game and black in the other
-          // When alice times out as white: black wins -> result = -1 (white POV)
-          // When alice times out as black: white wins -> result = 1 (white POV)
-          pairingId1 <- GameId.random
-          game1a     <- GameId.random
-          game1b     <- GameId.random
-          _          <- db.save(
-            game1a,
-            endedFixture(
-              alice,
-              bob,
-              rated = true,
-              result = GameResult.Win(Side.Black),
-              termination = Termination.Timeout,
-              pairingId = Some(pairingId1)
-            )
-          )
-          _ <- db.save(
-            game1b,
-            endedFixture(
-              bob,
-              alice,
-              rated = true,
-              result = GameResult.Win(Side.White),
-              termination = Termination.Timeout,
-              pairingId = Some(pairingId1)
-            )
-          )
-          pairingId2 <- GameId.random
-          game2a     <- GameId.random
-          game2b     <- GameId.random
-          _          <- db.save(
-            game2a,
-            endedFixture(
-              alice,
-              bob,
-              rated = true,
-              result = GameResult.Win(Side.Black),
-              termination = Termination.Timeout,
-              pairingId = Some(pairingId2)
-            )
-          )
-          _ <- db.save(
-            game2b,
-            endedFixture(
-              bob,
-              alice,
-              rated = true,
-              result = GameResult.Win(Side.White),
-              termination = Termination.Timeout,
-              pairingId = Some(pairingId2)
-            )
-          )
-          // Run the batch to apply ratings and trigger auto-park
-          _ <- batch(db).tick
-          // Verify alice is auto-parked (on_ladder = false)
-          aliceRating <- db.ratingOf("rb8", "alice")
-          bobRating   <- db.ratingOf("rb8", "bob")
+          _            <- db.setOnLadder("rb8", "alice", onLadder = true)
+          _            <- db.setOnLadder("rb8", "bob", onLadder = true)
+          _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
+          _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
+          _            <- batch(db).tick
+          aliceRating  <- db.ratingOf("rb8", "alice")
+          bobRating    <- db.ratingOf("rb8", "bob")
         yield
-          assertEquals(aliceRating.map(_.onLadder), Some(false), "alice must be auto-parked after 2 timeout pairings")
-          assertEquals(bobRating.map(_.onLadder), Some(true), "bob must remain on ladder (won the games)")
+          assertEquals(aliceRating.map(_.onLadder), Some(false), "alice flagged in all four games")
+          assertEquals(bobRating.map(_.onLadder), Some(true), "banking timeout wins must never park the winner")
       }
     }
 
-/** Pure parsing/config logic — no container. */
+  test("the batch forgives a single fully-timed-out pairing — one transient blip must not park a bot"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          (alice, bob) <- registerPair(db, "rb9")
+          _            <- db.setOnLadder("rb9", "alice", onLadder = true)
+          _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
+          _            <- batch(db).tick
+          aliceRating  <- db.ratingOf("rb9", "alice")
+        yield assertEquals(aliceRating.map(_.onLadder), Some(true), "the default threshold is two pairings, not one")
+      }
+    }
+
+  test("the batch never parks a bot that keeps answering — repeated normal losses are not a timeout streak"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          (alice, bob) <- registerPair(db, "rb10")
+          _            <- db.setOnLadder("rb10", "alice", onLadder = true)
+          _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.KingCaptured)
+          _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.KingCaptured)
+          _            <- batch(db).tick
+          aliceRating  <- db.ratingOf("rb10", "alice")
+        yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a weak-but-live bot stays on the ladder")
+      }
+    }
+
+/** Pure parsing/config/streak logic — no container. */
 class RatingBatchPureSuite extends munit.FunSuite:
+
+  private val alice: Principal.Bot = Principal.Bot("acme", "alice")
+  private val bob: Principal.Bot   = Principal.Bot("acme", "bob")
+
+  private def row(
+      white: Principal.Bot,
+      black: Principal.Bot,
+      result: Int,
+      termination: String,
+      pairingId: Option[String],
+      at: Long,
+      gameId: String
+  ): GameResultRow =
+    GameResultRow(
+      GameId(gameId),
+      white.externalId,
+      black.externalId,
+      Some(result),
+      termination,
+      rated = true,
+      timeControl = "Fischer(300,3)",
+      serverSeed = "seed",
+      pairingId = pairingId,
+      finishedAt = java.time.Instant.EPOCH.plusSeconds(at)
+    )
+
+  /** One mirrored pairing that `loser` lost both halves of, newest game first — the order the store hands back. */
+  private def lostPairing(
+      loser: Principal.Bot,
+      winner: Principal.Bot,
+      termination: String,
+      pairing: String,
+      at: Long
+  ): List[GameResultRow] =
+    List(
+      row(winner, loser, result = 1, termination, Some(pairing), at + 1, s"$pairing-b"),
+      row(loser, winner, result = -1, termination, Some(pairing), at, s"$pairing-a")
+    )
+
+  test("isTimeoutLossFor is seat-aware, ignores wins, and never matches a bot that did not play"):
+    val carol: Principal.Bot = Principal.Bot("acme", "carol")
+    assert(RatingBatch.isTimeoutLossFor(row(alice, bob, -1, "timeout", Some("p"), 1, "g1"), alice))
+    assert(RatingBatch.isTimeoutLossFor(row(bob, alice, 1, "timeout", Some("p"), 2, "g2"), alice))
+    assert(
+      !RatingBatch.isTimeoutLossFor(row(alice, bob, 1, "timeout", Some("p"), 3, "g3"), alice),
+      "flagging the OPPONENT is a win, not a loss"
+    )
+    assert(!RatingBatch.isTimeoutLossFor(row(alice, bob, -1, "king_captured", Some("p"), 4, "g4"), alice))
+    assert(!RatingBatch.isTimeoutLossFor(row(alice, bob, -1, "timeout", Some("p"), 5, "g5"), carol))
+
+  test("shouldPark needs the whole streak: one fully-timed-out pairing is forgiven, two are not"):
+    val one = lostPairing(alice, bob, "timeout", "p1", at = 100)
+    val two = lostPairing(alice, bob, "timeout", "p2", at = 200) ++ one
+    assert(!RatingBatch.shouldPark(one, alice, parkPairs = 2), "a single bad pairing is a blip, not a dead bot")
+    assert(RatingBatch.shouldPark(two, alice, parkPairs = 2))
+    assert(!RatingBatch.shouldPark(two, bob, parkPairs = 2), "the bot banking those wins must never be parked")
+
+  test("shouldPark counts only losses on the clock — a game the bot actually answered breaks the streak"):
+    val answered = lostPairing(alice, bob, "king_captured", "p3", at = 300)
+    val streak   =
+      lostPairing(alice, bob, "timeout", "p2", at = 200) ++ lostPairing(alice, bob, "timeout", "p1", at = 100)
+    assert(RatingBatch.shouldPark(streak, alice, parkPairs = 2))
+    assert(
+      !RatingBatch.shouldPark(answered ++ streak, alice, parkPairs = 2),
+      "the newer answered pairing displaces the older timeout from the window"
+    )
+
+  test("shouldPark ignores games with no pairing id — a casual or challenge timeout can never park a bot"):
+    val casual = List(
+      row(bob, alice, result = 1, "timeout", pairingId = None, 401, "casual-1"),
+      row(alice, bob, result = -1, "timeout", pairingId = None, 400, "casual-2")
+    )
+    assert(
+      !RatingBatch.shouldPark(casual ++ lostPairing(alice, bob, "timeout", "p1", at = 100), alice, parkPairs = 2),
+      "four timeout losses, but only one of them from a ladder pairing"
+    )
+
+  test("shouldPark skips a pairing whose mirror game has not been recorded yet"):
+    val halfDone = lostPairing(alice, bob, "timeout", "p9", at = 900).take(1)
+    val complete =
+      lostPairing(alice, bob, "timeout", "p2", at = 200) ++ lostPairing(alice, bob, "timeout", "p1", at = 100)
+    assert(
+      RatingBatch.shouldPark(halfDone ++ complete, alice, parkPairs = 2),
+      "an in-flight pairing is evidence neither way; the two completed ones still decide"
+    )
+    assert(
+      !RatingBatch.shouldPark(halfDone ++ complete.take(2), alice, parkPairs = 2),
+      "with only one completed pairing left, the threshold is not met"
+    )
+
+  test("shouldPark orders pairings by finished_at, not by the order the store happened to return them"):
+    val older   = lostPairing(alice, bob, "timeout", "p1", at = 100)
+    val newer   = lostPairing(alice, bob, "king_captured", "p2", at = 200)
+    val jumbled = older ++ newer // deliberately oldest-first, unlike the store
+    assert(RatingBatch.shouldPark(older, alice, parkPairs = 1))
+    assert(
+      !RatingBatch.shouldPark(jumbled, alice, parkPairs = 1),
+      "the newest pairing was answered, so a one-pairing threshold must not fire"
+    )
+
+  test("parkScanLimit is bounded but never narrows to the bare ladder-only need"):
+    assertEquals(RatingBatch.parkScanLimit(2), GameResultsStore.DefaultRecentLimit)
+    assertEquals(RatingBatch.parkScanLimit(100), 800)
+    assert(
+      RatingBatch.parkScanLimit(RatingBatch.Config.DefaultLadderTimeoutParkPairs) > 2 * 2,
+      "the window must leave room for casual games interleaved with the ladder pairings"
+    )
 
   test("Principal.fromBotExternalId accepts only the canonical bot:team:<team>:<name> shape"):
     assertEquals(
