@@ -1,6 +1,6 @@
 package dicechess.play.rating
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
 import dicechess.play.core.*
@@ -261,6 +261,58 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
         yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a weak-but-live bot stays on the ladder")
       }
     }
+
+/** The auto-park check's failure handling, over fakes — no container. */
+class RatingBatchResilienceSuite extends CatsEffectSuite:
+
+  private val alice: Principal.Bot = Principal.Bot("acme", "alice")
+  private val bob: Principal.Bot   = Principal.Bot("acme", "bob")
+
+  private val aliceTimedOut: GameResultRow = GameResultRow(
+    GameId("11111111-1111-1111-1111-111111111111"),
+    alice.externalId,
+    bob.externalId,
+    Some(-1),
+    "timeout",
+    rated = true,
+    timeControl = "Fischer(300,3)",
+    serverSeed = "seed",
+    pairingId = Some("22222222-2222-2222-2222-222222222222"),
+    finishedAt = java.time.Instant.EPOCH
+  )
+
+  /** Hands the batch exactly one queued game, then reports the queue drained. */
+  private def oneGameQueue(queue: Ref[IO, List[GameResultRow]]): RatingStore = new RatingStore:
+    def unappliedRatedGames(limit: Int): IO[List[GameResultRow]] = queue.getAndSet(Nil)
+    def markRatingApplied(gameId: GameId): IO[Unit]              = IO.unit
+    def applyRatingUpdate(
+        gameId: GameId,
+        white: Principal.Bot,
+        whiteGlicko: Glicko,
+        black: Principal.Bot,
+        blackGlicko: Glicko
+    ): IO[Unit] = IO.unit
+
+  private val unreachableResults: GameResultsStore = new GameResultsStore:
+    def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
+      IO.raiseError(new RuntimeException("connection pool exhausted"))
+    def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]] = IO.pure(Nil)
+    def pairFor(pairingId: String): IO[List[GameResultRow]]                   = IO.pure(Nil)
+
+  test("a history query that fails mid-check is logged and never aborts the tick around it"):
+    for
+      bots  <- BotStore.inMemory
+      _     <- bots.register("acme", "alice", "hash-alice")
+      _     <- bots.register("acme", "bob", "hash-bob")
+      _     <- bots.setOnLadder("acme", "alice", onLadder = true)
+      _     <- bots.setOnLadder("acme", "bob", onLadder = true)
+      queue <- Ref.of[IO, List[GameResultRow]](List(aliceTimedOut))
+      batch = new RatingBatch(bots, oneGameQueue(queue), unreachableResults, RatingBatch.Config.Default)
+      // The rating for this row has already committed by the time the check runs, so raising here would abort the rest
+      // of the page for unrelated bots and buy nothing — the row is stamped and never returns to the queue.
+      _           <- batch.tick
+      aliceRating <- bots.ratingOf("acme", "alice")
+    yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a check that never completed must park nobody")
 
 /** Pure parsing/config/streak logic — no container. */
 class RatingBatchPureSuite extends munit.FunSuite:

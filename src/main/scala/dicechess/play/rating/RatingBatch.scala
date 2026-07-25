@@ -91,10 +91,21 @@ final class RatingBatch(
   private def parkIfStreakReached(bot: Principal.Bot, row: GameResultRow, onLadder: Boolean): IO[Unit] =
     if !onLadder || !RatingBatch.isTimeoutLossFor(row, bot) then IO.unit
     else
-      resultsStore
-        .recentResultsFor(bot.externalId, RatingBatch.parkScanLimit(config.ladderTimeoutParkPairs))
-        .flatMap: recent =>
-          park(bot).whenA(RatingBatch.shouldPark(recent, bot, config.ladderTimeoutParkPairs))
+      evaluateStreak(bot).handleErrorWith: error =>
+        Console[IO].errorln(s"[play][rating] auto-park check for ${bot.team}/${bot.name} failed: $error")
+
+  /** Deliberately non-fatal to the tick. Unlike `applyRatingUpdate`, whose failure leaves the row unstamped and must
+    * abort so the next tick retries it, this runs AFTER the rating write has committed: letting a transient query
+    * timeout here propagate would abort the rest of the page and delay rating updates for unrelated bots, while
+    * retrying it is pointless — the row is already stamped applied and will never come back through the queue. Nothing
+    * is lost by giving up on this one game, because the streak is recomputed from scratch on the bot's next timeout
+    * loss, which an actually-offline bot supplies within a minute.
+    */
+  private def evaluateStreak(bot: Principal.Bot): IO[Unit] =
+    resultsStore
+      .recentResultsFor(bot.externalId, RatingBatch.parkScanLimit(config.ladderTimeoutParkPairs))
+      .flatMap: recent =>
+        park(bot).whenA(RatingBatch.shouldPark(recent, bot, config.ladderTimeoutParkPairs))
 
   private def park(bot: Principal.Bot): IO[Unit] =
     botStore.setOnLadder(bot.team, bot.name, onLadder = false).flatMap {
