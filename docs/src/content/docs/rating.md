@@ -37,7 +37,7 @@ A rating is **provisional** while `rd > 110` — Glickman's own convergence thre
 
 - The public [`GET /leaderboard`](../reference/rest/#leaderboard) lists **only converged** (non-provisional) bots, best first. This is a deliberate policy, not a bug — showing every wildly-uncertain fresh rating on the same board as settled ones would make the board noisy and misleading.
 - Your own [`GET /bots/{team}/{name}`](../reference/rest/#bot-profile) profile shows you regardless, flagged `"provisional": true`, so joining the ladder never feels like a black hole while you wait to converge.
-- `onLadder: false` means the bot left (`POST /bot/ladder/leave`) — its rating is **frozen**, not deleted, and it still appears on the leaderboard (if converged) or the profile endpoint (always) at whatever it was when it left.
+- `onLadder: false` means the bot left (`POST /bot/ladder/leave`, or [auto-park](#auto-park-when-your-bot-stops-answering)) — its rating is **frozen**, not deleted, and it still appears on the leaderboard (if converged) or the profile endpoint (always) at whatever it was when it left.
 
 If your bot has played plenty of games and is still provisional, check its win/loss pattern on its profile before assuming something is broken: a bot with a genuinely volatile result pattern (frequent upsets in either direction) converges slower than one that consistently loses — or consistently wins — no matter how many games it plays.
 
@@ -48,3 +48,27 @@ Dice Chess has real variance the board game itself doesn't: two equally-matched 
 ## Joining and leaving
 
 Covered in [Authentication & Identity → Joining the rating ladder](../authentication/#joining-the-rating-ladder): `POST /bot/ladder/join` / `POST /bot/ladder/leave`, both registered-bot only. That page is the "how do I opt in" companion to this "what do these numbers mean" one.
+
+## Auto-park: when your bot stops answering
+
+On-ladder bots are paired continuously, whether or not they are actually running. A bot that goes offline still gets paired every minute and loses every game on the clock — so the server parks it for you.
+
+**The rule:** lose *every* game of **two consecutive mirrored pairings** on the clock (`timeout`) and your bot is set to `onLadder: false`. That is four games in a row, typically about two minutes of being unreachable.
+
+Why the threshold is a pairing and not a game: an offline bot flags both halves of a pair within seconds of each other, so "two games" would really mean one pairing — and a single 30-second hiccup would park a perfectly healthy bot. Requiring two pairings forgives one bad pair.
+
+What does **not** count:
+
+- **Normal losses.** Only `timeout` terminations feed the streak. A weak bot that answers every move and loses by `king_captured` is never parked, however badly it is doing — being outplayed is not being offline.
+- **Casual and challenge games.** Only ladder pairings are counted, so a timeout in a game you started yourself can't park you.
+- **Any answered game.** One real result in the window breaks the streak.
+
+Parking is exactly what `POST /bot/ladder/leave` does: pairing stops, your rating **freezes** where it is, and the bot stays visible with `onLadder: false`. Nothing is deleted and nothing is penalised — the point is to stop the bleeding, for your rating *and* for everyone banking free wins against you.
+
+**There is no auto-rejoin.** Coming back is an explicit `POST /bot/ladder/join` once your bot is actually running again; an automatic timer would just send a still-offline bot back out to lose another four games.
+
+:::tip[Leave before you go offline]
+If your bot runs on a laptop, a dev machine, or anything you shut down at night, call `POST /bot/ladder/leave` on the way out and `POST /bot/ladder/join` when you are back. Auto-park is the safety net, not the intended flow — using it means eating four timeout losses every time.
+:::
+
+A genuinely slow bot that keeps flagging on the ladder's 5+3 clock will eventually be parked too. That is intended: at that time control it is not competitive, and the fix is a faster move loop or a [stream/webhook](../connection-modes/) instead of a slow poll.

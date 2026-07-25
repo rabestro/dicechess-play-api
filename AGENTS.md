@@ -69,7 +69,8 @@ unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpo
 `PLAY_CORS_ORIGINS` (empty = allow any), `APP_VERSION` (surfaced at GET /version),
 `LADDER_INTERVAL_SECONDS` (+ optional `LADDER_MAX_CONCURRENT_PAIRS`, default `4`) — unset
 disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optional
-`RATING_BATCH_SIZE`, default `100`) — unset disables Glicko-2 rating updates entirely,
+`RATING_BATCH_SIZE`, default `100`, and `LADDER_TIMEOUT_PARK_PAIRS`, default `2`) — unset
+disables Glicko-2 rating updates **and ladder auto-park** entirely,
 `WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher).
 
 ## Quality gates — Definition of Done
@@ -147,6 +148,10 @@ disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optiona
   moving to a second environment: all three were missed, independently, one at a time). Verify
   a new deployment with a live check — `GET /games` becomes non-empty and `/leaderboard` counts
   increase over a minute — not just `/health`.
+- `LADDER_TIMEOUT_PARK_PAIRS` (#150) is a `LADDER_*` knob read by the **rating** batch, so it does
+  nothing unless `RATING_INTERVAL_SECONDS` is also set: with rating updates off, a dead bot is
+  never auto-parked and keeps bleeding rating while inflating every opponent it is paired with.
+  The name follows the feature (the ladder), not the component that hosts the check.
 - README status banner, the "in-memory for now" callout, and the roadmap placement of the seek
   lobby are stale — durability and the lobby shipped. Trust the code and `docs/bot-api.md`.
 - The house bot that opposes quickstart users is deployed outside this repo (via
