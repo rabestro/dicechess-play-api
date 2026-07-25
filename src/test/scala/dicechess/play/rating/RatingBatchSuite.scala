@@ -32,7 +32,9 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       white: Principal,
       black: Principal,
       rated: Boolean,
-      result: GameResult = GameResult.Win(Side.White)
+      result: GameResult = GameResult.Win(Side.White),
+      termination: Termination = Termination.Resign,
+      pairingId: Option[GameId] = None
   ): GameSnapshot =
     GameSnapshot(
       version = 3L,
@@ -44,12 +46,13 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       started = true,
       ply = 2L,
       pending = false,
-      status = GameStatus.Ended(GameOver(result, Termination.Resign)),
+      status = GameStatus.Ended(GameOver(result, termination)),
       timeControl = TimeControl.Fischer(300, 3),
       remainingMs = Map(Seat.White -> 1000L, Seat.Black -> 1000L),
       lastRoll = Nil,
       turns = Vector.empty,
-      rated = Some(rated)
+      rated = Some(rated),
+      pairingId = pairingId.map(_.value)
     )
 
   private def registerPair(db: PgGameStore, team: String): IO[(Principal.Bot, Principal.Bot)] =
@@ -188,6 +191,79 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
             .unappliedRatedGames(1000)
             .map(_.map(_.gameId.value).filter(Set(idOld, idNew, idCasual).map(_.value)))
         yield assertEquals(queue, List(idNew.value), "applied and casual rows must be excluded")
+      }
+    }
+
+  test("auto-park bot after repeated timeout losses in ladder games"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          (alice, bob) <- registerPair(db, "rb8")
+          // Set both bots on ladder
+          _ <- db.setOnLadder("rb8", "alice", onLadder = true)
+          _ <- db.setOnLadder("rb8", "bob", onLadder = true)
+          // Create two mirrored pairs where alice times out in both games of each pair
+          // In a mirrored pair, alice plays white in one game and black in the other
+          // When alice times out as white: black wins -> result = -1 (white POV)
+          // When alice times out as black: white wins -> result = 1 (white POV)
+          pairingId1 <- GameId.random
+          game1a     <- GameId.random
+          game1b     <- GameId.random
+          _          <- db.save(
+            game1a,
+            endedFixture(
+              alice,
+              bob,
+              rated = true,
+              result = GameResult.Win(Side.Black),
+              termination = Termination.Timeout,
+              pairingId = Some(pairingId1)
+            )
+          )
+          _ <- db.save(
+            game1b,
+            endedFixture(
+              bob,
+              alice,
+              rated = true,
+              result = GameResult.Win(Side.White),
+              termination = Termination.Timeout,
+              pairingId = Some(pairingId1)
+            )
+          )
+          pairingId2 <- GameId.random
+          game2a     <- GameId.random
+          game2b     <- GameId.random
+          _          <- db.save(
+            game2a,
+            endedFixture(
+              alice,
+              bob,
+              rated = true,
+              result = GameResult.Win(Side.Black),
+              termination = Termination.Timeout,
+              pairingId = Some(pairingId2)
+            )
+          )
+          _ <- db.save(
+            game2b,
+            endedFixture(
+              bob,
+              alice,
+              rated = true,
+              result = GameResult.Win(Side.White),
+              termination = Termination.Timeout,
+              pairingId = Some(pairingId2)
+            )
+          )
+          // Run the batch to apply ratings and trigger auto-park
+          _ <- batch(db).tick
+          // Verify alice is auto-parked (on_ladder = false)
+          aliceRating <- db.ratingOf("rb8", "alice")
+          bobRating   <- db.ratingOf("rb8", "bob")
+        yield
+          assertEquals(aliceRating.map(_.onLadder), Some(false), "alice must be auto-parked after 2 timeout pairings")
+          assertEquals(bobRating.map(_.onLadder), Some(true), "bob must remain on ladder (won the games)")
       }
     }
 
