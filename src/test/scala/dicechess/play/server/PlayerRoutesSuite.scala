@@ -78,6 +78,12 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
       .run(Request[IO](Method.GET, uri"/players/not-a-uuid/games"))
       .map(resp => assertEquals(resp.status, Status.BadRequest))
 
+  test("GET /players/{guestId}/games is 400, not 404, for a non-numeric `limit`"):
+    val guestId = "0197f0a0-0000-7000-8000-000000000004"
+    app()
+      .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/$guestId/games?limit=abc")))
+      .map(resp => assertEquals(resp.status, Status.BadRequest))
+
   test("GET /players/{guestId}/games is 200 with an empty list for a well-formed but unknown guest id"):
     // Deliberate: an unknown-but-valid uuid must be indistinguishable from a known one with zero games — this
     // endpoint leaks no signal about which guest ids have ever played.

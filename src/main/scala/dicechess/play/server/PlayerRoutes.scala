@@ -1,5 +1,7 @@
 package dicechess.play.server
 
+import cats.data.Validated.{Invalid, Valid}
+import cats.data.ValidatedNel
 import cats.effect.IO
 import dicechess.play.core.{Principal, PublicPlayer, Seat}
 import dicechess.play.store.{GameResultRow, GameResultsStore}
@@ -7,7 +9,7 @@ import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
-import org.http4s.HttpRoutes
+import org.http4s.{HttpRoutes, ParseFailure}
 
 import java.time.Instant
 
@@ -59,18 +61,30 @@ object PlayerRoutes:
     */
   private val MaxLimit = 200
 
-  private object LimitParam extends OptionalQueryParamDecoderMatcher[Int]("limit")
+  // Validating, not plain: a plain OptionalQueryParamDecoderMatcher's unapply fails the WHOLE route match on a
+  // decode error (e.g. `?limit=abc`), which falls through to a misleading 404 instead of reporting the bad request.
+  private object LimitParam extends OptionalValidatingQueryParamDecoderMatcher[Int]("limit")
 
   def apply(results: GameResultsStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case GET -> Root / "players" / guestId / "games" :? LimitParam(limit) =>
-        Principal.guest(guestId) match
-          case Left(error)  => BadRequest(error)
-          case Right(guest) =>
-            val bounded = limit.fold(DefaultLimit)(requested => math.max(1, math.min(requested, MaxLimit)))
+        (Principal.guest(guestId), parseLimit(limit)) match
+          case (Left(error), _)              => BadRequest(error)
+          case (_, Left(error))              => BadRequest(error)
+          case (Right(guest), Right(parsed)) =>
+            val bounded = parsed.fold(DefaultLimit)(requested => math.max(1, math.min(requested, MaxLimit)))
             results
               .recentResultsFor(guest.externalId, bounded)
               .flatMap(games => Ok(PlayerGames(games.map(playerGame(guest.externalId, _)))))
+
+  /** Surfaces a malformed `limit` as the same `Left(message)` shape `Principal.guest` already uses, instead of
+    * `OptionalQueryParamDecoderMatcher`'s silent match failure (see `LimitParam` above).
+    */
+  private def parseLimit(limit: Option[ValidatedNel[ParseFailure, Int]]): Either[String, Option[Int]] =
+    limit match
+      case None             => Right(None)
+      case Some(Valid(v))   => Right(Some(v))
+      case Some(Invalid(e)) => Left(s"limit: ${e.head.sanitized}")
 
   /** Reframe a stored white-POV row from the requesting guest's point of view — the same transform as
     * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots.
