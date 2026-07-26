@@ -44,6 +44,14 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
       IO.pure(recent.getOrElse(externalId, Nil).take(limit))
     def finishedRatedSince(since: Instant): IO[List[GameResultRow]] = IO.pure(Nil)
     def pairFor(pairingId: String): IO[List[GameResultRow]]         = IO.pure(Nil)
+    def playerGamesPage(
+        externalId: String,
+        before: Option[Instant],
+        opponent: Option[OpponentFilter],
+        result: Option[PovResultFilter],
+        limit: Int
+    ): IO[GameResultsStore.Page] = IO.pure(GameResultsStore.Page(Nil, hasMore = false))
+    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] = IO.pure(Nil)
 
   private def app(
       bots: Map[(String, String), BotRating] = Map.empty,

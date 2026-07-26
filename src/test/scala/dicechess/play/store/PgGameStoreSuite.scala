@@ -387,6 +387,189 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("playerGamesPage keyset-paginates: `before` returns only strictly older games, still newest first (#173)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-page-participant")
+        val opponent    = Principal.Bot("b3-team", "b3-page-opponent")
+        for
+          idOldest  <- GameId.random
+          _         <- db.save(idOldest, endedResultFixture(participant, opponent))
+          _         <- IO.sleep(20.millis)
+          idMiddle  <- GameId.random
+          _         <- db.save(idMiddle, endedResultFixture(opponent, participant))
+          middleRow <- db
+            .playerGamesPage(participant.externalId, None, None, None, limit = 100)
+            .map(_.games.find(_.gameId.value == idMiddle.value).getOrElse(fail("middle row not found")))
+          _        <- IO.sleep(20.millis)
+          idNewest <- GameId.random
+          _        <- db.save(idNewest, endedResultFixture(participant, opponent))
+          page     <- db.playerGamesPage(participant.externalId, Some(middleRow.finishedAt), None, None, limit = 100)
+        yield
+          val ids = page.games.map(_.gameId.value)
+          assert(!ids.contains(idNewest.value), "newer than `before` excluded")
+          assert(!ids.contains(idMiddle.value), "AT `before` excluded (strictly older only)")
+          assertEquals(ids, List(idOldest.value), s"expected only the oldest row, got $page")
+      }
+    }
+
+  test("playerGamesPage reports `hasMore` exactly, without fetching the whole history (#173)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-hasmore-participant")
+        val opponent    = Principal.Bot("b3-team", "b3-hasmore-opponent")
+        for
+          _         <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, opponent)))
+          _         <- GameId.random.flatMap(db.save(_, endedResultFixture(opponent, participant)))
+          _         <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, opponent)))
+          fullPage  <- db.playerGamesPage(participant.externalId, None, None, None, limit = 3)
+          shortPage <- db.playerGamesPage(participant.externalId, None, None, None, limit = 2)
+        yield
+          assertEquals(fullPage.hasMore, false, "exactly 3 rows fit a limit-3 page")
+          assertEquals(shortPage.hasMore, true, "3 rows do not fit a limit-2 page")
+      }
+    }
+
+  test("playerGamesPage `OpponentFilter.Bot` restricts to games against that one bot (#173)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-vsbot-participant")
+        val botA        = Principal.Bot("b3-team", "b3-vsbot-a")
+        val botB        = Principal.Bot("b3-team", "b3-vsbot-b")
+        for
+          idVsA <- GameId.random
+          _     <- db.save(idVsA, endedResultFixture(participant, botA))
+          idVsB <- GameId.random
+          _     <- db.save(idVsB, endedResultFixture(botB, participant))
+          page  <- db.playerGamesPage(
+            participant.externalId,
+            None,
+            Some(OpponentFilter.Bot(botA.externalId)),
+            None,
+            limit = 100
+          )
+        yield assertEquals(page.games.map(_.gameId.value), List(idVsA.value))
+      }
+    }
+
+  test("playerGamesPage `OpponentFilter.HumanOnly` restricts to games against non-bot opponents (#173)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-vshuman-participant")
+        val bot         = Principal.Bot("b3-team", "b3-vshuman-bot")
+        val human       = Principal.Guest("b3-vshuman-opponent")
+        for
+          idVsBot   <- GameId.random
+          _         <- db.save(idVsBot, endedResultFixture(participant, bot))
+          idVsHuman <- GameId.random
+          _         <- db.save(idVsHuman, endedResultFixture(human, participant))
+          page <- db.playerGamesPage(participant.externalId, None, Some(OpponentFilter.HumanOnly), None, limit = 100)
+        yield assertEquals(page.games.map(_.gameId.value), List(idVsHuman.value))
+      }
+    }
+
+  test("playerGamesPage `result` filters by the participant's OWN point of view regardless of seat (#173)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-povresult-participant")
+        val opponent    = Principal.Bot("b3-team", "b3-povresult-opponent")
+        for
+          idWinAsWhite <- GameId.random
+          _ <- db.save(idWinAsWhite, endedResultFixture(participant, opponent, result = GameResult.Win(Side.White)))
+          idWinAsBlack <- GameId.random
+          // Stored white-POV: Black winning is result = -1, even though the PARTICIPANT (seated Black here) won.
+          _ <- db.save(idWinAsBlack, endedResultFixture(opponent, participant, result = GameResult.Win(Side.Black)))
+          idLoss <- GameId.random
+          _      <- db.save(idLoss, endedResultFixture(participant, opponent, result = GameResult.Win(Side.Black)))
+          wins   <- db.playerGamesPage(participant.externalId, None, None, Some(PovResultFilter.Win), limit = 100)
+        yield assertEquals(
+          wins.games.map(_.gameId.value).toSet,
+          Set(idWinAsWhite.value, idWinAsBlack.value),
+          "both wins returned regardless of which seat the participant sat; the loss excluded"
+        )
+      }
+    }
+
+  test("opponentsFor groups by specific bot and collapses every human opponent into one row (#174)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-opponents-participant")
+        val bot         = Principal.Bot("b3-team", "b3-opponents-bot")
+        val humanA      = Principal.Guest("b3-opponents-human-a")
+        val humanB      = Principal.Guest("b3-opponents-human-b")
+        for
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, bot)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(bot, participant)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, humanA)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(humanB, participant)))
+          rows <- db.opponentsFor(participant.externalId)
+          byBotKey = rows.map(r => r.botExternalId -> r.games).toMap
+        yield
+          assertEquals(byBotKey.get(Some(bot.externalId)), Some(2), s"both bot games grouped together: $rows")
+          assertEquals(byBotKey.get(None), Some(2), s"both human opponents collapsed into one row: $rows")
+          assertEquals(rows.size, 2, "exactly one bot row plus one collapsed human row")
+      }
+    }
+
+  test("opponentsFor computes W-D-L from the participant's own POV regardless of which seat they sat (#174)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-opppov-participant")
+        val bot         = Principal.Bot("b3-team", "b3-opppov-bot")
+        for
+          _ <- GameId.random.flatMap(
+            db.save(_, endedResultFixture(participant, bot, result = GameResult.Win(Side.White)))
+          )
+          // Participant seated Black and won: stored white-POV result is Black winning, i.e. -1.
+          _ <- GameId.random.flatMap(
+            db.save(_, endedResultFixture(bot, participant, result = GameResult.Win(Side.Black)))
+          )
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, bot, result = GameResult.Draw)))
+          rows <- db.opponentsFor(participant.externalId)
+          botRow = rows.find(_.botExternalId.contains(bot.externalId)).getOrElse(fail(s"no row for the bot: $rows"))
+        yield
+          assertEquals(botRow.games, 3)
+          assertEquals(botRow.wins, 2, "both wins counted regardless of seat")
+          assertEquals(botRow.draws, 1)
+          assertEquals(botRow.losses, 0)
+      }
+    }
+
+  test("opponentsFor excludes self-play — a game against yourself has no opponent to aggregate against (#174)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val soloPlayer = Principal.Guest("b3-selfplay-participant")
+        for
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(soloPlayer, soloPlayer)))
+          rows <- db.opponentsFor(soloPlayer.externalId)
+        yield assertEquals(rows, Nil, s"self-play must not appear as an opponent row: $rows")
+      }
+    }
+
+  test("opponentsFor orders most-played first (#174)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val participant = Principal.Guest("b3-oppsort-participant")
+        val busyBot     = Principal.Bot("b3-team", "b3-oppsort-busy")
+        val quietBot    = Principal.Bot("b3-team", "b3-oppsort-quiet")
+        for
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, quietBot)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, busyBot)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(busyBot, participant)))
+          rows <- db.opponentsFor(participant.externalId)
+        yield assertEquals(
+          rows.map(_.botExternalId),
+          List(Some(busyBot.externalId), Some(quietBot.externalId)),
+          s"busier opponent first: $rows"
+        )
+      }
+    }
+
+  test("opponentsFor is empty for a participant with no games (#174)"):
+    withContainers { pg =>
+      store(pg).use(db => db.opponentsFor(Principal.Guest("b3-opponents-nobody").externalId).map(assertEquals(_, Nil)))
+    }
+
   test("ended games are not resumed"):
     withContainers { pg =>
       store(pg).use { db =>

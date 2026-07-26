@@ -4,12 +4,12 @@ import cats.data.Validated.{Invalid, Valid}
 import cats.data.ValidatedNel
 import cats.effect.IO
 import dicechess.play.core.{Principal, PublicPlayer, Seat}
-import dicechess.play.store.{GameResultRow, GameResultsStore}
+import dicechess.play.store.{GameResultRow, GameResultsStore, OpponentAggregateRow, OpponentFilter, PovResultFilter}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
-import org.http4s.{HttpRoutes, ParseFailure}
+import org.http4s.{HttpRoutes, ParseFailure, QueryParamDecoder}
 
 import java.time.Instant
 
@@ -27,9 +27,32 @@ final case class PlayerGame(
     finishedAt: Instant
 ) derives Codec.AsObject
 
-final case class PlayerGames(games: List[PlayerGame]) derives Codec.AsObject
+/** `hasMore` lets the client tell "that's everything" from "there's another page" without a `COUNT(*)` or a second
+  * request — see `GameResultsStore.Page` (#173).
+  */
+final case class PlayerGames(games: List[PlayerGame], hasMore: Boolean) derives Codec.AsObject
 
-/** Public, unauthenticated read API for a visitor's own finished games (#151).
+/** One opponent bucket from `GET /players/{guestId}/opponents` (#174): a specific registered bot, or the collapsed
+  * "every human/guest opponent" row. `opponent` mirrors `PlayerGame.opponent`'s shape (so the client's existing
+  * opponent-rendering logic applies unchanged); `team`/`botName` are present ONLY for a bot row — they are the
+  * machine-readable key for building a `?vs=<team>/<name>` games-filter link, which a display name alone can't safely
+  * round-trip (a team or bot name could itself contain a space).
+  */
+final case class PlayerOpponent(
+    opponent: PublicPlayer,
+    team: Option[String],
+    botName: Option[String],
+    games: Int,
+    wins: Int,
+    draws: Int,
+    losses: Int,
+    lastPlayedAt: Instant
+) derives Codec.AsObject
+
+final case class PlayerOpponents(opponents: List[PlayerOpponent]) derives Codec.AsObject
+
+/** Public, unauthenticated read API for a visitor's own finished games (#151) and per-opponent record (#174), with
+  * keyset pagination and opponent/result filters on the games list (#173).
   *
   * "My Games" on the play site today lists only client-authoritative `/play` bot games (read from the browser's
   * IndexedDB), because the live surface (`/lobby` + `/live/[id]`) is server-authoritative and never writes locally — so
@@ -42,7 +65,8 @@ final case class PlayerGames(games: List[PlayerGame]) derives Codec.AsObject
   * is unguessable (uuidv7) and doubles as its holder's restore code (see the play SPA's `guestIdentity.ts`), so direct
   * lookup by the full id IS the visitor's own identity check: there is deliberately no listing/enumeration surface, and
   * an unknown-but-valid uuid returns an empty list (200), not 404 — the two are indistinguishable by design, so this
-  * endpoint itself leaks no signal about which guest ids have ever played.
+  * endpoint itself leaks no signal about which guest ids have ever played. The same holds for `?vs=<team>/<name>`: it
+  * only ever accepts a bot key, never an opposing guest id (see `OpponentFilter`'s own doc for why).
   *
   * Deliberately out of scope: per-game replay (turns/snapshot). `GET /games/{id}` cannot serve a finished game either
   * (`GameRegistry` evicts a room from memory once it ends) — replay for a finished game has no endpoint anywhere today,
@@ -65,26 +89,76 @@ object PlayerRoutes:
   // decode error (e.g. `?limit=abc`), which falls through to a misleading 404 instead of reporting the bad request.
   private object LimitParam extends OptionalValidatingQueryParamDecoderMatcher[Int]("limit")
 
+  private given QueryParamDecoder[Instant] = QueryParamDecoder[String].emap: s =>
+    try Right(Instant.parse(s))
+    catch case e: java.time.format.DateTimeParseException => Left(ParseFailure(s"invalid instant '$s'", e.getMessage))
+  private object BeforeParam extends OptionalValidatingQueryParamDecoderMatcher[Instant]("before")
+
+  // Plain, not validating: any string is accepted here (an empty QueryParamDecoder[String] never fails), the
+  // *meaning* of the string is validated afterward by parseVs/parseResult, uniformly with the other query errors.
+  private object VsParam     extends OptionalQueryParamDecoderMatcher[String]("vs")
+  private object ResultParam extends OptionalQueryParamDecoderMatcher[String]("result")
+
   def apply(results: GameResultsStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
-      case GET -> Root / "players" / guestId / "games" :? LimitParam(limit) =>
-        (Principal.guest(guestId), parseLimit(limit)) match
-          case (Left(error), _)              => BadRequest(error)
-          case (_, Left(error))              => BadRequest(error)
-          case (Right(guest), Right(parsed)) =>
+      case GET -> Root / "players" / guestId / "games" :? LimitParam(limit) +& BeforeParam(before) +& VsParam(vs) +&
+          ResultParam(result) =>
+        val validated = for
+          guest     <- Principal.guest(guestId)
+          parsed    <- parseValidated(limit, "limit")
+          beforeAt  <- parseValidated(before, "before")
+          vsFilter  <- parseVs(vs)
+          povResult <- parseResult(result)
+        yield (guest, parsed, beforeAt, vsFilter, povResult)
+        validated match
+          case Left(error)                                           => BadRequest(error)
+          case Right((guest, parsed, beforeAt, vsFilter, povResult)) =>
             val bounded = parsed.fold(DefaultLimit)(requested => math.max(1, math.min(requested, MaxLimit)))
             results
-              .recentResultsFor(guest.externalId, bounded)
-              .flatMap(games => Ok(PlayerGames(games.map(playerGame(guest.externalId, _)))))
+              .playerGamesPage(guest.externalId, beforeAt, vsFilter, povResult, bounded)
+              .flatMap { page =>
+                Ok(PlayerGames(page.games.map(playerGame(guest.externalId, _)), page.hasMore))
+              }
 
-  /** Surfaces a malformed `limit` as the same `Left(message)` shape `Principal.guest` already uses, instead of
-    * `OptionalQueryParamDecoderMatcher`'s silent match failure (see `LimitParam` above).
+      case GET -> Root / "players" / guestId / "opponents" =>
+        Principal.guest(guestId) match
+          case Left(error)  => BadRequest(error)
+          case Right(guest) =>
+            results.opponentsFor(guest.externalId).flatMap(rows => Ok(PlayerOpponents(rows.map(playerOpponent))))
+
+  /** Surfaces a malformed validating query param as the same `Left(message)` shape `Principal.guest` already uses,
+    * instead of `OptionalQueryParamDecoderMatcher`'s silent match failure (which would otherwise 404 the whole route
+    * instead of reporting the bad request — see `LimitParam`/`BeforeParam` above).
     */
-  private def parseLimit(limit: Option[ValidatedNel[ParseFailure, Int]]): Either[String, Option[Int]] =
-    limit match
+  private def parseValidated[A](param: Option[ValidatedNel[ParseFailure, A]], name: String): Either[String, Option[A]] =
+    param match
       case None             => Right(None)
       case Some(Valid(v))   => Right(Some(v))
-      case Some(Invalid(e)) => Left(s"limit: ${e.head.sanitized}")
+      case Some(Invalid(e)) => Left(s"$name: ${e.head.sanitized}")
+
+  /** `?vs=human` collapses to `OpponentFilter.HumanOnly`; `?vs=<team>/<name>` resolves to a specific bot's `externalId`
+    * (no existence check against the `bots` table — an unregistered team/name simply matches nothing, the same "trust
+    * the caller, an unknown key is just empty" stance the guest-id lookup itself takes). Anything else is a 400: in
+    * particular a bare guest id is never accepted here, by construction — there is no code path from an arbitrary
+    * string to `OpponentFilter.Bot` other than the team/name split below.
+    */
+  private def parseVs(vs: Option[String]): Either[String, Option[OpponentFilter]] =
+    vs match
+      case None          => Right(None)
+      case Some("human") => Right(Some(OpponentFilter.HumanOnly))
+      case Some(spec)    =>
+        spec.split('/') match
+          case Array(team, name) if team.nonEmpty && name.nonEmpty =>
+            Right(Some(OpponentFilter.Bot(Principal.Bot(team, name).externalId)))
+          case _ => Left(s"vs: '$spec' must be 'human' or '<team>/<name>'")
+
+  private def parseResult(result: Option[String]): Either[String, Option[PovResultFilter]] =
+    result match
+      case None         => Right(None)
+      case Some("win")  => Right(Some(PovResultFilter.Win))
+      case Some("draw") => Right(Some(PovResultFilter.Draw))
+      case Some("loss") => Right(Some(PovResultFilter.Loss))
+      case Some(other)  => Left(s"result: '$other' must be 'win', 'draw', or 'loss'")
 
   /** Reframe a stored white-POV row from the requesting guest's point of view — the same transform as
     * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots.
@@ -111,4 +185,20 @@ object PlayerRoutes:
       termination = row.termination,
       timeControl = row.timeControl,
       finishedAt = row.finishedAt
+    )
+
+  /** Reframe an aggregate row into the public wire shape — `team`/`botName` populated only for a specific bot, `None`
+    * for the collapsed anonymous-humans bucket (see `PlayerOpponent`'s own doc).
+    */
+  private def playerOpponent(row: OpponentAggregateRow): PlayerOpponent =
+    val bot = row.botExternalId.flatMap(Principal.fromBotExternalId)
+    PlayerOpponent(
+      opponent = bot.fold(PublicPlayer.of(Principal.Guest("")))(PublicPlayer.of),
+      team = bot.map(_.team),
+      botName = bot.map(_.name),
+      games = row.games,
+      wins = row.wins,
+      draws = row.draws,
+      losses = row.losses,
+      lastPlayedAt = row.lastPlayedAt
     )

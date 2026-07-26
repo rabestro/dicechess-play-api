@@ -298,6 +298,14 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       IO.raiseError(new RuntimeException("connection pool exhausted"))
     def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]] = IO.pure(Nil)
     def pairFor(pairingId: String): IO[List[GameResultRow]]                   = IO.pure(Nil)
+    def playerGamesPage(
+        externalId: String,
+        before: Option[java.time.Instant],
+        opponent: Option[OpponentFilter],
+        result: Option[PovResultFilter],
+        limit: Int
+    ): IO[GameResultsStore.Page] = IO.pure(GameResultsStore.Page(Nil, hasMore = false))
+    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] = IO.pure(Nil)
 
   test("a history query that fails mid-check is logged and never aborts the tick around it"):
     for
