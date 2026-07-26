@@ -18,6 +18,7 @@ import dicechess.play.server.{
   LeaderboardRoutes,
   Lobby,
   LobbyRoutes,
+  PlayerRoutes,
   PlayRoutes,
   WebhookRoutes,
   Webhooks
@@ -148,6 +149,9 @@ object Main extends IOApp.Simple:
           val catalog = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg =>
             CatalogRoutes(pg, botStore, webhookService, registry, wakeLimit, playBotLimit)
           )
+          // A visitor's own finished games (#151) — same DB-only-seam idiom: no game_results projection without a
+          // database, so the route is simply not mounted.
+          val playerGames = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => PlayerRoutes(pg))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -155,7 +159,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  catalog <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
+                  catalog <+> playerGames <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
                     challenges,
