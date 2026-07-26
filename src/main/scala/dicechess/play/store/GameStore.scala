@@ -314,11 +314,71 @@ trait GameResultsStore:
   /** The (up to two) games sharing this CRN pairing id (#101), for pentanomial scoring. */
   def pairFor(pairingId: String): IO[List[GameResultRow]]
 
+  /** A filtered, keyset-paginated page of `externalId`'s finished games (#173) — the general-purpose sibling of
+    * `recentResultsFor`, which serves only the small fixed-size page a bot's profile glance needs and must stay
+    * unchanged for that caller. Always fetches one row past `limit`, so `GameResultsStore.Page.hasMore` is exact
+    * without a `COUNT(*)` or a second round trip.
+    *
+    * @param before
+    *   exclusive upper bound on `finished_at`; `None` for the first page.
+    * @param opponent
+    *   restricts to games against this opponent bucket; `None` for no opponent filter. The caller (the route layer) is
+    *   trusted to have already resolved `OpponentFilter.Bot` to a real bot's `externalId` — this method does not itself
+    *   guard against being passed an arbitrary guest id (see `OpponentFilter`'s own doc for why the public route must
+    *   never accept one).
+    * @param result
+    *   restricts to games with this outcome from `externalId`'s own point of view; `None` for no result filter.
+    */
+  def playerGamesPage(
+      externalId: String,
+      before: Option[java.time.Instant],
+      opponent: Option[OpponentFilter],
+      result: Option[PovResultFilter],
+      limit: Int
+  ): IO[GameResultsStore.Page]
+
+  /** `externalId`'s aggregate W-D-L against every opponent it has played, one row per bot plus one collapsed row for
+    * every human/guest opponent (#174) — most-played first, ties broken by most recent. Unlike `resultTallyFor`
+    * (`LeaderboardStore`, rated-decided games only), this includes casual games: every guest game is casual by
+    * `GameRegistry.isRated`, so a rated-only tally would always be empty for a guest caller. Self-play (both seats the
+    * same participant) is excluded — it has no opponent to aggregate against.
+    */
+  def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]]
+
 object GameResultsStore:
   /** `recentResultsFor`'s default page size — bounds a prolific bot's history to a reasonable page rather than its
     * entire lifetime.
     */
   val DefaultRecentLimit: Int = 50
+
+  /** One page from `playerGamesPage`: at most `limit` rows, plus whether strictly-older rows exist beyond them. */
+  final case class Page(games: List[GameResultRow], hasMore: Boolean)
+
+/** Restricts `playerGamesPage` to games against a specific kind of opponent (#173). `Bot` is the only per-identity case
+  * — accepting an arbitrary opposing `guest:<uuid>` would let a caller confirm a specific uuid is one of their own
+  * anonymous opponents (deanonymisation by intersection: "does my history contain a game against THIS id?"). Bots have
+  * no such privacy; humans stay one undifferentiated anonymous bucket, matching the wire's existing stance
+  * (`PublicPlayer`) everywhere else.
+  */
+enum OpponentFilter:
+  case Bot(externalId: String)
+  case HumanOnly
+
+/** Restricts `playerGamesPage` to games with this outcome, from the querying participant's own point of view. */
+enum PovResultFilter:
+  case Win, Draw, Loss
+
+/** One participant's aggregated record against a single opponent bucket (#174). `botExternalId = None` is the collapsed
+  * "every human opponent" row; `Some(id)` is one specific registered bot.
+  */
+final case class OpponentAggregateRow(
+    botExternalId: Option[String],
+    games: Int,
+    wins: Int,
+    draws: Int,
+    losses: Int,
+    lastPlayedAt: java.time.Instant
+)
 
 /** Persistence seam for the Glicko-2 rating batch (#119). The work queue is claim-based: a rated `game_results` row
   * with no `rating_applied_at` stamp is pending, and applying it stamps it in the SAME transaction as the rating write

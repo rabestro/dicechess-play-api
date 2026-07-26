@@ -310,6 +310,116 @@ final class PgGameStore private (xa: Transactor[IO])
           .timeout(SaveTimeout)
           .map(_.map(PgGameStore.toRow))
 
+  /** One side's `WHERE` clause: the participant match plus whichever optional filters are present, folded from a list
+    * rather than built with always-present `col IS NULL OR ...` guards — the latter risks the planner falling back to a
+    * full scan of the participant's matching rows on a parameter it can't prove absent at plan time, defeating the
+    * whole point of the composite `(participant, finished_at DESC)` index this shares with `recentResultsFor`.
+    * `opponentCol` is the OTHER side's column (the participant's opponent in this branch).
+    */
+  private def pageSide(
+      participantCol: String,
+      opponentCol: String,
+      externalId: String,
+      before: Option[Instant],
+      opponent: Option[OpponentFilter],
+      povResult: Option[Int],
+      fetchLimit: Int
+  ): Fragment =
+    val opponentFrag = opponent.map:
+      case OpponentFilter.Bot(id)   => Fragment.const(opponentCol) ++ fr"= $id"
+      case OpponentFilter.HumanOnly => Fragment.const(opponentCol) ++ fr"NOT LIKE 'bot:team:%'"
+    // The participant match is always present, so this list is never empty — `reduce` (not `reduceOption`) is safe.
+    val predicates = (Fragment.const(participantCol) ++ fr"= $externalId") :: List(
+      before.map(b => fr"finished_at < $b"),
+      opponentFrag,
+      povResult.map(r => fr"result = $r")
+    ).flatten
+    val where = predicates.reduce(_ ++ fr" AND " ++ _)
+    fr"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
+                server_seed, pairing_id::text, finished_at
+         FROM play.game_results
+         WHERE""" ++ where ++ fr"ORDER BY finished_at DESC LIMIT $fetchLimit"
+
+  /** The requester's own POV result, translated to the white-POV value the `result` column stores for THIS branch —
+    * `PovResultFilter.Draw` is its own inverse (`-0 = 0`), so only Win/Loss actually flip between the two branches.
+    */
+  private def povResultValue(result: PovResultFilter, requesterIsWhite: Boolean): Int =
+    val whitePov = result match
+      case PovResultFilter.Win  => 1
+      case PovResultFilter.Draw => 0
+      case PovResultFilter.Loss => -1
+    if requesterIsWhite then whitePov else -whitePov
+
+  def playerGamesPage(
+      externalId: String,
+      before: Option[Instant],
+      opponent: Option[OpponentFilter],
+      result: Option[PovResultFilter],
+      limit: Int
+  ): IO[GameResultsStore.Page] =
+    // One row past `limit`, so `hasMore` is exact without a COUNT(*) or a second round trip (same idea as
+    // recentResultsFor's own limit-per-branch-then-relimit shape, just with optional filters folded in).
+    val fetchLimit  = limit + 1
+    val whiteBranch =
+      pageSide(
+        "white_external_id",
+        "black_external_id",
+        externalId,
+        before,
+        opponent,
+        result.map(povResultValue(_, requesterIsWhite = true)),
+        fetchLimit
+      )
+    val blackBranch =
+      pageSide(
+        "black_external_id",
+        "white_external_id",
+        externalId,
+        before,
+        opponent,
+        result.map(povResultValue(_, requesterIsWhite = false)),
+        fetchLimit
+      )
+    (fr"(" ++ whiteBranch ++ fr") UNION (" ++ blackBranch ++ fr") ORDER BY finished_at DESC LIMIT $fetchLimit")
+      .query[PgGameStore.ResultTuple]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map { rows =>
+        GameResultsStore.Page(rows.take(limit).map(PgGameStore.toRow), hasMore = rows.length > limit)
+      }
+
+  /** Self-play (`white_external_id = black_external_id`) is excluded from both branches — a game against yourself has
+    * no opponent to aggregate against. `bot_key` collapses every non-bot opponent onto `NULL`, so `GROUP BY bot_key`
+    * yields one row per registered bot plus one row for every human/guest opponent combined.
+    */
+  def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] =
+    sql"""SELECT bot_key, count(*)::int AS games,
+                 count(*) FILTER (WHERE pov_result = 1)::int AS wins,
+                 count(*) FILTER (WHERE pov_result = 0)::int AS draws,
+                 count(*) FILTER (WHERE pov_result = -1)::int AS losses,
+                 max(finished_at) AS last_played_at
+          FROM (
+            (SELECT CASE WHEN black_external_id LIKE 'bot:team:%' THEN black_external_id END AS bot_key,
+                    result AS pov_result, finished_at
+             FROM play.game_results
+             WHERE white_external_id = $externalId AND black_external_id <> white_external_id)
+            UNION ALL
+            (SELECT CASE WHEN white_external_id LIKE 'bot:team:%' THEN white_external_id END AS bot_key,
+                    -result AS pov_result, finished_at
+             FROM play.game_results
+             WHERE black_external_id = $externalId AND white_external_id <> black_external_id)
+          ) per_game
+          GROUP BY bot_key
+          ORDER BY games DESC, last_played_at DESC"""
+      .query[(Option[String], Int, Int, Int, Int, Instant)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (botKey, games, wins, draws, losses, lastPlayedAt) =>
+        OpponentAggregateRow(botKey, games, wins, draws, losses, lastPlayedAt)
+      })
+
   // ── RatingStore (#119) ────────────────────────────────────────────────────
 
   def unappliedRatedGames(limit: Int): IO[List[GameResultRow]] =
