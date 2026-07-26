@@ -57,7 +57,8 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
         val resultOk = result.forall(pov.contains)
         beforeOk && opponentOk && resultOk
       }
-      IO.pure(GameResultsStore.Page(filtered.take(limit), hasMore = filtered.size > limit))
+      val sorted = filtered.sortBy(_.finishedAt).reverse
+      IO.pure(GameResultsStore.Page(sorted.take(limit), hasMore = sorted.size > limit))
 
     def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] =
       IO.pure(opponents.getOrElse(externalId, Nil))
@@ -88,21 +89,23 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
   test("GET /players/{guestId}/games returns the requester's recent games with POV results and anonymised opponents"):
     val guestId  = "0197f0a0-0000-7000-8000-000000000001"
     val guestExt = s"guest:$guestId"
-    val games    = List(
-      row("g-1", guestExt, bob.externalId, result = Some(1)),      // the guest wins as White vs a bot
-      row("g-2", bob.externalId, guestExt, result = Some(1)),      // bob wins as White: the guest loses as Black
-      row("g-3", "guest:other-uuid", guestExt, result = Some(-1)), // the guest wins as Black vs another HUMAN
-      row("g-4", guestExt, bob.externalId, result = Some(0), termination = "draw_agreement")
+    // Distinct, decreasing timestamps — g-1 newest — so this test also pins the newest-first ordering, not just
+    // the POV/anonymisation shape (a shared timestamp across all rows would leave ordering unverified).
+    val games = List(
+      row("g-1", guestExt, bob.externalId, result = Some(1), finishedAt = at.plusSeconds(3)), // guest wins as White
+      row("g-2", bob.externalId, guestExt, result = Some(1), finishedAt = at.plusSeconds(2)), // guest loses as Black
+      row("g-3", "guest:other-uuid", guestExt, result = Some(-1), finishedAt = at.plusSeconds(1)), // wins vs a HUMAN
+      row("g-4", guestExt, bob.externalId, result = Some(0), termination = "draw_agreement", finishedAt = at)
     )
     val service  = app(recent = Map(guestExt -> games))
     val expected = parse(
       s"""{"games":[
              {"gameId":"g-1","seat":"White","opponent":{"kind":"Bot","name":"acme bob"},"result":"win",
-              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:00Z"},
+              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:03Z"},
              {"gameId":"g-2","seat":"Black","opponent":{"kind":"Bot","name":"acme bob"},"result":"loss",
-              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:00Z"},
+              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:02Z"},
              {"gameId":"g-3","seat":"Black","opponent":{"kind":"Human","name":null},"result":"win",
-              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:00Z"},
+              "rated":false,"termination":"resign","timeControl":"Fischer(300,3)","finishedAt":"2026-07-16T12:00:01Z"},
              {"gameId":"g-4","seat":"White","opponent":{"kind":"Bot","name":"acme bob"},"result":"draw",
               "rated":false,"termination":"draw_agreement","timeControl":"Fischer(300,3)",
               "finishedAt":"2026-07-16T12:00:00Z"}
@@ -186,12 +189,11 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     )
     get(s"/players/$guestId/games?vs=acme/bob")(app(recent = Map(guestExt -> games)))
       .flatMap(_.as[Json])
-      .map { body =>
+      .map: body =>
         assertEquals(
           body.hcursor.downField("games").values.map(_.flatMap(_.hcursor.get[String]("gameId").toOption)),
           Some(Vector("g-bob"))
         )
-      }
 
   test("GET /players/{guestId}/games `vs=human` keeps only games against non-bot opponents"):
     val guestId  = "0197f0a0-0000-7000-8000-000000000008"
@@ -202,12 +204,11 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     )
     get(s"/players/$guestId/games?vs=human")(app(recent = Map(guestExt -> games)))
       .flatMap(_.as[Json])
-      .map { body =>
+      .map: body =>
         assertEquals(
           body.hcursor.downField("games").values.map(_.flatMap(_.hcursor.get[String]("gameId").toOption)),
           Some(Vector("g-human"))
         )
-      }
 
   test("GET /players/{guestId}/games is 400 for a `vs` that is neither 'human' nor '<team>/<name>'"):
     val guestId = "0197f0a0-0000-7000-8000-000000000009"
@@ -243,7 +244,7 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     )
     get(s"/players/$guestId/opponents")(app(opponents = Map(guestExt -> rows)))
       .flatMap(_.as[Json])
-      .map { body =>
+      .map: body =>
         val expected = parse(s"""{"opponents":[
           {"opponent":{"kind":"Bot","name":"acme bob"},"team":"acme","botName":"bob",
            "games":30,"wins":12,"draws":3,"losses":15,"lastPlayedAt":"2026-07-16T12:00:00Z"},
@@ -251,7 +252,6 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
            "games":5,"wins":2,"draws":0,"losses":3,"lastPlayedAt":"2026-07-16T12:00:00Z"}
         ]}""").toOption.get
         assertEquals(body, expected)
-      }
 
   test("GET /players/{guestId}/opponents is 400 for a malformed guest id"):
     get("/players/not-a-uuid/opponents")(app())

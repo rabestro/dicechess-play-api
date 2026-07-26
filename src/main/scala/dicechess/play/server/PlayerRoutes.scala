@@ -160,6 +160,11 @@ object PlayerRoutes:
       case Some("loss") => Right(Some(PovResultFilter.Loss))
       case Some(other)  => Left(s"result: '$other' must be 'win', 'draw', or 'loss'")
 
+  /** The wire face for any non-bot opponent — collapses every human/guest identity to one anonymous marker. Shared by
+    * `playerGame` and `playerOpponent` so the two call sites can't drift if the anonymisation shape ever changes.
+    */
+  private val AnonymousHuman: PublicPlayer = PublicPlayer.of(Principal.Guest(""))
+
   /** Reframe a stored white-POV row from the requesting guest's point of view — the same transform as
     * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots.
     */
@@ -169,7 +174,7 @@ object PlayerRoutes:
       if requesterIsWhite then (Seat.White, row.blackExternalId) else (Seat.Black, row.whiteExternalId)
     val opponent = Principal.fromBotExternalId(opponentId) match
       case Some(bot) => PublicPlayer.of(bot)
-      case None      => PublicPlayer.of(Principal.Guest("")) // any non-bot renders as the anonymous human face
+      case None      => AnonymousHuman // any non-bot renders as the anonymous human face
     val result = row.result match
       case Some(0)                       => "draw"
       case Some(1) if requesterIsWhite   => "win"
@@ -193,7 +198,7 @@ object PlayerRoutes:
   private def playerOpponent(row: OpponentAggregateRow): PlayerOpponent =
     val bot = row.botExternalId.flatMap(Principal.fromBotExternalId)
     PlayerOpponent(
-      opponent = bot.fold(PublicPlayer.of(Principal.Guest("")))(PublicPlayer.of),
+      opponent = bot.fold(AnonymousHuman)(PublicPlayer.of),
       team = bot.map(_.team),
       botName = bot.map(_.name),
       games = row.games,
