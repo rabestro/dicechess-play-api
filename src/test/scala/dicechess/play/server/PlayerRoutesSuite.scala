@@ -64,12 +64,14 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
               "finishedAt":"2026-07-16T12:00:00Z"}
            ]}"""
     ).toOption.get
-    service.run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/$guestId/games"))).flatMap { resp =>
-      assertEquals(resp.status, Status.Ok)
-      resp.as[Json].map { body =>
-        assertEquals(body, expected, "no raw external id may appear for the human opponent")
-      }
-    }
+    service
+      .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/$guestId/games")))
+      .flatMap: resp =>
+        assertEquals(resp.status, Status.Ok)
+        resp
+          .as[Json]
+          .map: body =>
+            assertEquals(body, expected, "no raw external id may appear for the human opponent")
 
   test("GET /players/{guestId}/games is 400 for a malformed guest id"):
     app()
@@ -82,10 +84,9 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     val guestId = "0197f0a0-0000-7000-8000-000000000002"
     app()
       .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/$guestId/games")))
-      .flatMap { resp =>
+      .flatMap: resp =>
         assertEquals(resp.status, Status.Ok)
         resp.as[Json].map(body => assertEquals(body, parse("""{"games":[]}""").toOption.get))
-      }
 
   test("GET /players/{guestId}/games clamps an over-large `limit` instead of trusting the caller"):
     val guestId  = "0197f0a0-0000-7000-8000-000000000003"
@@ -93,9 +94,9 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     val games    = (1 to 250).map(n => row(s"g-$n", guestExt, bob.externalId, result = Some(0))).toList
     app(recent = Map(guestExt -> games))
       .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/$guestId/games?limit=99999")))
-      .flatMap { resp =>
+      .flatMap: resp =>
         assertEquals(resp.status, Status.Ok)
-        resp.as[Json].map { body =>
-          assertEquals(body.hcursor.downField("games").values.map(_.size), Some(200), "clamped to the hard cap")
-        }
-      }
+        resp
+          .as[Json]
+          .map: body =>
+            assertEquals(body.hcursor.downField("games").values.map(_.size), Some(200), "clamped to the hard cap")
