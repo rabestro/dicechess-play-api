@@ -46,9 +46,13 @@ final case class RecentGame(
     finishedAt: Instant
 ) derives Codec.AsObject
 
-/** A bot's public profile: the rating summary plus its recent games. Unlike the board, a provisional bot IS visible
-  * here (flagged) — hiding it entirely would make `POST /bot/ladder/join` feel like a black hole for a fresh bot's
-  * owner checking on their entrant.
+/** A bot's public profile: the rating summary, its recent games, and its aggregate record against every opponent it has
+  * played (#182) — one row per other bot (head-to-head) plus one collapsed row for every human/guest opponent combined
+  * ("record vs humans"). Unlike `games`/`wins`/`draws`/`losses` above (rated, decided games only — the ladder record),
+  * `opponents` counts every game, rated or casual: a guest game is always casual (`GameRegistry.isRated`), so a
+  * rated-only tally would always read zero against humans. Unlike the board, a provisional bot IS visible here
+  * (flagged) — hiding it entirely would make `POST /bot/ladder/join` feel like a black hole for a fresh bot's owner
+  * checking on their entrant.
   */
 final case class BotProfile(
     team: String,
@@ -61,6 +65,7 @@ final case class BotProfile(
     wins: Int,
     draws: Int,
     losses: Int,
+    opponents: List[PlayerOpponent],
     recent: List[RecentGame]
 ) derives Codec.AsObject
 
@@ -102,23 +107,27 @@ object LeaderboardRoutes:
             case None         => NotFound()
             case Some(rating) =>
               val externalId = Principal.Bot(team, name).externalId
-              (board.resultTallyFor(externalId), results.recentResultsFor(externalId, RecentGamesShown))
-                .flatMapN: (tally, recent) =>
-                  Ok(
-                    BotProfile(
-                      team = team,
-                      name = name,
-                      rating = rating.glickoRating,
-                      rd = rating.glickoRd,
-                      provisional = rating.glickoRd > Glicko2.ProvisionalDeviationThreshold,
-                      onLadder = rating.onLadder,
-                      games = tally.games,
-                      wins = tally.wins,
-                      draws = tally.draws,
-                      losses = tally.losses,
-                      recent = recent.map(recentGame(externalId, _))
-                    )
+              (
+                board.resultTallyFor(externalId),
+                results.recentResultsFor(externalId, RecentGamesShown),
+                results.opponentsFor(externalId)
+              ).flatMapN: (tally, recent, opponents) =>
+                Ok(
+                  BotProfile(
+                    team = team,
+                    name = name,
+                    rating = rating.glickoRating,
+                    rd = rating.glickoRd,
+                    provisional = rating.glickoRd > Glicko2.ProvisionalDeviationThreshold,
+                    onLadder = rating.onLadder,
+                    games = tally.games,
+                    wins = tally.wins,
+                    draws = tally.draws,
+                    losses = tally.losses,
+                    opponents = opponents.map(playerOpponent),
+                    recent = recent.map(recentGame(externalId, _))
                   )
+                )
 
   /** Reframe a stored white-POV row from the profiled bot's point of view. */
   private def recentGame(profiledExternalId: String, row: GameResultRow): RecentGame =
