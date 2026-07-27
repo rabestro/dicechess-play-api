@@ -401,7 +401,9 @@ paths:
     get:
       tags: [Leaderboard]
       summary: Bot profile (public)
-      description: One registered bot's public card — rating summary plus up to 20 recent games.
+      description: >
+        One registered bot's public card — rating summary, its aggregate record against every opponent
+        it has played (head-to-head vs other bots, and vs humans), plus up to 20 recent games.
       security: []
       parameters:
         - { name: team, in: path, required: true, schema: { type: string } }
@@ -777,10 +779,30 @@ components:
         wins: { type: integer }
         draws: { type: integer }
         losses: { type: integer }
+        opponents:
+          type: array
+          items: { $ref: '#/components/schemas/OpponentRecord' }
         recent:
           type: array
           items: { $ref: '#/components/schemas/RecentGame' }
-      required: [team, name, rating, rd, provisional, onLadder, games, wins, draws, losses, recent]
+      required: [team, name, rating, rd, provisional, onLadder, games, wins, draws, losses, opponents, recent]
+    OpponentRecord:
+      type: object
+      description: >
+        One aggregate row against a specific opponent: a specific other registered bot (head-to-head), or the
+        one collapsed row for every human/guest opponent combined ("record vs humans"). Counts every game the
+        bot played against that opponent, rated and casual alike — unlike the profile's own top-level
+        wins/draws/losses, which counts rated, decided games only.
+      properties:
+        opponent: { $ref: '#/components/schemas/PublicFace' }
+        team: { type: [string, 'null'], description: The opponent's team; null for the collapsed human row. }
+        botName: { type: [string, 'null'], description: The opponent's name; null for the collapsed human row. }
+        games: { type: integer }
+        wins: { type: integer }
+        draws: { type: integer }
+        losses: { type: integer }
+        lastPlayedAt: { type: string, format: date-time }
+      required: [opponent, games, wins, draws, losses, lastPlayedAt]
     RecentGame:
       type: object
       properties:

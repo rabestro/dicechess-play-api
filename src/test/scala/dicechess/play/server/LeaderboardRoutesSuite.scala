@@ -39,7 +39,10 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
       def resultTallyFor(externalId: String): IO[ResultTally]    =
         IO.pure(tallies.getOrElse(externalId, ResultTally.Empty))
 
-  private def stubResults(recent: Map[String, List[GameResultRow]]): GameResultsStore = new GameResultsStore:
+  private def stubResults(
+      recent: Map[String, List[GameResultRow]],
+      opponents: Map[String, List[OpponentAggregateRow]]
+  ): GameResultsStore = new GameResultsStore:
     def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
       IO.pure(recent.getOrElse(externalId, Nil).take(limit))
     def finishedRatedSince(since: Instant): IO[List[GameResultRow]] = IO.pure(Nil)
@@ -51,15 +54,17 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
         result: Option[PovResultFilter],
         limit: Int
     ): IO[GameResultsStore.Page] = IO.pure(GameResultsStore.Page(Nil, hasMore = false))
-    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] = IO.pure(Nil)
+    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] =
+      IO.pure(opponents.getOrElse(externalId, Nil))
 
   private def app(
       bots: Map[(String, String), BotRating] = Map.empty,
       entries: List[LeaderboardEntry] = Nil,
       tallies: Map[String, ResultTally] = Map.empty,
-      recent: Map[String, List[GameResultRow]] = Map.empty
+      recent: Map[String, List[GameResultRow]] = Map.empty,
+      opponents: Map[String, List[OpponentAggregateRow]] = Map.empty
   ): HttpApp[IO] =
-    LeaderboardRoutes(stubBots(bots), stubBoard(entries, tallies), stubResults(recent)).orNotFound
+    LeaderboardRoutes(stubBots(bots), stubBoard(entries, tallies), stubResults(recent, opponents)).orNotFound
 
   private val at = Instant.parse("2026-07-16T12:00:00Z")
 
@@ -101,14 +106,25 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
       row("g-3", "guest:secret-uuid", aliceId, result = Some(-1), rated = false), // alice wins as Black vs a HUMAN
       row("g-4", aliceId, bob.externalId, result = Some(0), termination = "draw_agreement")
     )
+    val opponents = List(
+      OpponentAggregateRow(Some(bob.externalId), games = 5, wins = 2, draws = 1, losses = 2, lastPlayedAt = at),
+      OpponentAggregateRow(None, games = 4, wins = 3, draws = 0, losses = 1, lastPlayedAt = at)
+    )
     val service = app(
       bots = Map(("acme", "alice") -> BotRating(1650.0, 95.0, 0.058, onLadder = true, None)),
       tallies = Map(aliceId -> ResultTally(20, 3, 7)),
-      recent = Map(aliceId -> games)
+      recent = Map(aliceId -> games),
+      opponents = Map(aliceId -> opponents)
     )
     val expected = parse(
       s"""{"team":"acme","name":"alice","rating":1650.0,"rd":95.0,"provisional":false,"onLadder":true,
            "games":30,"wins":20,"draws":3,"losses":7,
+           "opponents":[
+             {"opponent":{"kind":"Bot","name":"acme bob"},"team":"acme","botName":"bob",
+              "games":5,"wins":2,"draws":1,"losses":2,"lastPlayedAt":"2026-07-16T12:00:00Z"},
+             {"opponent":{"kind":"Human","name":null},"team":null,"botName":null,
+              "games":4,"wins":3,"draws":0,"losses":1,"lastPlayedAt":"2026-07-16T12:00:00Z"}
+           ],
            "recent":[
              {"gameId":"g-1","seat":"White","opponent":{"kind":"Bot","name":"acme bob"},"result":"win",
               "rated":true,"termination":"resign","finishedAt":"2026-07-16T12:00:00Z"},

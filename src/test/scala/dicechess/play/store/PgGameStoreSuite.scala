@@ -570,6 +570,28 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       store(pg).use(db => db.opponentsFor(Principal.Guest("b3-opponents-nobody").externalId).map(assertEquals(_, Nil)))
     }
 
+  test("opponentsFor works the same when the participant is a bot: opponents itemized, humans collapsed (#182)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val profiledBot = Principal.Bot("b3-team", "b3-opponents-profiled")
+        val otherBot    = Principal.Bot("b3-team", "b3-opponents-other")
+        val humanA      = Principal.Guest("b3-opponents-profiled-human-a")
+        val humanB      = Principal.Guest("b3-opponents-profiled-human-b")
+        for
+          // A ladder game against another bot is rated; every guest game is casual (`GameRegistry.isRated`) —
+          // mixing both here is the point: a bot's "record vs humans" must count the casual games too.
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(profiledBot, otherBot, rated = true)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(humanA, profiledBot, rated = false)))
+          _    <- GameId.random.flatMap(db.save(_, endedResultFixture(profiledBot, humanB, rated = false)))
+          rows <- db.opponentsFor(profiledBot.externalId)
+          byBotKey = rows.map(r => r.botExternalId -> r.games).toMap
+        yield
+          assertEquals(byBotKey.get(Some(otherBot.externalId)), Some(1), s"the other bot itemized: $rows")
+          assertEquals(byBotKey.get(None), Some(2), s"both unrated human games collapsed into one row: $rows")
+          assertEquals(rows.size, 2, "exactly one bot row plus one collapsed human row")
+      }
+    }
+
   test("ended games are not resumed"):
     withContainers { pg =>
       store(pg).use { db =>

@@ -208,13 +208,19 @@ Errors: `400` bad body, invalid `guestId`, or an unlimited time control; `404` a
 
 `GET /bots/{team}/{name}`
 
-One registered bot's public card: rating summary plus up to 20 recent games, newest first. Unlike the board, a **provisional** bot is visible here (flagged). `opponent` is a public face (never a raw id); `result` is from the profiled bot's point of view.
+One registered bot's public card: rating summary, its aggregate record against every opponent it has played, and up to 20 recent games, newest first. Unlike the board, a **provisional** bot is visible here (flagged). `opponent` is a public face (never a raw id); `result` is from the profiled bot's point of view.
+
+`opponents` is one row per other registered bot (head-to-head) plus one collapsed row for every human/guest opponent combined — that collapsed row (`team`/`botName` both `null`) is the bot's **record vs humans**. Unlike the top-level `wins`/`draws`/`losses` (rated, decided games only — the ladder record), `opponents` counts every game, rated and casual alike: a guest game is always casual, so a rated-only tally would always read zero against humans. A bucket with no games simply has no row.
 
 ```json
 {
   "team": "acme", "name": "alice",
   "rating": 1650.0, "rd": 95.0, "provisional": false, "onLadder": true,
   "games": 30, "wins": 20, "draws": 3, "losses": 7,
+  "opponents": [
+    { "opponent": { "kind": "Bot", "name": "acme bob" }, "team": "acme", "botName": "bob", "games": 42, "wins": 22, "draws": 4, "losses": 16, "lastPlayedAt": "2026-07-16T12:00:00Z" },
+    { "opponent": { "kind": "Human", "name": null }, "team": null, "botName": null, "games": 15, "wins": 11, "draws": 1, "losses": 3, "lastPlayedAt": "2026-07-15T09:30:00Z" }
+  ],
   "recent": [{ "gameId": "game-uuid", "seat": "White", "opponent": { "kind": "Bot", "name": "acme bob" }, "result": "win", "rated": true, "termination": "resign", "finishedAt": "2026-07-16T12:00:00Z" }]
 }
 ```

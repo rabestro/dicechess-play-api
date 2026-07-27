@@ -32,11 +32,13 @@ final case class PlayerGame(
   */
 final case class PlayerGames(games: List[PlayerGame], hasMore: Boolean) derives Codec.AsObject
 
-/** One opponent bucket from `GET /players/{guestId}/opponents` (#174): a specific registered bot, or the collapsed
-  * "every human/guest opponent" row. `opponent` mirrors `PlayerGame.opponent`'s shape (so the client's existing
-  * opponent-rendering logic applies unchanged); `team`/`botName` are present ONLY for a bot row — they are the
-  * machine-readable key for building a `?vs=<team>/<name>` games-filter link, which a display name alone can't safely
-  * round-trip (a team or bot name could itself contain a space).
+/** One opponent bucket: a specific registered bot, or the collapsed "every human/guest opponent" row. `opponent`
+  * mirrors `PlayerGame.opponent`'s shape (so the client's existing opponent-rendering logic applies unchanged);
+  * `team`/`botName` are present ONLY for a bot row — they are the machine-readable key for building a
+  * `?vs=<team>/<name>` games-filter link, which a display name alone can't safely round-trip (a team or bot name could
+  * itself contain a space). Shared by two callers of the same `opponentsFor` query (#174), which is symmetric in its
+  * `externalId` parameter: a guest's own opponents (`GET /players/{guestId}/opponents`) and a bot's own opponents,
+  * including its record against humans (`GET /bots/{team}/{name}`, #182).
   */
 final case class PlayerOpponent(
     opponent: PublicPlayer,
@@ -50,6 +52,28 @@ final case class PlayerOpponent(
 ) derives Codec.AsObject
 
 final case class PlayerOpponents(opponents: List[PlayerOpponent]) derives Codec.AsObject
+
+/** The wire face for any non-bot opponent — collapses every human/guest identity to one anonymous marker.
+  * Package-visible so `LeaderboardRoutes` can reuse it for a bot's own "record vs humans" row (#182).
+  */
+private[server] val AnonymousHuman: PublicPlayer = PublicPlayer.of(Principal.Guest(""))
+
+/** Reframe an aggregate row into the public wire shape — `team`/`botName` populated only for a specific bot, `None` for
+  * the collapsed anonymous-humans bucket (see `PlayerOpponent`'s own doc). Package-visible: shared with
+  * `LeaderboardRoutes` (#182), which queries the same aggregate from a bot's own point of view.
+  */
+private[server] def playerOpponent(row: OpponentAggregateRow): PlayerOpponent =
+  val bot = row.botExternalId.flatMap(Principal.fromBotExternalId)
+  PlayerOpponent(
+    opponent = bot.fold(AnonymousHuman)(PublicPlayer.of),
+    team = bot.map(_.team),
+    botName = bot.map(_.name),
+    games = row.games,
+    wins = row.wins,
+    draws = row.draws,
+    losses = row.losses,
+    lastPlayedAt = row.lastPlayedAt
+  )
 
 /** Public, unauthenticated read API for a visitor's own finished games (#151) and per-opponent record (#174), with
   * keyset pagination and opponent/result filters on the games list (#173).
@@ -160,11 +184,6 @@ object PlayerRoutes:
       case Some("loss") => Right(Some(PovResultFilter.Loss))
       case Some(other)  => Left(s"result: '$other' must be 'win', 'draw', or 'loss'")
 
-  /** The wire face for any non-bot opponent — collapses every human/guest identity to one anonymous marker. Shared by
-    * `playerGame` and `playerOpponent` so the two call sites can't drift if the anonymisation shape ever changes.
-    */
-  private val AnonymousHuman: PublicPlayer = PublicPlayer.of(Principal.Guest(""))
-
   /** Reframe a stored white-POV row from the requesting guest's point of view — the same transform as
     * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots.
     */
@@ -190,20 +209,4 @@ object PlayerRoutes:
       termination = row.termination,
       timeControl = row.timeControl,
       finishedAt = row.finishedAt
-    )
-
-  /** Reframe an aggregate row into the public wire shape — `team`/`botName` populated only for a specific bot, `None`
-    * for the collapsed anonymous-humans bucket (see `PlayerOpponent`'s own doc).
-    */
-  private def playerOpponent(row: OpponentAggregateRow): PlayerOpponent =
-    val bot = row.botExternalId.flatMap(Principal.fromBotExternalId)
-    PlayerOpponent(
-      opponent = bot.fold(AnonymousHuman)(PublicPlayer.of),
-      team = bot.map(_.team),
-      botName = bot.map(_.name),
-      games = row.games,
-      wins = row.wins,
-      draws = row.draws,
-      losses = row.losses,
-      lastPlayedAt = row.lastPlayedAt
     )
