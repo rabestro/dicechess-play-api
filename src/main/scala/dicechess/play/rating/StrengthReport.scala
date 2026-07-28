@@ -48,6 +48,7 @@ object StrengthReport:
       *
       * `alpha`/`beta` are filtered to the open interval `(0, 1)`: they are error rates that feed `math.log` in
       * [[Sprt.test]], so `0` or `1` would silently produce an infinite or `NaN` LLR forever rather than fail loudly.
+      * `elo0`/`elo1` are validated together, not independently — see [[eloPair]].
       */
     def fromValues(
         elo0Raw: Option[String],
@@ -56,14 +57,31 @@ object StrengthReport:
         betaRaw: Option[String],
         bootstrapIterationsRaw: Option[String]
     ): Config =
+      val (elo0, elo1) = eloPair(elo0Raw, elo1Raw)
       Config(
-        elo0 = elo0Raw.flatMap(_.toDoubleOption).getOrElse(Default.elo0),
-        elo1 = elo1Raw.flatMap(_.toDoubleOption).getOrElse(Default.elo1),
+        elo0 = elo0,
+        elo1 = elo1,
         alpha = alphaRaw.flatMap(_.toDoubleOption).filter(a => a > 0.0 && a < 1.0).getOrElse(Default.alpha),
         beta = betaRaw.flatMap(_.toDoubleOption).filter(b => b > 0.0 && b < 1.0).getOrElse(Default.beta),
         bootstrapIterations =
           bootstrapIterationsRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(Default.bootstrapIterations)
       )
+
+    /** `elo0`/`elo1` are [[Sprt.test]]'s ordered H0/H1 bounds ("stronger by <= elo0" vs "stronger by >= elo1"): parsing
+      * them independently — each falling back to its own default on its own — can silently produce an inverted or
+      * degenerate pair (e.g. only `STRENGTH_ELO0=30` set combines with the untouched `elo1` default of `20` into
+      * `elo0 > elo1`). [[Sprt.test]] accepts that pair without error, but its alpha/beta error-rate guarantee no longer
+      * holds — the verdict would look valid and mean nothing.
+      *
+      * Each side still falls back to its OWN default independently when unset, non-finite (guards a literal
+      * `"Infinity"`, which `toDoubleOption` parses), or unparseable — a deliberate, sensible partial override (e.g.
+      * only `STRENGTH_ELO0=5`, narrowing the gap against the untouched `elo1` default) is valid and kept. Only the
+      * resulting PAIR is rejected — as a pair, back to both complete defaults — when it fails `elo0 < elo1`.
+      */
+    private def eloPair(elo0Raw: Option[String], elo1Raw: Option[String]): (Double, Double) =
+      val elo0 = elo0Raw.flatMap(_.toDoubleOption).filter(_.isFinite).getOrElse(Default.elo0)
+      val elo1 = elo1Raw.flatMap(_.toDoubleOption).filter(_.isFinite).getOrElse(Default.elo1)
+      if elo0 < elo1 then (elo0, elo1) else (Default.elo0, Default.elo1)
 
     def configFromEnv: Config =
       fromValues(

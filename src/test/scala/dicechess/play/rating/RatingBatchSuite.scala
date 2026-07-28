@@ -284,6 +284,34 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test(
+    "a batchSize of 1 forces drainQueue's multi-page recursion, and one outer tick still applies every page " +
+      "and warms the cache with all of them (#181)"
+  ):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          (alice, bob)  <- registerPair(db, "rb12")
+          id1           <- GameId.random
+          id2           <- GameId.random
+          _             <- db.save(id1, endedFixture(alice, bob, rated = true))
+          _             <- IO.sleep(20.millis) // distinguishable finished_at (DB-generated), same as the rb7 test
+          _             <- db.save(id2, endedFixture(bob, alice, rated = true))
+          strengthCache <- StrengthCache.create
+          onePerPage = RatingBatch.Config.Default.copy(batchSize = 1)
+          _       <- new RatingBatch(db, db, db, onePerPage, strengthCache).tick
+          queued1 <- stillQueued(db, id1)
+          queued2 <- stillQueued(db, id2)
+          report  <- strengthCache.get
+        yield
+          assert(!queued1 && !queued2, "one outer tick must drain every page, not just the first")
+          assert(
+            report.exists(_.pairwise.exists(p => p.perspective == "rb12/alice" || p.opponent == "rb12/alice")),
+            "the cache refresh must run once at the end, after every page's games are already applied"
+          )
+      }
+    }
+
 /** The auto-park check's failure handling, over fakes — no container. */
 class RatingBatchResilienceSuite extends CatsEffectSuite:
 

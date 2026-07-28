@@ -235,7 +235,7 @@ Public, no `Authorization`. The precise, error-rate-bounded complement to the Gl
 
 `GET /strength`
 
-The whole cached report: every pairwise [SPRT](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict on CRN mirror pairs, plus a [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) pool ranking. `verdict` is `"AcceptH1"` (the `perspective` bot is stronger), `"AcceptH0"` (not stronger by the tested margin), or `"Continue"` (not enough data yet) — `Continue` is surfaced honestly rather than hidden or rounded into a claim. `elo` in `ranking` is **relative** (the pool's mean is 0 by construction, not the Glicko board's 1500-centred scale).
+The whole cached report: every pairwise [SPRT](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict — combining CRN mirror-pair observations with any eligible single (unpaired) games for that matchup — plus a [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) pool ranking. `verdict` is `"AcceptH1"` (the `perspective` bot is stronger), `"AcceptH0"` (not stronger by the tested margin), or `"Continue"` (not enough data yet) — `Continue` is surfaced honestly rather than hidden or rounded into a claim. `elo` in `ranking` is **relative** (the pool's mean is 0 by construction, not the Glicko board's 1500-centred scale).
 
 ```json
 {
