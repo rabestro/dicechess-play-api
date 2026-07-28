@@ -72,6 +72,10 @@ disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optiona
 `RATING_BATCH_SIZE`, default `100`, and `LADDER_TIMEOUT_PARK_PAIRS`, default `2`) — unset
 disables Glicko-2 rating updates **and ladder auto-park** entirely,
 `WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher).
+`STRENGTH_ELO0`/`STRENGTH_ELO1`/`STRENGTH_ALPHA`/`STRENGTH_BETA`/`STRENGTH_BOOTSTRAP_ITERATIONS`
+(#181) — tuning knobs for the `/strength` SPRT/Bradley-Terry report, each falling back to its own
+default rather than disabling anything; the report itself is refreshed by the rating batch, so it
+is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
 
 ## Quality gates — Definition of Done
 

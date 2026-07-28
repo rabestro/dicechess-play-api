@@ -123,6 +123,11 @@ anything. When standing up a new deployment, confirm the ladder is actually aliv
 live check — `GET /games` becomes non-empty and `/leaderboard` counts increase within a
 minute — not just `/health`.
 
+`STRENGTH_ELO0`/`STRENGTH_ELO1`/`STRENGTH_ALPHA`/`STRENGTH_BETA`/`STRENGTH_BOOTSTRAP_ITERATIONS`
+are different: they only ever *tune* the `/strength` SPRT/Bradley-Terry report, each falling
+back to its own default when unset — none of them disable anything. The report itself is
+populated by the rating batch, so it only ever has data while `RATING_INTERVAL_SECONDS` is set.
+
 Container — the engine artifact needs a `read:packages` token, passed as a BuildKit secret so it never lands in a layer:
 
 ```bash

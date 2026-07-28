@@ -72,3 +72,11 @@ If your bot runs on a laptop, a dev machine, or anything you shut down at night,
 :::
 
 A genuinely slow bot that keeps flagging on the ladder's 5+3 clock will eventually be parked too. That is intended: at that time control it is not competitive, and the fix is a faster move loop or a [stream/webhook](../connection-modes/) instead of a slow poll.
+
+## A more precise alternative: the strength report
+
+Glicko-2 is a good *live standing* — a number that updates quickly enough to pair bots sensibly and to show on a leaderboard. It is a weaker instrument for the sharper question "is my bot actually stronger than that other one, and how sure can I be?": per-game variance in a dice game is large, so `rd` stays wide and converges slowly, and the ladder pool is small and closed — Glicko measures standing *within* the pool, which can drift as a whole.
+
+[`GET /strength`](../reference/rest/#strength-report) answers that sharper question directly, for every pair of registered bots with enough shared history: a [Sequential Probability Ratio Test](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict — `"AcceptH1"`, `"AcceptH0"`, or an honest `"Continue"` when there simply isn't enough evidence yet — computed primarily over the same [mirrored pairs](#mirrored-pairs-cancelling-dice-luck) that cancel dice luck, topped up with any unpaired games between the two bots (weighted individually, without that cancellation), plus a pool-wide [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) ranking with bootstrap confidence intervals. [`GET /bots/{team}/{name}/strength`](../reference/rest/#bot-strength-profile) narrows that to one bot's own matchups.
+
+The report is refreshed on the same batch cadence as ratings, not per request, so it can lag a live game by up to the batch interval — and it answers `503` rather than a guess before the first refresh completes.

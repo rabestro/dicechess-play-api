@@ -110,3 +110,56 @@ class StrengthReportSuite extends munit.FunSuite:
     assert(rendered.linesIterator.count(_.contains("oracle/v1")) >= 1)
     // Locale-pinned rendering (live-corpus regression: a comma-decimal JVM once printed "alpha=beta=0,05").
     assert(rendered.contains("alpha=beta=0.05"), "the report must render dot decimals regardless of JVM locale")
+
+  test("Config.fromValues falls back to the default on every absent or unparseable knob (#181)"):
+    val default = StrengthReport.Config()
+    assertEquals(StrengthReport.Config.fromValues(None, None, None, None, None), default)
+    assertEquals(
+      StrengthReport.Config.fromValues(Some("junk"), Some("junk"), Some("junk"), Some("junk"), Some("junk")),
+      default
+    )
+
+  test("Config.fromValues accepts every knob when all are valid (#181)"):
+    val config = StrengthReport.Config.fromValues(Some("10"), Some("30"), Some("0.01"), Some("0.02"), Some("500"))
+    assertEquals(
+      config,
+      StrengthReport.Config(elo0 = 10.0, elo1 = 30.0, alpha = 0.01, beta = 0.02, bootstrapIterations = 500)
+    )
+
+  test(
+    "Config.fromValues rejects an alpha/beta outside (0, 1) and a non-positive bootstrapIterations, falling back " +
+      "instead of disabling anything (#181)"
+  ):
+    val default = StrengthReport.Config()
+    assertEquals(StrengthReport.Config.fromValues(None, None, Some("0"), None, None).alpha, default.alpha)
+    assertEquals(StrengthReport.Config.fromValues(None, None, Some("1"), None, None).alpha, default.alpha)
+    assertEquals(StrengthReport.Config.fromValues(None, None, None, Some("-0.1"), None).beta, default.beta)
+    assertEquals(
+      StrengthReport.Config.fromValues(None, None, None, None, Some("0")).bootstrapIterations,
+      default.bootstrapIterations
+    )
+    assertEquals(
+      StrengthReport.Config.fromValues(None, None, None, None, Some("-5")).bootstrapIterations,
+      default.bootstrapIterations
+    )
+
+  test("Config.fromValues combines a lone valid override with the other side's default (#181)"):
+    val config = StrengthReport.Config.fromValues(Some("5"), None, None, None, None)
+    assertEquals((config.elo0, config.elo1), (5.0, StrengthReport.Config().elo1), "5 < the default elo1 (20): valid")
+
+  test(
+    "Config.fromValues rejects an elo0/elo1 pair that violates ordering (inverted, equal, or non-finite), " +
+      "falling back to BOTH defaults together rather than keeping the one value that was parsed (#181)"
+  ):
+    val default = StrengthReport.Config()
+    // Only STRENGTH_ELO0 set, but to a value that inverts against the untouched elo1 default (20) — must not
+    // silently combine into (30, 20); the whole pair falls back together.
+    val inverted = StrengthReport.Config.fromValues(Some("30"), None, None, None, None)
+    assertEquals(inverted.elo0, default.elo0, "an inverted pair must not keep the one side that WAS parsed")
+    assertEquals(inverted.elo1, default.elo1)
+    // Both set explicitly, equal: degenerate (s1 - s0 == 0 forever) — same rejection as inverted.
+    val equal = StrengthReport.Config.fromValues(Some("15"), Some("15"), None, None, None)
+    assertEquals((equal.elo0, equal.elo1), (default.elo0, default.elo1))
+    // A non-finite value (parseable by toDoubleOption, useless as a hypothesis bound).
+    val nonFinite = StrengthReport.Config.fromValues(Some("Infinity"), None, None, None, None)
+    assertEquals((nonFinite.elo0, nonFinite.elo1), (default.elo0, default.elo1))
