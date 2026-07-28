@@ -35,19 +35,51 @@ import scala.concurrent.duration.*
   * The park write is a separate transaction from the rating write it follows, so a crash between them leaves a rating
   * applied and the bot still on the ladder. That is deliberately not worth a shared transaction: the streak is
   * re-evaluated from scratch on the bot's next timeout loss, which an actually-offline bot supplies within a minute.
+  *
+  * '''The [[StrengthCache]] refresh (#181)''' also rides along here rather than on its own timer or the `/strength`
+  * request path — see `tick`'s doc.
   */
 final class RatingBatch(
     botStore: BotStore,
     ratingStore: RatingStore,
     resultsStore: GameResultsStore,
-    config: RatingBatch.Config
+    config: RatingBatch.Config,
+    strengthCache: StrengthCache,
+    strengthConfig: StrengthReport.Config = StrengthReport.Config()
 ):
 
-  /** One batch tick: process the queue page by page until a short page says it is drained. */
+  /** One batch tick: drain the queue page by page until a short page says it is drained, then refresh the cached
+    * [[StrengthReport]] if this drain applied at least one game, or if the cache has never been warmed (a fresh boot).
+    * The refresh piggybacks on this tick's own "did new rated games land" check instead of adding a second one:
+    * `StrengthReport.build` folds the full `game_results` history and its Bradley-Terry ranking runs a four-figure
+    * bootstrap, both far too expensive for the request path of an unauthenticated route.
+    */
   def tick: IO[Unit] =
+    for
+      appliedAny <- drainQueue
+      stillCold  <- strengthCache.get.map(_.isEmpty)
+      _          <- refreshStrengthCache.whenA(appliedAny || stillCold)
+    yield ()
+
+  private def drainQueue: IO[Boolean] =
     ratingStore.unappliedRatedGames(config.batchSize).flatMap { games =>
-      games.traverse_(applyGame) *> tick.whenA(games.size == config.batchSize)
+      games.traverse_(applyGame) *> {
+        if games.size == config.batchSize then drainQueue.as(true) else IO.pure(games.nonEmpty)
+      }
     }
+
+  /** Deliberately non-fatal, the same spirit as `parkIfStreakReached`: a failure here must never re-abort a tick that
+    * already committed its rating writes, and retrying immediately buys nothing a fresh full-history fold at the next
+    * interval doesn't already give for free.
+    */
+  private def refreshStrengthCache: IO[Unit] =
+    resultsStore
+      .finishedRatedSince(Instant.EPOCH) // the whole history, every time — a batch snapshot, not an incremental fold
+      .map(StrengthReport.build(_, strengthConfig))
+      .flatMap(strengthCache.set)
+      .handleErrorWith(error =>
+        Console[IO].errorln(s"[play][rating] strength report refresh failed, keeping the last cached one: $error")
+      )
 
   /** Background loop; start once at boot. Unlike the in-memory sweepers (`Lobby`/`Challenges`), a tick here does real
     * database I/O, so a transient failure is logged and the loop lives on to retry next interval — a poisoned row halts

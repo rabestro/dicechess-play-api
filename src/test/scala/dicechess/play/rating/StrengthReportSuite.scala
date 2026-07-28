@@ -110,3 +110,35 @@ class StrengthReportSuite extends munit.FunSuite:
     assert(rendered.linesIterator.count(_.contains("oracle/v1")) >= 1)
     // Locale-pinned rendering (live-corpus regression: a comma-decimal JVM once printed "alpha=beta=0,05").
     assert(rendered.contains("alpha=beta=0.05"), "the report must render dot decimals regardless of JVM locale")
+
+  test("Config.fromValues falls back to the default on every absent or unparseable knob (#181)"):
+    val default = StrengthReport.Config()
+    assertEquals(StrengthReport.Config.fromValues(None, None, None, None, None), default)
+    assertEquals(
+      StrengthReport.Config.fromValues(Some("junk"), Some("junk"), Some("junk"), Some("junk"), Some("junk")),
+      default
+    )
+
+  test("Config.fromValues accepts every knob when all are valid (#181)"):
+    val config = StrengthReport.Config.fromValues(Some("10"), Some("30"), Some("0.01"), Some("0.02"), Some("500"))
+    assertEquals(
+      config,
+      StrengthReport.Config(elo0 = 10.0, elo1 = 30.0, alpha = 0.01, beta = 0.02, bootstrapIterations = 500)
+    )
+
+  test(
+    "Config.fromValues rejects an alpha/beta outside (0, 1) and a non-positive bootstrapIterations, falling back " +
+      "instead of disabling anything (#181)"
+  ):
+    val default = StrengthReport.Config()
+    assertEquals(StrengthReport.Config.fromValues(None, None, Some("0"), None, None).alpha, default.alpha)
+    assertEquals(StrengthReport.Config.fromValues(None, None, Some("1"), None, None).alpha, default.alpha)
+    assertEquals(StrengthReport.Config.fromValues(None, None, None, Some("-0.1"), None).beta, default.beta)
+    assertEquals(
+      StrengthReport.Config.fromValues(None, None, None, None, Some("0")).bootstrapIterations,
+      default.bootstrapIterations
+    )
+    assertEquals(
+      StrengthReport.Config.fromValues(None, None, None, None, Some("-5")).bootstrapIterations,
+      default.bootstrapIterations
+    )

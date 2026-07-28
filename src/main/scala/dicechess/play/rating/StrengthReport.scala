@@ -37,6 +37,43 @@ object StrengthReport:
       seed: Long = 42L
   )
 
+  object Config:
+    val Default: Config = Config()
+
+    /** Parse from explicit optional raw values (#181) — every knob falls back to [[Default]] on an absent or
+      * unparseable value; unlike `RatingBatch`/`LadderScheduler`, there is no primary on/off var here, because the
+      * `/strength` route's own persistence gate already covers enable/disable, so every one of these is a tuning knob,
+      * never a switch. `seed` is deliberately not among them: it governs bootstrap reproducibility, not statistical
+      * trust, so a deployment has no legitimate reason to change it — see `StrengthCache`.
+      *
+      * `alpha`/`beta` are filtered to the open interval `(0, 1)`: they are error rates that feed `math.log` in
+      * [[Sprt.test]], so `0` or `1` would silently produce an infinite or `NaN` LLR forever rather than fail loudly.
+      */
+    def fromValues(
+        elo0Raw: Option[String],
+        elo1Raw: Option[String],
+        alphaRaw: Option[String],
+        betaRaw: Option[String],
+        bootstrapIterationsRaw: Option[String]
+    ): Config =
+      Config(
+        elo0 = elo0Raw.flatMap(_.toDoubleOption).getOrElse(Default.elo0),
+        elo1 = elo1Raw.flatMap(_.toDoubleOption).getOrElse(Default.elo1),
+        alpha = alphaRaw.flatMap(_.toDoubleOption).filter(a => a > 0.0 && a < 1.0).getOrElse(Default.alpha),
+        beta = betaRaw.flatMap(_.toDoubleOption).filter(b => b > 0.0 && b < 1.0).getOrElse(Default.beta),
+        bootstrapIterations =
+          bootstrapIterationsRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(Default.bootstrapIterations)
+      )
+
+    def configFromEnv: Config =
+      fromValues(
+        sys.env.get("STRENGTH_ELO0"),
+        sys.env.get("STRENGTH_ELO1"),
+        sys.env.get("STRENGTH_ALPHA"),
+        sys.env.get("STRENGTH_BETA"),
+        sys.env.get("STRENGTH_BOOTSTRAP_ITERATIONS")
+      )
+
   /** A usable observation: both seats are registered-bot ids and the game is decided. */
   final private case class BotGame(white: Principal.Bot, black: Principal.Bot, whiteScore: Double)
 

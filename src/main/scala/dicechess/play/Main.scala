@@ -20,11 +20,12 @@ import dicechess.play.server.{
   LobbyRoutes,
   PlayerRoutes,
   PlayRoutes,
+  StrengthRoutes,
   WebhookRoutes,
   Webhooks
 }
 import dicechess.play.ingest.IngestDeliverer
-import dicechess.play.rating.RatingBatch
+import dicechess.play.rating.{RatingBatch, StrengthCache, StrengthReport}
 import dicechess.play.store.{BotStore, GameStore, PgGameStore, WebhookStore}
 import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
@@ -91,9 +92,13 @@ object Main extends IOApp.Simple:
             .as(IO.never: IO[Unit])
         case Some(ladderConfig) =>
           LadderScheduler.create(botStore, registry, botEvents, ladderConfig).map(_.scheduler())
+      // The strength cache (#181) is created unconditionally: StrengthRoutes below is mounted whenever persistence
+      // is configured at all, independent of whether the rating batch (its only writer) ever actually runs.
+      strengthCache <- StrengthCache.create
       // The rating batch (#119) is opt-in the same way (RATING_INTERVAL_SECONDS) — and additionally needs the
       // database: without PLAY_DB_URL there is no game_results queue to drain, so a set-but-useless env var gets a
-      // loud warning instead of a silent no-op.
+      // loud warning instead of a silent no-op. It also owns refreshing `strengthCache` (#181): with the batch off,
+      // GET /strength stays "not ready" forever — the same coupling rating updates and ladder auto-park already have.
       ratingLoop <- (RatingBatch.configFromEnv, pgStore) match
         case (None, _) =>
           IO.println("[play][rating] RATING_INTERVAL_SECONDS unset: no automatic rating updates")
@@ -104,7 +109,9 @@ object Main extends IOApp.Simple:
             .errorln("[play][rating] RATING_INTERVAL_SECONDS set but PLAY_DB_URL unset: rating batch disabled")
             .as(IO.never: IO[Unit])
         case (Some(ratingConfig), Some(pg)) =>
-          IO.pure(new RatingBatch(botStore, pg, pg, ratingConfig).scheduler())
+          val batch =
+            new RatingBatch(botStore, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
+          IO.pure(batch.scheduler())
       // Registration triggers an outbound verification POST, so it shares the strict per-IP budget of /bot/register.
       webhookLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       // The catalog wake probe (E3) also POSTs outward (the same unauthenticated handshake), but a visitor browsing
@@ -152,6 +159,9 @@ object Main extends IOApp.Simple:
           // A visitor's own finished games (#151) — same DB-only-seam idiom: no game_results projection without a
           // database, so the route is simply not mounted.
           val playerGames = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => PlayerRoutes(pg))
+          // Same DB-only gating again (#181): `strengthCache` exists either way, but with no persistence there is no
+          // rating batch to ever populate it, so mounting the route would just mean an eternal 503 instead of a 404.
+          val strength = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(_ => StrengthRoutes(botStore, strengthCache))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -159,7 +169,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  catalog <+> playerGames <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
+                  catalog <+> playerGames <+> strength <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
                     challenges,

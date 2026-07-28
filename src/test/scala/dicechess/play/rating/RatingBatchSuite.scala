@@ -26,7 +26,8 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
   private def store(pg: PostgreSQLContainer) =
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
-  private def batch(db: PgGameStore): RatingBatch = new RatingBatch(db, db, db, RatingBatch.Config.Default)
+  private def batch(db: PgGameStore): IO[RatingBatch] =
+    StrengthCache.create.map(new RatingBatch(db, db, db, RatingBatch.Config.Default, _))
 
   private def endedFixture(
       white: Principal,
@@ -94,11 +95,11 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           (alice, bob) <- registerPair(db, "rb1")
           id           <- GameId.random
           _            <- db.save(id, endedFixture(alice, bob, rated = true)) // alice (White) wins
-          _            <- batch(db).tick
+          _            <- batch(db).flatMap(_.tick)
           aliceR       <- db.ratingOf("rb1", "alice").map(_.getOrElse(fail("alice missing")))
           bobR         <- db.ratingOf("rb1", "bob").map(_.getOrElse(fail("bob missing")))
           queued       <- stillQueued(db, id)
-          _       <- batch(db).tick // second tick: nothing left to apply for this game
+          _       <- batch(db).flatMap(_.tick) // second tick: nothing left to apply for this game
           aliceR2 <- db.ratingOf("rb1", "alice").map(_.getOrElse(fail("alice missing")))
         yield
           assert(aliceR.glickoRating > 1500.0, s"the winner must gain: ${aliceR.glickoRating}")
@@ -117,7 +118,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           id           <- GameId.random
           _            <- db.save(id, endedFixture(alice, bob, rated = false))
           queued       <- stillQueued(db, id)
-          _            <- batch(db).tick
+          _            <- batch(db).flatMap(_.tick)
           aliceR       <- db.ratingOf("rb2", "alice")
         yield
           assert(!queued, "a casual game must not be queued for rating")
@@ -132,12 +133,12 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           (alice, bob) <- registerPair(db, "rb3")
           id1          <- GameId.random
           _            <- db.save(id1, endedFixture(alice, bob, rated = true))
-          _            <- batch(db).tick // "before the restart"
+          _            <- batch(db).flatMap(_.tick) // "before the restart"
           afterFirst   <- db.ratingOf("rb3", "alice").map(_.getOrElse(fail("alice missing")))
           // The "restart": a brand-new batch over the same store — no in-memory cursor to lose (#119's design).
-          restarted = batch(db)
-          _        <- restarted.tick
-          replayed <- db.ratingOf("rb3", "alice").map(_.getOrElse(fail("alice missing")))
+          restarted <- batch(db)
+          _         <- restarted.tick
+          replayed  <- db.ratingOf("rb3", "alice").map(_.getOrElse(fail("alice missing")))
           _ = assertEquals(replayed, afterFirst, "a restarted batch must not re-apply an already-stamped game")
           id2    <- GameId.random
           _      <- db.save(id2, endedFixture(bob, alice, rated = true)) // bob (White) wins the second game
@@ -160,7 +161,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           (alice, _) <- registerPair(db, "rb4")
           id         <- GameId.random
           _          <- db.save(id, endedFixture(Principal.User("rb4-human"), alice, rated = true))
-          _          <- batch(db).tick
+          _          <- batch(db).flatMap(_.tick)
           queued     <- stillQueued(db, id)
           aliceR     <- db.ratingOf("rb4", "alice")
         yield
@@ -175,7 +176,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
         for
           id <- GameId.random
           _ <- db.save(id, endedFixture(Principal.Bot("rb5-ghost", "x"), Principal.Bot("rb5-ghost", "y"), rated = true))
-          _ <- batch(db).tick
+          _ <- batch(db).flatMap(_.tick)
           queued <- stillQueued(db, id)
         yield assert(!queued, "a game between unregistered bots must be stamped and skipped")
       }
@@ -188,7 +189,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           (alice, _) <- registerPair(db, "rb6")
           id         <- GameId.random
           _          <- db.save(id, endedFixture(alice, alice, rated = true))
-          _          <- batch(db).tick
+          _          <- batch(db).flatMap(_.tick)
           queued     <- stillQueued(db, id)
           aliceR     <- db.ratingOf("rb6", "alice")
         yield
@@ -226,7 +227,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _            <- db.setOnLadder("rb8", "bob", onLadder = true)
           _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
           _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
-          _            <- batch(db).tick
+          _            <- batch(db).flatMap(_.tick)
           aliceRating  <- db.ratingOf("rb8", "alice")
           bobRating    <- db.ratingOf("rb8", "bob")
         yield
@@ -242,7 +243,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           (alice, bob) <- registerPair(db, "rb9")
           _            <- db.setOnLadder("rb9", "alice", onLadder = true)
           _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.Timeout)
-          _            <- batch(db).tick
+          _            <- batch(db).flatMap(_.tick)
           aliceRating  <- db.ratingOf("rb9", "alice")
         yield assertEquals(aliceRating.map(_.onLadder), Some(true), "the default threshold is two pairings, not one")
       }
@@ -256,9 +257,30 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _            <- db.setOnLadder("rb10", "alice", onLadder = true)
           _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.KingCaptured)
           _            <- saveLostPairing(db, loser = alice, winner = bob, Termination.KingCaptured)
-          _            <- batch(db).tick
+          _            <- batch(db).flatMap(_.tick)
           aliceRating  <- db.ratingOf("rb10", "alice")
         yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a weak-but-live bot stays on the ladder")
+      }
+    }
+
+  test("a tick that applies a rated game also warms the strength cache with a report that includes it (#181)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          (alice, bob)  <- registerPair(db, "rb11")
+          id            <- GameId.random
+          _             <- db.save(id, endedFixture(alice, bob, rated = true)) // alice (White) wins
+          strengthCache <- StrengthCache.create
+          before        <- strengthCache.get
+          _             <- new RatingBatch(db, db, db, RatingBatch.Config.Default, strengthCache).tick
+          after         <- strengthCache.get
+        yield
+          assertEquals(before, None, "the cache starts cold")
+          assert(after.isDefined, "a tick that applied a game must warm the cache")
+          assert(
+            after.exists(_.pairwise.exists(p => p.perspective == "rb11/alice" || p.opponent == "rb11/alice")),
+            "the refreshed report must include the game the same tick just applied"
+          )
       }
     }
 
@@ -309,18 +331,56 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
 
   test("a history query that fails mid-check is logged and never aborts the tick around it"):
     for
-      bots  <- BotStore.inMemory
-      _     <- bots.register("acme", "alice", "hash-alice")
-      _     <- bots.register("acme", "bob", "hash-bob")
-      _     <- bots.setOnLadder("acme", "alice", onLadder = true)
-      _     <- bots.setOnLadder("acme", "bob", onLadder = true)
-      queue <- Ref.of[IO, List[GameResultRow]](List(aliceTimedOut))
-      batch = new RatingBatch(bots, oneGameQueue(queue), unreachableResults, RatingBatch.Config.Default)
+      bots          <- BotStore.inMemory
+      _             <- bots.register("acme", "alice", "hash-alice")
+      _             <- bots.register("acme", "bob", "hash-bob")
+      _             <- bots.setOnLadder("acme", "alice", onLadder = true)
+      _             <- bots.setOnLadder("acme", "bob", onLadder = true)
+      queue         <- Ref.of[IO, List[GameResultRow]](List(aliceTimedOut))
+      strengthCache <- StrengthCache.create
+      batch = new RatingBatch(bots, oneGameQueue(queue), unreachableResults, RatingBatch.Config.Default, strengthCache)
       // The rating for this row has already committed by the time the check runs, so raising here would abort the rest
       // of the page for unrelated bots and buy nothing — the row is stamped and never returns to the queue.
       _           <- batch.tick
       aliceRating <- bots.ratingOf("acme", "alice")
     yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a check that never completed must park nobody")
+
+  /** Counts calls to `finishedRatedSince` rather than serving real rows — the strength refresh's own cost the cache
+    * exists to bound, made observable without a container (#181).
+    */
+  private def countingResults(counter: Ref[IO, Int]): GameResultsStore = new GameResultsStore:
+    def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] = IO.pure(Nil)
+    def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]     = counter.update(_ + 1).as(Nil)
+    def pairFor(pairingId: String): IO[List[GameResultRow]]                       = IO.pure(Nil)
+    def playerGamesPage(
+        externalId: String,
+        before: Option[java.time.Instant],
+        opponent: Option[OpponentFilter],
+        result: Option[PovResultFilter],
+        limit: Int
+    ): IO[GameResultsStore.Page] = IO.pure(GameResultsStore.Page(Nil, hasMore = false))
+    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] = IO.pure(Nil)
+
+  test("a cold cache is warmed even with nothing to apply, but a warm one is not refreshed again for free (#181)"):
+    for
+      bots          <- BotStore.inMemory
+      refreshCount  <- Ref.of[IO, Int](0)
+      emptyQueue    <- Ref.of[IO, List[GameResultRow]](Nil)
+      strengthCache <- StrengthCache.create
+      batch = new RatingBatch(
+        bots,
+        oneGameQueue(emptyQueue),
+        countingResults(refreshCount),
+        RatingBatch.Config.Default,
+        strengthCache
+      )
+      _      <- batch.tick
+      countA <- refreshCount.get
+      _      <- batch.tick
+      countB <- refreshCount.get
+    yield
+      assertEquals(countA, 1, "a cold cache must be warmed even when the drain applied nothing")
+      assertEquals(countB, 1, "a warm cache must not be refreshed again by a tick that applied nothing new")
 
 /** Pure parsing/config/streak logic — no container. */
 class RatingBatchPureSuite extends munit.FunSuite:
