@@ -388,6 +388,26 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LegalMovesResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /games/{id}/history:
+    get:
+      tags: [Discovery]
+      summary: Get game history (public replay)
+      description: >
+        The full replay of a FINISHED game — every turn's dice and moves, plus the dice-fairness reveal —
+        independent of whether the live room has been evicted from memory. `fairness.commit` is always
+        present; `seed`/`clientSeeds` are null until the game is reveal-eligible (immediately for an
+        ordinary game, or once a mirror-pair partner has also concluded). A fully revealed response is
+        cached as immutable forever; a withheld one only briefly.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/GameId' }]
+      responses:
+        '200':
+          description: The finished game's full history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GameHistory' }
+        '404':
+          description: Unknown game id, or a finished game with no archive row (pre-archive history, never backfilled).
   /leaderboard:
     get:
       tags: [Leaderboard]
@@ -788,6 +808,47 @@ components:
         dicePending: { type: boolean }
         legalMoves: { $ref: '#/components/schemas/MoveTree' }
       required: [version, dfen, dicePending, legalMoves]
+    GameHistory:
+      type: object
+      description: A finished game's full replay, from GET /games/{id}/history.
+      properties:
+        gameId: { type: string }
+        players: { $ref: '#/components/schemas/Players' }
+        rated: { type: boolean }
+        timeControl: { $ref: '#/components/schemas/TimeControl' }
+        result: { type: integer, description: White-POV — 1 white won, -1 black won, 0 draw. }
+        termination: { type: string, description: 'One of: king_captured, timeout, resign, draw_agreement, aborted.' }
+        finishedAt: { type: string, format: date-time }
+        initialDfen: { type: string }
+        turns:
+          type: array
+          items: { $ref: '#/components/schemas/HistoryTurn' }
+        fairness: { $ref: '#/components/schemas/HistoryFairness' }
+      required:
+        [gameId, players, rated, timeControl, result, termination, finishedAt, initialDfen, turns, fairness]
+    HistoryTurn:
+      type: object
+      properties:
+        turnNumber: { type: integer }
+        activeColor: { $ref: '#/components/schemas/Seat' }
+        dice: { type: array, items: { type: integer } }
+        moves: { type: array, items: { type: string }, description: UCI micro-moves; empty means a forced pass. }
+        fenAfter: { type: string }
+      required: [turnNumber, activeColor, dice, moves, fenAfter]
+    HistoryFairness:
+      type: object
+      description: >
+        The dice-fairness reveal (#115). commit is always present. seed/clientSeeds are null until the game
+        is reveal-eligible — see GameHistory's own description.
+      properties:
+        commit: { type: [string, 'null'] }
+        seed: { type: [string, 'null'] }
+        clientSeeds:
+          type: [object, 'null']
+          properties:
+            white: { type: string }
+            black: { type: string }
+      required: [commit]
     MoveTree:
       type: object
       description: >

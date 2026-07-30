@@ -114,12 +114,13 @@ final class PgGameStore private (xa: Transactor[IO])
 
   // ── GameArchiveStore ────────────────────────────────────────────────────────
 
-  def archiveFor(id: GameId): IO[Option[Json]] =
-    sql"""SELECT payload FROM play.game_archive WHERE game_id = ${id.value}::uuid"""
-      .query[Json]
+  def archiveFor(id: GameId): IO[Option[ArchivedGame]] =
+    sql"""SELECT payload, finished_at FROM play.game_archive WHERE game_id = ${id.value}::uuid"""
+      .query[(Json, Instant)]
       .option
       .transact(xa)
       .timeout(SaveTimeout)
+      .map(_.map((payload, finishedAt) => ArchivedGame(payload, finishedAt)))
 
   // ── BotStore ────────────────────────────────────────────────────────────────
 

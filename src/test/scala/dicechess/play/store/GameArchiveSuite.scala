@@ -78,6 +78,25 @@ class GameArchiveSuite extends munit.FunSuite:
   test("an aborted game is never archived (mirrors PlaysiteIngest — no sporting result)"):
     assertEquals(GameArchive.payload(snapshot(ended(GameResult.Draw, Termination.Aborted))), None)
 
+  test("decode recovers exactly what payload wrote — the write/read pair round-trips (#178)"):
+    val fixture = snapshot(ended(GameResult.Win(Side.White), Termination.KingCaptured))
+    val json    = GameArchive.payload(fixture).getOrElse(fail("a finished game must produce a payload"))
+    val record  = GameArchive.decode(json).getOrElse(fail(s"decode must succeed for its own payload: $json"))
+    assertEquals(record.rated, true)
+    assertEquals(record.pairingId, Some("11111111-1111-1111-1111-111111111111"))
+    assertEquals(record.partnerGameId, Some("22222222-2222-2222-2222-222222222222"))
+    assertEquals(record.timeControl, TimeControl.Fischer(300, 3))
+    assertEquals(record.result, 1)
+    assertEquals(record.termination, "king_captured")
+    assertEquals(record.whiteExternalId, "guest:w-uuid")
+    assertEquals(record.blackExternalId, "bot:team:house:greedy")
+    assertEquals(record.initialDfen, EngineOps.InitialDfen)
+    assertEquals(record.turns.map(t => (t.turnNumber, t.moves)), List((1L, List("e2e4")), (2L, Nil)))
+    assert(record.commit.exists(_.nonEmpty))
+    assertEquals(record.serverSeed, "ab12cd34")
+    assertEquals(record.clientSeedWhite, "white-seed")
+    assertEquals(record.clientSeedBlack, "black-seed")
+
   test("a malformed snapshot missing a seat produces no archive row (mirrors PgGameStore.finishedGameOf)"):
     val malformed = snapshot(ended(GameResult.Win(Side.White), Termination.KingCaptured))
       .copy(players = Map(Seat.White -> Principal.Guest("w-uuid"))) // Black seat missing
