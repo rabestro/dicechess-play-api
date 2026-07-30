@@ -1,6 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
+import cats.syntax.all.*
 import dicechess.play.core.*
 import dicechess.play.store.{ArchivedGame, GameArchive, GameArchiveStore, GameResultsStore, TurnRecord}
 import dicechess.play.wire.Codecs.given
@@ -77,43 +78,52 @@ object HistoryRoutes:
   def apply(archive: GameArchiveStore, results: GameResultsStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case GET -> Root / "games" / id / "history" =>
-        archive
-          .archiveFor(GameId(id))
-          .flatMap:
-            case None                                    => NotFound()
-            case Some(ArchivedGame(payload, finishedAt)) =>
-              GameArchive.decode(payload) match
-                // The row was written by this same server — a decode failure here means the write/read shapes have
-                // drifted, a bug to surface loudly, not a client-facing 404 (the game plainly did finish and archive).
-                case Left(failure) => InternalServerError(s"corrupt archive row for $id: ${failure.getMessage}")
-                case Right(record) =>
-                  revealEligible(record, results).flatMap { eligible =>
-                    val body = GameHistory(
-                      gameId = id,
-                      players = Players(publicPlayerOf(record.whiteExternalId), publicPlayerOf(record.blackExternalId)),
-                      rated = record.rated,
-                      timeControl = record.timeControl,
-                      result = record.result,
-                      termination = record.termination,
-                      finishedAt = finishedAt,
-                      initialDfen = record.initialDfen,
-                      turns = record.turns.map(historyTurn),
-                      fairness = HistoryFairness(
-                        commit = record.commit,
-                        seed = Option.when(eligible)(record.serverSeed),
-                        clientSeeds = Option.when(eligible)(ClientSeeds(record.clientSeedWhite, record.clientSeedBlack))
-                      )
-                    )
-                    val cacheControl =
-                      if eligible then
-                        `Cache-Control`(
-                          CacheDirective.public,
-                          CacheDirective.`max-age`(RevealedMaxAge),
-                          CacheDirective("immutable")
+        // `game_archive.game_id` is a `uuid` column, so a non-UUID path segment would otherwise reach the store's
+        // `::uuid` cast and blow up as a database error instead of the plain "no such game" this route means to say —
+        // same non-distinction PlayRoutes' in-memory lookup already makes for free (a garbage id just misses the map).
+        Either.catchOnly[IllegalArgumentException](java.util.UUID.fromString(id)) match
+          case Left(_)  => NotFound()
+          case Right(_) =>
+            archive
+              .archiveFor(GameId(id))
+              .flatMap:
+                case None                                    => NotFound()
+                case Some(ArchivedGame(payload, finishedAt)) =>
+                  GameArchive.decode(payload) match
+                    // The row was written by this same server — a decode failure here means the write/read shapes
+                    // have drifted, a bug to surface loudly, not a client-facing 404 (the game plainly did finish
+                    // and archive).
+                    case Left(failure) => InternalServerError(s"corrupt archive row for $id: ${failure.getMessage}")
+                    case Right(record) =>
+                      revealEligible(record, results).flatMap { eligible =>
+                        val body = GameHistory(
+                          gameId = id,
+                          players =
+                            Players(publicPlayerOf(record.whiteExternalId), publicPlayerOf(record.blackExternalId)),
+                          rated = record.rated,
+                          timeControl = record.timeControl,
+                          result = record.result,
+                          termination = record.termination,
+                          finishedAt = finishedAt,
+                          initialDfen = record.initialDfen,
+                          turns = record.turns.map(historyTurn),
+                          fairness = HistoryFairness(
+                            commit = record.commit,
+                            seed = Option.when(eligible)(record.serverSeed),
+                            clientSeeds =
+                              Option.when(eligible)(ClientSeeds(record.clientSeedWhite, record.clientSeedBlack))
+                          )
                         )
-                      else `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(WithheldMaxAge))
-                    Ok(body).map(_.putHeaders(cacheControl))
-                  }
+                        val cacheControl =
+                          if eligible then
+                            `Cache-Control`(
+                              CacheDirective.public,
+                              CacheDirective.`max-age`(RevealedMaxAge),
+                              CacheDirective("immutable")
+                            )
+                          else `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(WithheldMaxAge))
+                        Ok(body).map(_.putHeaders(cacheControl))
+                      }
 
   /** No partner: always eligible (the ordinary, unpaired case — unchanged from before CRN pairing existed). A CRN
     * partner is eligible once `game_results` carries a row for that SPECIFIC partner id (not merely "2 rows share this

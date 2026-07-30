@@ -163,6 +163,13 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("a malformed (non-UUID) game id 404s instead of a raw database error"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        get(app(db), "not-a-uuid").map(resp => assertEquals(resp.status, Status.NotFound))
+      }
+    }
+
   test("an active (not yet ended) game 404s — it has no archive row yet"):
     withContainers { pg =>
       store(pg).use { db =>
