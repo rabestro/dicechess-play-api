@@ -78,6 +78,11 @@ class GameArchiveSuite extends munit.FunSuite:
   test("an aborted game is never archived (mirrors PlaysiteIngest — no sporting result)"):
     assertEquals(GameArchive.payload(snapshot(ended(GameResult.Draw, Termination.Aborted))), None)
 
+  test("a malformed snapshot missing a seat produces no archive row (mirrors PgGameStore.finishedGameOf)"):
+    val malformed = snapshot(ended(GameResult.Win(Side.White), Termination.KingCaptured))
+      .copy(players = Map(Seat.White -> Principal.Guest("w-uuid"))) // Black seat missing
+    assertEquals(GameArchive.payload(malformed), None)
+
   test("an unrated, unpaired game omits rated/pairing/partner correctly"):
     val json = GameArchive.payload(
       snapshot(

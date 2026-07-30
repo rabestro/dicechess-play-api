@@ -1,5 +1,6 @@
 package dicechess.play.store
 
+import cats.syntax.all.*
 import dicechess.play.core.*
 import dicechess.play.dice.DiceSource
 import dicechess.play.game.EngineOps
@@ -22,14 +23,17 @@ import io.circe.syntax.*
 object GameArchive:
 
   /** The archive payload for a finished, non-aborted game, or `None` — mirrors `PlaysiteIngest.payload`'s own
-    * active/aborted exclusions exactly, so the two representations of "should this game be recorded" never drift.
+    * active/aborted exclusions exactly, so the two representations of "should this game be recorded" never drift. Also
+    * `None` if `players` is unexpectedly missing a seat (a malformed snapshot, not the normal "still active" case) —
+    * the same anomaly `PgGameStore.finishedGameOf` guards against and logs; guarding here too means a malformed row
+    * simply has no archive, never one with a null seat.
     */
   def payload(snapshot: GameSnapshot): Option[Json] =
     snapshot.status match
       case GameStatus.Active                                  => None
       case GameStatus.Ended(GameOver(_, Termination.Aborted)) => None
       case GameStatus.Ended(GameOver(result, termination))    =>
-        Some(
+        (snapshot.players.get(Seat.White), snapshot.players.get(Seat.Black)).mapN { (white, black) =>
           Json.obj(
             "started_at"      -> snapshot.createdAtEpochMs.asJson,
             "rated"           -> snapshot.rated.getOrElse(false).asJson,
@@ -38,23 +42,20 @@ object GameArchive:
             "time_control"    -> snapshot.timeControl.asJson,
             "result"          -> PlaysiteIngest.resultOf(result).asJson,
             "termination"     -> PlaysiteIngest.terminationOf(termination).asJson,
-            "players"         -> Json.obj(
-              "white" -> snapshot.players.get(Seat.White).map(_.externalId).asJson,
-              "black" -> snapshot.players.get(Seat.Black).map(_.externalId).asJson
-            ),
-            "initial_dfen" -> EngineOps.InitialDfen.asJson, // every game starts here (GameRegistry never passes a
+            "players"         -> Json.obj("white" -> white.externalId.asJson, "black" -> black.externalId.asJson),
+            "initial_dfen"    -> EngineOps.InitialDfen.asJson, // every game starts here (GameRegistry never passes a
             // custom DFEN) — same invariant PlaysiteIngest's own start-position constant relies on.
             "turns"    -> snapshot.turns.map(t => Json.fromJsonObject(TurnRecord.json(t))).asJson,
             "fairness" -> Json.obj(
               "commit"       -> commitOf(snapshot.serverSeed).asJson,
               "server_seed"  -> snapshot.serverSeed.asJson,
               "client_seeds" -> Json.obj(
-                "white" -> seedFor(snapshot, Seat.White).asJson,
-                "black" -> seedFor(snapshot, Seat.Black).asJson
+                "white" -> seedFor(snapshot.clientSeeds, Seat.White, white).asJson,
+                "black" -> seedFor(snapshot.clientSeeds, Seat.Black, black).asJson
               )
             )
           )
-        )
+        }
 
   /** `None` only if `serverSeed` fails to parse as hex — practically impossible (it is always CSPRNG-generated), but a
     * parse failure must not lose the archive row entirely: the row is still written, just without a computed
@@ -67,5 +68,5 @@ object GameArchive:
     * that never submitted a client seed before the grace elapsed falls back to its own external id — `clientSeeds`
     * alone (as persisted on `GameSnapshot`) would be missing that seat's entry, understating the fairness block.
     */
-  private def seedFor(snapshot: GameSnapshot, seat: Seat): String =
-    snapshot.clientSeeds.getOrElse(seat, snapshot.players.get(seat).fold("")(_.externalId))
+  private def seedFor(clientSeeds: Map[Seat, String], seat: Seat, player: Principal): String =
+    clientSeeds.getOrElse(seat, player.externalId)
