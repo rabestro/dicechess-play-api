@@ -234,7 +234,11 @@ paths:
             schema:
               type: object
               properties:
-                timeControl: { $ref: '#/components/schemas/TimeControl' }
+                timeControl:
+                  allOf: [{ $ref: '#/components/schemas/TimeControl' }]
+                  description: >-
+                    Optional. Omitted, the seek gets Fischer 600+10 — a human may sit down at this offer, and a
+                    clockless public game never ends on its own. Ask for Unlimited explicitly if you want no clock.
       responses:
         '201':
           description: Seek posted. Hold it by polling; it expires after ~2 minutes without a poll.

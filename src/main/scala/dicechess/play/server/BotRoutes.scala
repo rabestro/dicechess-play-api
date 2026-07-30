@@ -210,6 +210,10 @@ object BotRoutes:
                   .create(
                     bot,
                     Principal.Bot(target.team, target.name),
+                    // Bot-vs-bot only (the target is a `Principal.Bot`), so no human can be left waiting on a
+                    // clockless board — this path keeps the old `Unlimited` default on purpose. Corpus and
+                    // self-play runs want a board with no clock, and imposing `TimeControl.Default` here would
+                    // start flagging the heavy search bots that currently think for as long as they need.
                     target.timeControl.getOrElse(TimeControl.Unlimited)
                   )
                   .flatMap:
@@ -256,7 +260,7 @@ object BotRoutes:
               case Left(failure) => BadRequest(failure.message)
               case Right(body)   =>
                 lobby
-                  .create(bot, body.timeControl.getOrElse(TimeControl.Unlimited))
+                  .create(bot, body.timeControl.getOrElse(TimeControl.Default))
                   .flatMap:
                     case Right((seek, secret))                       => Created(CreatedSeek(seek.id, secret))
                     case Left(Lobby.CreateRejected.TooManyOpenSeeks) =>

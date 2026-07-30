@@ -74,7 +74,7 @@ object PlayRoutes:
                 case (_, Left(err))               => BadRequest(s"black: $err")
                 case (Right(white), Right(black)) =>
                   registry
-                    .create(white, black, body.timeControl.getOrElse(TimeControl.Unlimited))
+                    .create(white, black, body.timeControl.getOrElse(TimeControl.Default))
                     .flatMap:
                       case Left(error)       => BadRequest(error)
                       case Right((id, room)) =>
