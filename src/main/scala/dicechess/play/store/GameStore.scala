@@ -101,15 +101,18 @@ object GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = IO.unit
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
 
+/** One archived game as read back from `play.game_archive` (#177): the sanitized payload `GameArchive.payload` wrote,
+  * plus the column recording when it was written — needed by `GET /games/{id}/history` (#178) to answer `finishedAt`,
+  * which lives outside the JSONB payload itself.
+  */
+final case class ArchivedGame(payload: Json, finishedAt: java.time.Instant)
+
 /** Read seam for the durable game-history archive (#177): a point lookup by id — there is no listing surface, per
-  * `GameArchive`'s own doc. Minimal on purpose: the public replay endpoint (`GET /games/{id}/history`, #178) is a
-  * separate, larger piece of work (anonymization, the CRN reveal gate, caching) that consumes this; this seam exists
-  * now so the archive's WRITE path (#177) can be verified against a real database rather than only unit-tested against
-  * the pure `GameArchive.payload` function. Postgres only, like `GameResultsStore`: `game_archive` doesn't exist
-  * without persistence, so #178's route will simply not be mounted in that mode, same idiom as the leaderboard.
+  * `GameArchive`'s own doc. Postgres only, like `GameResultsStore`: `game_archive` doesn't exist without persistence,
+  * so `GET /games/{id}/history` (#178) is simply not mounted in that mode, same idiom as the leaderboard.
   */
 trait GameArchiveStore:
-  def archiveFor(id: GameId): IO[Option[Json]]
+  def archiveFor(id: GameId): IO[Option[ArchivedGame]]
 
 /** A registered bot's rating-ladder state (#100): Glicko-2 parameters plus whether it has opted into the ladder, and a
   * forward-looking owner slot for when human accounts arrive (always `None` today — nothing populates it yet; adding

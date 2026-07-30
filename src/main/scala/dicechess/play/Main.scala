@@ -14,6 +14,7 @@ import dicechess.play.server.{
   Cors,
   GameRegistry,
   HealthRoutes,
+  HistoryRoutes,
   LadderScheduler,
   LeaderboardRoutes,
   Lobby,
@@ -162,6 +163,9 @@ object Main extends IOApp.Simple:
           // Same DB-only gating again (#181): `strengthCache` exists either way, but with no persistence there is no
           // rating batch to ever populate it, so mounting the route would just mean an eternal 503 instead of a 404.
           val strength = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(_ => StrengthRoutes(botStore, strengthCache))
+          // The durable replay endpoint (#178) reads game_archive + game_results (the CRN reveal gate) — DB-only
+          // seams again, same idiom as every route above.
+          val history = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => HistoryRoutes(pg, pg))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -169,7 +173,8 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  catalog <+> playerGames <+> strength <+> WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
+                  catalog <+> playerGames <+> strength <+> history <+>
+                  WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
                     challenges,

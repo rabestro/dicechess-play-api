@@ -6,8 +6,8 @@ import dicechess.play.dice.DiceSource
 import dicechess.play.game.EngineOps
 import dicechess.play.ingest.PlaysiteIngest
 import dicechess.play.wire.Codecs.given
-import io.circe.Json
 import io.circe.syntax.*
+import io.circe.{Decoder, Json}
 
 /** The immutable, sanitized history record for a finished game (#177) — play's own durable representation of game
   * history, independent of the analytics wire contract (`PlaysiteIngest`) and of `games` snapshot retention (#179
@@ -70,3 +70,74 @@ object GameArchive:
     */
   private def seedFor(clientSeeds: Map[Seat, String], seat: Seat, player: Principal): String =
     clientSeeds.getOrElse(seat, player.externalId)
+
+  /** `payload` decoded back into structured values — the read-side counterpart, consumed by `GET /games/{id}/history`
+    * (#178). A manual decoder, not derived: the stored JSON is the snake_case shape `payload` builds above, distinct
+    * from every in-process type's own camelCase convention (same reason `PlaysiteIngest`/`payload` itself build JSON by
+    * hand rather than deriving).
+    */
+  final case class Record(
+      rated: Boolean,
+      pairingId: Option[String],
+      partnerGameId: Option[String],
+      timeControl: TimeControl,
+      result: Int,
+      termination: String,
+      whiteExternalId: String,
+      blackExternalId: String,
+      initialDfen: String,
+      turns: List[TurnRecord],
+      commit: Option[String],
+      serverSeed: String,
+      clientSeedWhite: String,
+      clientSeedBlack: String
+  )
+
+  def decode(payload: Json): Decoder.Result[Record] =
+    // Scoped to this method, not a package-wide `given`: `GameSnapshot`'s own `Codec[TurnRecord]` (camelCase,
+    // operational storage) must never leak in here or be shadowed by this one (snake_case, this archive's own
+    // shape) — see `TurnRecord.json`, the mirror of this on the write side.
+    given Decoder[TurnRecord] = Decoder.instance { c =>
+      for
+        turnNumber  <- c.get[Long]("turn_number")
+        activeColor <- c.get[String]("active_color")
+        dice        <- c.get[List[Int]]("dice")
+        moves       <- c.get[List[String]]("moves")
+        fenAfter    <- c.get[String]("fen_after")
+      yield TurnRecord(turnNumber, activeColor, dice, moves, fenAfter)
+    }
+    val c           = payload.hcursor
+    val players     = c.downField("players")
+    val fairness    = c.downField("fairness")
+    val clientSeeds = fairness.downField("client_seeds")
+    for
+      rated         <- c.get[Boolean]("rated")
+      pairingId     <- c.get[Option[String]]("pairing_id")
+      partnerGameId <- c.get[Option[String]]("partner_game_id")
+      timeControl   <- c.get[TimeControl]("time_control")
+      result        <- c.get[Int]("result")
+      termination   <- c.get[String]("termination")
+      whiteId       <- players.get[String]("white")
+      blackId       <- players.get[String]("black")
+      initialDfen   <- c.get[String]("initial_dfen")
+      turns         <- c.get[List[TurnRecord]]("turns")
+      commit        <- fairness.get[Option[String]]("commit")
+      serverSeed    <- fairness.get[String]("server_seed")
+      seedWhite     <- clientSeeds.get[String]("white")
+      seedBlack     <- clientSeeds.get[String]("black")
+    yield Record(
+      rated,
+      pairingId,
+      partnerGameId,
+      timeControl,
+      result,
+      termination,
+      whiteId,
+      blackId,
+      initialDfen,
+      turns,
+      commit,
+      serverSeed,
+      seedWhite,
+      seedBlack
+    )

@@ -152,6 +152,27 @@ Every live game you are seated in — the polling counterpart of `GameStart` and
 
 `GET /games/{id}` — **public.** The polling read of a single game: the same `Snapshot.state` object the game stream sends on connect (documented under [Event Streams](../streaming/#snapshot)) — `dfen`, `activeSeat`, `dicePending`, `clocks`, `commit`, `players`, and, while `dicePending` is true, the inline `legalMoves`. This is also where a withheld [dice reveal](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) becomes available: for a mirror-pair game, `seed` and `clientSeeds` stay `null` on the live `GameEnded` event until both games conclude, then appear here on a re-poll. Errors: `404` unknown game.
 
+### Get game history (replay)
+
+`GET /games/{id}/history` — **public.** The full replay of a **finished** game, independent of whether the live room has been evicted from memory: every turn's dice and moves, plus the dice-fairness reveal so anyone can [re-derive every roll](../../provably-fair/) and check it against the commitment published at creation.
+
+```json
+{
+  "gameId": "game-uuid",
+  "players": { "white": { "kind": "Bot", "name": "house greedy" }, "black": { "kind": "Human", "name": null } },
+  "rated": true,
+  "timeControl": { "Fischer": { "initialSeconds": 300, "incrementSeconds": 3 } },
+  "result": 1,
+  "termination": "king_captured",
+  "finishedAt": "2026-07-30T21:05:00Z",
+  "initialDfen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "turns": [{ "turnNumber": 1, "activeColor": "White", "dice": [1, 1, 4], "moves": ["e2e4"], "fenAfter": "..." }],
+  "fairness": { "commit": "sha256-hex", "seed": "server-seed-hex", "clientSeeds": { "white": "...", "black": "..." } }
+}
+```
+
+`result` is white-POV (`1` white won, `-1` black won, `0` draw) and `termination` is one of `king_captured` / `timeout` / `resign` / `draw_agreement` / `aborted` — there is no requester identity here, so neither is reframed to a point of view the way a player's own games list is. `fairness.commit` is always present; `seed`/`clientSeeds` are `null` until the game is reveal-eligible — immediately for an ordinary game, or once its [mirror-pair partner](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) has also concluded. A fully revealed response is cached `public, max-age=31536000, immutable` (it can never change again); a withheld one is cached only briefly, so a re-fetch after the partner concludes sees the reveal promptly. Errors: `404` unknown game, or a finished game with no archive row (pre-archive history — not backfilled).
+
 ## Leaderboard & bot profiles
 
 Public, no `Authorization`. Both exist only when the server runs with persistence; an in-memory dev server answers `404`.

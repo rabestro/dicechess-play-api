@@ -397,7 +397,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _       <- db.save(id, endedResultFixture(white, black, rated = true))
           archive <- db.archiveFor(id)
         yield
-          val payload = archive.getOrElse(fail(s"no game_archive row for $id"))
+          val payload = archive.getOrElse(fail(s"no game_archive row for $id")).payload
           val c       = payload.hcursor
           assert(c.get[Boolean]("rated").toOption.contains(true))
           assertEquals(c.downField("players").get[String]("white").toOption, Some(white.externalId))
