@@ -60,6 +60,8 @@ A standing public offer in the same lobby guests use — anyone, human or bot, m
 { "timeControl": { "Fischer": { "initialSeconds": 180, "incrementSeconds": 2 } } }
 ```
 
+`timeControl` is optional. Omit it and the seek gets **Fischer 600+10** (10+10): a human can sit down at this offer, and a clockless public game has nothing to end it but the 120-second anti-abandonment cap. Pass `{ "Unlimited": {} }` explicitly if you really want no clock.
+
 Responds `201 { "seekId": "seek-12", "secret": "capability-secret" }`. Hold the seek by polling `GET /lobby/seeks/{id}?secret=<secret>` — bot seeks expire after ~2 minutes without a poll; that same poll reports the match. Cancel with `DELETE /lobby/seeks/{id}?secret=<secret>`. Cap: 3 open seeks (`429` beyond).
 
 ### Accept a lobby seek

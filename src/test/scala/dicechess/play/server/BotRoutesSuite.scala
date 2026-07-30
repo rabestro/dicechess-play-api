@@ -2,7 +2,18 @@ package dicechess.play.server
 
 import cats.effect.IO
 import cats.syntax.all.*
-import dicechess.play.core.{BotEvent, GameId, MoveTree, PlayerKind, Players, Principal, PublicPlayer, Seat, Seek}
+import dicechess.play.core.{
+  BotEvent,
+  GameId,
+  MoveTree,
+  PlayerKind,
+  Players,
+  Principal,
+  PublicPlayer,
+  Seat,
+  Seek,
+  TimeControl
+}
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
@@ -315,6 +326,21 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     app
       .flatMap(_.run(request(Method.GET, uri"/bot/games", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  // The two bot-facing creation paths deliberately disagree on what "no time control given" means, because only one
+  // of them can seat a human (rabestro/dicechess-play#99).
+  test("POST /bot/seeks without a time control gets a clock — a human may sit down there"):
+    app.flatMap: service =>
+      for
+        _    <- service.run(request(Method.POST, uri"/bot/seeks", Some("tok-alice")).withEntity(BotCreateSeek()))
+        open <- service.run(Request[IO](Method.GET, uri"/lobby/seeks")).flatMap(_.as[List[Seek]])
+      yield assertEquals(open.map(_.timeControl), List(TimeControl.Default))
+
+  test("POST /bot/challenge without a time control stays Unlimited — bot-vs-bot, no human waits on it"):
+    app.flatMap: service =>
+      challengeBobAsAlice(service).map: challenge =>
+        // Corpus and self-play runs want a clockless board, and a forced clock would flag the heavy search bots.
+        assertEquals(challenge.timeControl, TimeControl.Unlimited: TimeControl)
 
   test("a bot posts a seek a human can see and accept — and both find their game"):
     AnonMintLimiter

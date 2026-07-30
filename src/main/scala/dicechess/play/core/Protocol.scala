@@ -19,16 +19,29 @@ enum GameStatus:
   case Active
   case Ended(over: GameOver)
 
-/** A game's time control, chosen at creation. `Unlimited` is today's behavior (only the anti-abandonment turn deadline
-  * applies). The timed variants are **not enforced yet** — recorded forward-compat so the creation API and wire are
-  * stable before clocks land (see the "Time control / clocks" milestone). Distinct from the engine's move-search
-  * TimeManager, which budgets a bot's own thinking rather than the authoritative game clock.
+/** A game's time control, chosen at creation and enforced by the room (`GameRoom` flags a side whose clock runs out).
+  * `Unlimited` carries no clocks at all — only the anti-abandonment turn deadline applies — so it is never what a
+  * creation request gets by default; see [[TimeControl.Default]]. Distinct from the engine's move-search TimeManager,
+  * which budgets a bot's own thinking rather than the authoritative game clock.
   */
 enum TimeControl:
   case Unlimited
   case SuddenDeath(initialSeconds: Int)
   case Fischer(initialSeconds: Int, incrementSeconds: Int)
   case PerMove(secondsPerMove: Int)
+
+object TimeControl:
+
+  /** Applied when a creation request omits `timeControl` on any path a human can end up sitting in. Rapid 10+10 is slow
+    * enough for a thinking bot (the house fleet already posts exactly this) and for a human on a phone, while still
+    * ending a walked-away-from game on the clock instead of leaving it open forever.
+    *
+    * `Unlimited` used to be this default, which is how clockless games reached the public lobby
+    * (rabestro/dicechess-play#99). The wire field stays **optional** rather than becoming required: a third-party bot
+    * that omits it keeps working, it just gets a clock. `Unlimited` remains reachable by asking for it explicitly —
+    * bot-vs-bot corpus runs legitimately want no clock.
+    */
+  val Default: TimeControl = Fischer(600, 10)
 
 /** Remaining time per side, in **milliseconds**, as of the event that carries it. The side to move is still ticking, so
   * a client counts its clock down locally between server updates; the other side's value is exact until its next turn.

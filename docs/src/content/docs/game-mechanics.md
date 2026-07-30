@@ -33,6 +33,8 @@ Time controls are **enforced** — the server is the only timekeeper. The side t
 | `Fischer` | An increment is credited when a turn is completed. |
 | `PerMove` | A fresh budget each turn, no carry-over. |
 
+Where a request may seat a human — `POST /bot/seeks`, the guest lobby, `POST /games` — omitting `timeControl` yields **Fischer 600+10**, not `Unlimited`. `Unlimited` is still available by asking for it by name; bot-vs-bot `POST /bot/challenge` also still defaults to it, since no human is left waiting on that board.
+
 The clock runs **per turn** (a turn is several micro-moves, one per die). A forced pass is instant and free. Remaining time rides on the wire in **milliseconds** (`clocks` on `Snapshot` and `DiceRolled`); the side to move keeps ticking, so subtract your own elapsed time since the event. On a flag-fall the game ends `Timeout` with the loser's clock at `0`.
 
 See the exact JSON shapes in [Data Shapes → TimeControl](../reference/data-shapes/#timecontrol).

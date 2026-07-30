@@ -80,7 +80,7 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           .timeoutTo(20.seconds, IO.raiseError(RuntimeException("no terminal over the wire")))
       yield assert(ended._1 && ended._2, "both clients should observe GameEnded")
 
-  test("POST /games records the optional time control (default unlimited), echoed in the snapshot"):
+  test("POST /games records the optional time control (default 10+10), echoed in the snapshot"):
     val resources =
       for
         port <- server
@@ -96,9 +96,15 @@ class PlayRoutesSuite extends munit.CatsEffectSuite:
           POST(CreateGame(WhiteId, BlackId, Some(TimeControl.Fischer(300, 3))), base / "games")
         )
         tState <- http.expect[PublicGameState](base / "games" / timed.gameId)
+        // Unlimited is still reachable — it just has to be asked for now (rabestro/dicechess-play#99).
+        endless <- http.expect[CreatedGame](
+          POST(CreateGame(WhiteId, BlackId, Some(TimeControl.Unlimited)), base / "games")
+        )
+        eState <- http.expect[PublicGameState](base / "games" / endless.gameId)
       yield
-        assertEquals(dState.timeControl, TimeControl.Unlimited)       // absent field -> unlimited
-        assertEquals(tState.timeControl, TimeControl.Fischer(300, 3)) // forward-compat: recorded, not yet enforced
+        assertEquals(dState.timeControl, TimeControl.Default) // absent field -> a clock, never Unlimited
+        assertEquals(tState.timeControl, TimeControl.Fischer(300, 3))
+        assertEquals(eState.timeControl, TimeControl.Unlimited)
 
   test("GET /games lists live games with players, most action first; finished games leave it"):
     val resources =

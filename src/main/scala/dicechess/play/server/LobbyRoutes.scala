@@ -57,7 +57,7 @@ object LobbyRoutes:
                 case Left(err)      => BadRequest(s"creator: $err")
                 case Right(creator) =>
                   lobby
-                    .create(creator, body.timeControl.getOrElse(TimeControl.Unlimited))
+                    .create(creator, body.timeControl.getOrElse(TimeControl.Default))
                     .flatMap:
                       case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
                       // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
