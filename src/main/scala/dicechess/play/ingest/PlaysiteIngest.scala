@@ -100,14 +100,7 @@ object PlaysiteIngest:
     )
 
   private def turn(record: dicechess.play.store.TurnRecord): Json =
-    Json.obj(
-      "turn_number"      -> record.turnNumber.asJson,
-      "active_color"     -> record.activeColor.asJson,
-      "dice"             -> record.dice.asJson,
-      "moves"            -> record.moves.asJson,
-      "thinking_time_ms" -> Json.Null,
-      "fen_after"        -> record.fenAfter.asJson
-    )
+    Json.fromJsonObject(dicechess.play.store.TurnRecord.json(record).add("thinking_time_ms", Json.Null))
 
   // Instant.toString is ISO-8601 UTC with seconds always present — parses as an OffsetDateTime on the analytics side.
   private def isoUtc(epochMs: Long): String = Instant.ofEpochMilli(epochMs).toString

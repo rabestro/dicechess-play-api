@@ -4,7 +4,8 @@ import cats.effect.IO
 import cats.syntax.all.*
 import dicechess.play.core.*
 import io.circe.generic.semiauto.deriveCodec
-import io.circe.{Codec, Decoder, Encoder, KeyDecoder, KeyEncoder}
+import io.circe.syntax.*
+import io.circe.{Codec, Decoder, Encoder, Json, JsonObject, KeyDecoder, KeyEncoder}
 
 /** One completed turn, recorded for the analytics handoff: the dice that were rolled and the UCI micro-moves played
   * (empty for a forced pass). `fenAfter` is the position after the turn, so the replay gate can cross-check.
@@ -16,6 +17,21 @@ final case class TurnRecord(
     moves: List[String],
     fenAfter: String
 )
+
+object TurnRecord:
+  /** The snake_case turn shape shared by every history representation that leaves the operational storage codec below:
+    * analytics' `PlaysiteIngest.turn` and the play-owned `GameArchive` (#177). One field list, so the two projections
+    * cannot silently drift apart — each caller adds only what is specific to it (analytics' own `thinking_time_ms`,
+    * always null today).
+    */
+  private[play] def json(record: TurnRecord): JsonObject =
+    JsonObject(
+      "turn_number"  -> record.turnNumber.asJson,
+      "active_color" -> record.activeColor.asJson,
+      "dice"         -> record.dice.asJson,
+      "moves"        -> record.moves.asJson,
+      "fen_after"    -> record.fenAfter.asJson
+    )
 
 /** A durable snapshot of a game — everything needed to (a) resume the room after a restart and (b) hand the finished
   * game to analytics. Written before each event is broadcast, so any state a player has seen survives a crash.
@@ -84,6 +100,16 @@ object GameStore:
   val noop: GameStore = new GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = IO.unit
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
+
+/** Read seam for the durable game-history archive (#177): a point lookup by id — there is no listing surface, per
+  * `GameArchive`'s own doc. Minimal on purpose: the public replay endpoint (`GET /games/{id}/history`, #178) is a
+  * separate, larger piece of work (anonymization, the CRN reveal gate, caching) that consumes this; this seam exists
+  * now so the archive's WRITE path (#177) can be verified against a real database rather than only unit-tested against
+  * the pure `GameArchive.payload` function. Postgres only, like `GameResultsStore`: `game_archive` doesn't exist
+  * without persistence, so #178's route will simply not be mounted in that mode, same idiom as the leaderboard.
+  */
+trait GameArchiveStore:
+  def archiveFor(id: GameId): IO[Option[Json]]
 
 /** A registered bot's rating-ladder state (#100): Glicko-2 parameters plus whether it has opted into the ladder, and a
   * forward-looking owner slot for when human accounts arrive (always `None` today — nothing populates it yet; adding

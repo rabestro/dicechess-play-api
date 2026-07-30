@@ -387,6 +387,78 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("finishing a game inserts a game_archive row whose payload round-trips (#177)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white = Principal.Guest("b2-archive-white")
+        val black = Principal.Bot("b2-team", "b2-archive-bot")
+        for
+          id      <- GameId.random
+          _       <- db.save(id, endedResultFixture(white, black, rated = true))
+          archive <- db.archiveFor(id)
+        yield
+          val payload = archive.getOrElse(fail(s"no game_archive row for $id"))
+          val c       = payload.hcursor
+          assert(c.get[Boolean]("rated").toOption.contains(true))
+          assertEquals(c.downField("players").get[String]("white").toOption, Some(white.externalId))
+          assertEquals(c.downField("players").get[String]("black").toOption, Some(black.externalId))
+          assertEquals(
+            c.downField("turns").downN(0).get[List[String]]("moves").toOption,
+            Some(List("e2e4")),
+            s"the turn recorded on the fixture snapshot must round-trip: $payload"
+          )
+          assert(
+            c.downField("fairness").get[String]("commit").toOption.exists(_.nonEmpty),
+            s"the fairness block must be present: $payload"
+          )
+      }
+    }
+
+  test("an active (not yet ended) game does not get a game_archive row (#177)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          id      <- GameId.random
+          _       <- db.save(id, snapshotFixture(GameStatus.Active))
+          archive <- db.archiveFor(id)
+        yield assertEquals(archive, None)
+      }
+    }
+
+  test("an aborted game does not get a game_archive row, unlike game_results (#177)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white = Principal.Guest("b2-archive-aborted-white")
+        val black = Principal.Guest("b2-archive-aborted-black")
+        for
+          id      <- GameId.random
+          _       <- db.save(id, endedResultFixture(white, black, termination = Termination.Aborted))
+          archive <- db.archiveFor(id)
+          results <- db.recentResultsFor(white.externalId)
+        yield
+          assertEquals(archive, None, "an aborted game has no sporting outcome and must not be archived")
+          assert(
+            results.exists(_.gameId.value == id.value),
+            "unlike the archive, game_results DOES keep an aborted game as an operational row"
+          )
+      }
+    }
+
+  test("saving the same ended snapshot twice still inserts exactly one game_archive row (#177)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val white = Principal.Guest("b2-archive-idempotent-white")
+        val black = Principal.Guest("b2-archive-idempotent-black")
+        for
+          id <- GameId.random
+          fixture = endedResultFixture(white, black)
+          _       <- db.save(id, fixture)
+          _       <- db.save(id, fixture) // re-save: same game id, ON CONFLICT (game_id) DO NOTHING must hold
+          archive <- db.archiveFor(id)
+        yield assert(archive.isDefined, "expected exactly one (unconflicted) game_archive row")
+      }
+    }
+
   test("playerGamesPage keyset-paginates: `before` returns only strictly older games, still newest first (#173)"):
     withContainers { pg =>
       store(pg).use { db =>
