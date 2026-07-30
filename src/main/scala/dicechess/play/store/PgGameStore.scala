@@ -32,15 +32,17 @@ final class PgGameStore private (xa: Transactor[IO])
     with OutboxStore
     with BotStore
     with GameResultsStore
+    with GameArchiveStore
     with RatingStore
     with LeaderboardStore
     with BotCatalogStore
     with WebhookStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
-  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and (for a
-    * terminal write) its `game_results` row: the snapshot write and both handoffs are atomic, so a crash can't record a
-    * finished game that analytics or the ladder/rating projection never hears about.
+  /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and write its
+    * `game_results` and `game_archive` (#177) rows: the snapshot write and all three handoffs are atomic, so a crash
+    * can't record a finished game that analytics, the ladder/rating projection, or the durable history record never
+    * hears about.
     */
   def save(id: GameId, snapshot: GameSnapshot): IO[Unit] =
     val status = if snapshot.ended then "ended" else "active"
@@ -74,7 +76,13 @@ final class PgGameStore private (xa: Transactor[IO])
               VALUES (${id.value}::uuid, ${fg.whiteExternalId}, ${fg.blackExternalId}, ${fg.result},
                       ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.pairingId}::uuid)
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
-    warnIfMalformed *> (upsert *> enqueue *> recordResult).transact(xa).timeout(SaveTimeout)
+    val archive = GameArchive.payload(snapshot) match
+      case None          => ().pure[ConnectionIO]
+      case Some(payload) =>
+        sql"""INSERT INTO play.game_archive (game_id, payload)
+              VALUES (${id.value}::uuid, $payload)
+              ON CONFLICT (game_id) DO NOTHING""".update.run.void
+    warnIfMalformed *> (upsert *> enqueue *> recordResult *> archive).transact(xa).timeout(SaveTimeout)
 
   // ── OutboxStore ─────────────────────────────────────────────────────────────
 
@@ -103,6 +111,15 @@ final class PgGameStore private (xa: Transactor[IO])
     sql"""UPDATE play.outbox
           SET failed_permanently = true, attempts = attempts + 1, last_error = $error
           WHERE game_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
+
+  // ── GameArchiveStore ────────────────────────────────────────────────────────
+
+  def archiveFor(id: GameId): IO[Option[Json]] =
+    sql"""SELECT payload FROM play.game_archive WHERE game_id = ${id.value}::uuid"""
+      .query[Json]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
 
   // ── BotStore ────────────────────────────────────────────────────────────────
 
