@@ -281,3 +281,8 @@ class WebhooksSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(state.status, GameStatus.Active)
       assert(state.dicePending, "an unparseable answer must leave the pending roll unanswered")
+
+  test("the client deadlines derived from a window sit above it, idle furthest out"):
+    val config = Webhooks.Config(timeout = 120.seconds)
+    assert(config.clientTimeout > config.timeout, "a client cut at or below the window would pre-empt post's timeout")
+    assert(config.clientIdleTimeout > config.clientTimeout, "the connection is idle for as long as the bot thinks")

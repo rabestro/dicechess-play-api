@@ -290,9 +290,29 @@ object Webhooks:
     */
   private val MaxResponseBytes = 65536L
 
-  final case class Config(timeout: FiniteDuration, scanEvery: FiniteDuration = 2.seconds)
+  /** @param timeout
+    *   the per-turn window: the longest a delivery may take, before the mover's remaining clock caps it further.
+    * @param scanEvery
+    *   how often the dispatcher re-scans for turns it owes a delivery.
+    */
+  final case class Config(timeout: FiniteDuration, scanEvery: FiniteDuration = 2.seconds):
+
+    /** The shared HTTP client's own deadlines must sit ABOVE the per-turn window, or they — not this config — decide
+      * when a delivery dies. Ember's defaults are 45 s (`timeout`, the header-receive cut) and 60 s
+      * (`idleConnectionTime`), both below a budget a bot may legitimately spend on one turn, which is exactly how a
+      * configured 210 s silently became 45 s in production (#188). The headroom keeps [[post]]'s own `.timeout` the
+      * first deadline to fire, so a slow bot is logged as a slow bot rather than as a transport failure.
+      */
+    def clientTimeout: FiniteDuration = timeout + Config.ClientTimeoutHeadroom
+
+    /** Idle headroom is the larger of the two: the connection is idle for precisely as long as the bot is thinking. */
+    def clientIdleTimeout: FiniteDuration = timeout + Config.ClientIdleHeadroom
 
   object Config:
+
+    private val ClientTimeoutHeadroom: FiniteDuration = 10.seconds
+    private val ClientIdleHeadroom: FiniteDuration    = 30.seconds
+
     /** Same split as `LadderScheduler.Config.fromValues`: the raw value comes in, only a strictly positive integer
       * enables the feature — a zero/negative/garbled timeout is treated as absent rather than busy-looping or disabling
       * deliveries silently at runtime.
@@ -301,8 +321,15 @@ object Webhooks:
       timeoutSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map(s => Config(s.seconds))
 
   /** Opt-in by env, the same "absence disables" idiom as ingest/ladder/rating: `WEBHOOK_TIMEOUT_SECONDS` both enables
-    * webhooks (routes + dispatcher) and bounds each delivery attempt (10–30 s is the sensible range; the effective
-    * per-turn timeout is additionally capped by the mover's remaining clock).
+    * webhooks (routes + dispatcher) and bounds each delivery attempt; the effective per-turn timeout is additionally
+    * capped by the mover's remaining clock.
+    *
+    * Sizing it is a platform decision, not a preference. The floor is what the engine's `TimeManager` legitimately asks
+    * for — on Fischer(600,10) its target reaches ~57 s once `movesToGo` bottoms out, and more still on a clock grown by
+    * the increment. The ceiling is whatever sits in front of the bots: a Cloudflare-proxied endpoint is cut at 100 s,
+    * an OCI API Gateway at 60 s, an AWS API Gateway at 29 s by default. Above the ceiling the intermediary answers
+    * instead of the bot and the failure reads as the bot's, so the value belongs below it — 120 s covers the engine's
+    * hard cap at a 600 s clock while staying under the proxy limits bots actually sit behind.
     */
   def configFromEnv: Option[Config] = Config.fromValues(sys.env.get("WEBHOOK_TIMEOUT_SECONDS"))
 
