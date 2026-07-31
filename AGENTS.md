@@ -116,8 +116,21 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
 ## Testing conventions
 
 - munit. Pure logic suites extend `munit.FunSuite`; effectful suites extend
-  `munit.CatsEffectSuite`; only `PgGameStoreSuite` and `IngestDelivererSuite` add
-  `TestContainerForAll` (postgres:18-alpine) and need Docker — everything else is Docker-free.
+  `munit.CatsEffectSuite`. Four suites add `TestContainerForAll` (postgres:18-alpine) and need
+  Docker — `PgGameStoreSuite`, `IngestDelivererSuite`, `RatingBatchSuite`, `HistoryRoutesSuite`;
+  everything else is Docker-free.
+- **Suites run one at a time** (`Test / parallelExecution := false`, #176). Running the four
+  container suites concurrently under scoverage causes real CPU contention — measured badly enough
+  to delay a cats-effect timer by 133s. Do not re-enable parallel execution to "speed up" CI:
+  measured, serial is also the *faster* of the two (30s vs a bimodal 30s/313s), because container
+  startup dominates and does not parallelise usefully.
+- **A game with an idle seat and no clock deadlocks — do not write tests that wait on one** (#176).
+  From the start position only pawns and knights can move, so a roll containing neither makes the
+  room auto-pass to the other seat; with `TimeControl.Unlimited` and nobody driving that seat, play
+  stops forever. This is dice-dependent, so it flakes at `(4/6)^3 ≈ 30%` and looks like a timeout
+  bug — #140 and #176 both misread it as fiber starvation and widened a bound instead. If a test
+  needs a specific seat to get an actionable turn, drive the opponent (`BotConnection`, see
+  `WebhooksSuite`) rather than assuming the opening roll falls that seat's way.
 - Test names are full sentences describing behaviour, e.g. `test("the game-end event reveals
   the server seed")`. Suites are named `<Unit>Suite` and mirror the main package layout.
 - Non-flaky patterns (this repo fixed three stream races; follow them): **subscribe before

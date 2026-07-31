@@ -255,29 +255,49 @@ class WebhooksSuite extends munit.CatsEffectSuite:
       // The endpoint signals when it has answered, so the assertion waits for the delivery to have actually
       // happened instead of sleeping and racing it (review).
       answered <- cats.effect.Deferred[IO, Unit]
-      garbage = Client.fromHttpApp(HttpApp[IO](_ => answered.complete(()).attempt *> Ok("this is not a move")))
-      noisy   = Principal.Bot("hooks", "noisy")
+      garbage  = Client.fromHttpApp(HttpApp[IO](_ => answered.complete(()).attempt *> Ok("this is not a move")))
+      noisy    = Principal.Bot("hooks", "noisy")
+      opponent = Principal.Bot("acme", "driven")
       _    <- store.put(BotWebhook("hooks", "noisy", "https://noise.example/hook", "s" * 64, Instant.EPOCH))
-      made <- registry.create(noisy, Principal.Bot("acme", "idle"), TimeControl.Unlimited)
+      made <- registry.create(noisy, opponent, TimeControl.Unlimited)
       (_, room) = made.toOption.get
+      // Black must be played, not idle (#176). This test needs ONE actionable turn for the webhook seat (White), but
+      // White's opening roll has no legal move whenever it contains neither a pawn nor a knight — from the start
+      // position nothing else can move — and the room then auto-passes to Black. With an idle Black and no clock
+      // (Unlimited) the game deadlocks there forever and the delivery never happens: `(4/6)^3 ≈ 30%` of runs, which
+      // is the flake #140 and this issue both mistook for fiber starvation. Driving Black keeps play moving until
+      // White does get an actionable roll. Same `BotConnection` pattern as the dead-webhook test above.
+      driver = BotConnection(opponent, Seat.Black, BotRegistry.getAlgorithm("greedy").get)
       state <- service(registry, store, garbage).use: webhooks =>
-        for
-          _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
-          _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
-          _ <- webhooks.attachSweep
-          // Bounded, per house convention (AGENTS.md: "bound every effectful wait with timeoutTo") — but 150s, not
-          // the original 30s (#140): under the full `check` this runs with scoverage instrumentation AND alongside
-          // the testcontainers suites, so the delivery fiber can be starved well past a tight bound without any
-          // logic being wrong — that's what flaked on #136's unrelated CI run. There's no designed sleep to
-          // virtualize here (the delay is real fiber-scheduling latency, not a timer), so the fix isn't to remove
-          // the bound but to widen it to the same generous ceiling this suite's own full-game test already uses
-          // below, which gives ~5x the original headroom while still failing loudly — and with a specific,
-          // actionable message — if delivery genuinely never happens.
-          _ <- answered.get
-            .timeoutTo(150.seconds, IO.raiseError(new RuntimeException("delivery never reached the endpoint")))
-          state <- room.snapshot
-          _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
-        yield state
+        driver
+          .run(room)
+          .background
+          .use: _ =>
+            for
+              _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
+              _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
+              _ <- webhooks.attachSweep
+              // Bounded per house convention, and back to 30s from #140's 150s. The width was never the fix: a
+              // deadlocked game never delivers at any ceiling, which is why both recorded failures landed exactly ON
+              // the bound (30.008s here, 150.022s in CI) rather than somewhere under it. With Black driven the
+              // delivery arrives in ~2s, so 30s is ~15x headroom.
+              //
+              // If this ever fails again, read the message before touching the number: it reports whose turn the room
+              // is actually on. `activeSeat=Black` means the deadlock above is back (something stopped driving Black);
+              // `activeSeat=White` with the bound crossed would be genuine starvation, and THAT is when contention is
+              // worth investigating — not before.
+              _ <- answered.get.timeoutTo(
+                30.seconds,
+                room.snapshot.flatMap: s =>
+                  IO.raiseError(
+                    new RuntimeException(
+                      s"delivery never reached the endpoint (activeSeat=${s.activeSeat}, dicePending=${s.dicePending})"
+                    )
+                  )
+              )
+              state <- room.snapshot
+              _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
+            yield state
     yield
       assertEquals(state.status, GameStatus.Active)
       assert(state.dicePending, "an unparseable answer must leave the pending roll unanswered")
