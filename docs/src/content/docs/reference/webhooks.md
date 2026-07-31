@@ -5,7 +5,7 @@ description: Register one HTTPS callback and let the server POST your turns — 
 
 The push alternative to streams and polling (**registered bots only**): register an HTTPS callback once, and the server POSTs to it whenever it is your turn — **the HTTP response body is your move**. A bot becomes a single stateless HTTPS handler, woken only when there is a decision to make. Works with every time control — a 1–3 s cold start is noise against a Fischer 300+3 budget.
 
-Webhooks are enabled per server by the operator; when off, every endpoint below answers `503 Service Unavailable`. The per-turn wait is bounded by both a server cap and the mover's remaining clock.
+Webhooks are enabled per server by the operator; when off, every endpoint below answers `503 Service Unavailable`. The per-turn wait is bounded by both a server cap — **120 s on the public deployment** — and the mover's remaining clock; see [How long you have to answer](#how-long-you-have-to-answer).
 
 ## Register a webhook
 
@@ -69,6 +69,31 @@ Answer within the timeout with the same shape [`POST /bot/game/{id}/move`](../re
 - `200` with a legal turn → the move is played (same engine validation as the move endpoint).
 - Anything else — a timeout, a non-200, a malformed body, an illegal turn, or `{"moves": []}` — plays nothing: **your clock keeps running**, and the game forfeits on time exactly as if a polling bot had stopped polling.
 
-Delivery is **single-attempt** by design — no retries, no redelivery. The recovery budget for a transient glitch is your remaining clock, not a queue. The wait for your answer is `min(server cap, your remaining clock)`.
+Delivery is **single-attempt** by design — no retries, no redelivery. The recovery budget for a transient glitch is your remaining clock, not a queue.
+
+### How long you have to answer
+
+```text
+min(your remaining clock, the server cap, your own platform's request timeout)
+```
+
+- **Your remaining clock** is the real budget. Spend it unevenly if you like — 50 ms in the opening, a minute on a critical position; you pay for it later in the same game, and nothing else objects. In an `Unlimited` game there is no clock, so a fixed **120-second anti-abandonment cap** applies to the turn instead.
+- **The server cap** is **120 s** on the public deployment (operators configure it; it is printed at server start). It exists so that an endpoint which accepts a connection and then goes quiet cannot hold a game open forever.
+- **Your own platform's request timeout** is the term most bots actually hit, because a webhook turn is computed *inside* an inbound HTTP request: whatever sits in front of your code counts thinking as a slow response. It is the one term we cannot see or raise for you.
+
+| Where your webhook runs | Cut at | Raising it |
+| --- | --- | --- |
+| AWS API Gateway (REST) | 29 s | quota increase (costs account throttle quota), or a Lambda Function URL instead (15 min) |
+| AWS Application Load Balancer | 60 s idle | configurable to 4000 s |
+| OCI API Gateway | 60 s | hard maximum — route around the gateway |
+| OCI Functions (sync) | 30 s | configure the function timeout |
+| Azure Functions / App Service | 230 s | hard — the load balancer's idle timeout, unchanged by plan or `functionTimeout` |
+| Cloudflare Workers | 30 s **CPU** (paid); 10 ms CPU (free) | raise `cpu_ms`, up to 5 min |
+| Cloudflare proxy (orange cloud) | 100 s | Enterprise `proxy_read_timeout`, or serve the bot from a DNS-only hostname |
+| Google Cloud Run | 300 s | `--timeout`, up to 3600 s |
+
+Note the shape of the failure when your platform is the binding term: it answers instead of you, and the server records the status it sent — a `504` or a `524` — rather than a timeout. That is a diagnosable outcome; size your bot's own thinking budget under this number and it never happens.
+
+If your bot wants long thinking time and its platform will not give it, the fix is not a bigger timeout — it is a different [connection mode](../../connection-modes/#how-long-you-may-think). Poll and stream bots hold no inbound request while they think, so none of the ceilings above apply to them.
 
 A webhook bot on the [rating ladder](../../authentication/#joining-the-rating-ladder) is fully passive: the scheduler starts the games and the webhook delivers the turns — the function needs no other integration. (Webhook bots do not contribute a client dice seed today; the [provably-fair scheme](../../provably-fair/) covers them with the participant-bound fallback, and the seed endpoint stays available to hybrid bots that also hold streams.)
