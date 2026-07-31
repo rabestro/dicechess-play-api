@@ -40,6 +40,20 @@ object Main extends IOApp.Simple:
   private val port    = port"8080"
   private val version = sys.env.getOrElse("APP_VERSION", "dev")
 
+  /** The shared outbound client, with deadlines that clear the webhook window.
+    *
+    * On the plain `default` builder Ember's own timeouts (45 s header-receive, 60 s idle) are both shorter than a turn
+    * a bot may legitimately spend, so they — not `WEBHOOK_TIMEOUT_SECONDS` — decided when a delivery died: a configured
+    * 210 s was silently a 45 s cut in production (#188). Ingest is indifferent to the wider window: `IngestDeliverer`
+    * bounds every request with its own 15 s timeout.
+    */
+  private[play] def outboundClientBuilder(webhooks: Option[Webhooks.Config]): EmberClientBuilder[IO] =
+    webhooks.fold(EmberClientBuilder.default[IO]): config =>
+      EmberClientBuilder
+        .default[IO]
+        .withTimeout(config.clientTimeout)
+        .withIdleConnectionTime(config.clientIdleTimeout)
+
   // Persistence is opt-in by env: with PLAY_DB_URL set, games snapshot into Postgres, live games are resumed on boot,
   // and registered bot identities are durable; with INGEST_URL/INGEST_TOKEN also set, finished games are delivered to
   // analytics from the durable outbox. Without PLAY_DB_URL the server runs in-memory exactly as before (games and
@@ -47,9 +61,9 @@ object Main extends IOApp.Simple:
   // The third slot is the concrete Postgres store when persistence is on: the rating batch and the public
   // leaderboard/profile routes both need its DB-only seams (RatingStore, LeaderboardStore) and are simply absent
   // without a database. The outbound HTTP client is shared by every outbound feature (ingest delivery, webhook
-  // push) and is built unconditionally — an unused pool holds no connections.
+  // push) and is built from the webhook window above — an unused pool holds no connections.
   private def appResources: Resource[IO, (GameStore, BotStore, Option[PgGameStore], Client[IO], IO[Unit])] =
-    EmberClientBuilder.default[IO].build.flatMap { http =>
+    outboundClientBuilder(Webhooks.configFromEnv).build.flatMap { http =>
       PgGameStore.configFromEnv match
         case None => Resource.eval(BotStore.inMemory).map(bots => (GameStore.noop, bots, None, http, IO.never))
         case Some(dbConfig) =>
@@ -133,7 +147,15 @@ object Main extends IOApp.Simple:
             .as(None: Option[Webhooks])
         case Some(webhookConfig) =>
           Resource
-            .eval(pgStore.fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore)))
+            .eval(
+              // The effective window, said out loud at boot: the client's deadlines are derived from it and used to
+              // undercut it silently (#188), and a bot author cannot size their time management against a number
+              // nobody prints.
+              IO.println(
+                s"[play][webhook] per-turn window ${webhookConfig.timeout.toSeconds}s " +
+                  s"(client cut ${webhookConfig.clientTimeout.toSeconds}s, idle ${webhookConfig.clientIdleTimeout.toSeconds}s)"
+              ) *> pgStore.fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore))
+            )
             .flatMap(webhookStore => Webhooks.create(registry, webhookStore, httpClient, webhookConfig))
             .map(Some(_))
       // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, the webhook loop, and the
