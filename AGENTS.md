@@ -71,7 +71,10 @@ unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpo
 disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optional
 `RATING_BATCH_SIZE`, default `100`, and `LADDER_TIMEOUT_PARK_PAIRS`, default `2`) — unset
 disables Glicko-2 rating updates **and ladder auto-park** entirely,
-`WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher).
+`WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher),
+`RETENTION_INTERVAL_SECONDS` (+ optional `RETENTION_DAYS`, default `30`, and
+`RETENTION_BATCH_SIZE`, default `1000`) — unset disables the retention prune (#179) entirely, so
+ended snapshots and delivered outbox rows are kept forever.
 `STRENGTH_ELO0`/`STRENGTH_ELO1`/`STRENGTH_ALPHA`/`STRENGTH_BETA`/`STRENGTH_BOOTSTRAP_ITERATIONS`
 (#181) — tuning knobs for the `/strength` SPRT/Bradley-Terry report, each falling back to its own
 default rather than disabling anything; the report itself is refreshed by the rating batch, so it
@@ -152,6 +155,10 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   moving to a second environment: all three were missed, independently, one at a time). Verify
   a new deployment with a live check — `GET /games` becomes non-empty and `/leaderboard` counts
   increase over a minute — not just `/health`.
+- Retention (#179) will not reclaim anything on a deployment whose games predate `game_archive`,
+  and this looks like the feature not working: the pass refuses to prune an ended non-aborted
+  snapshot that has no archive row, because that snapshot is then the only copy of the game's
+  history. Run `mise run archive:backfill` (#199) first; the retained count is in the log line.
 - `LADDER_TIMEOUT_PARK_PAIRS` (#150) is a `LADDER_*` knob read by the **rating** batch, so it does
   nothing unless `RATING_INTERVAL_SECONDS` is also set: with rating updates off, a dead bot is
   never auto-parked and keeps bleeding rating while inflating every opponent it is paired with.

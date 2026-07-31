@@ -33,6 +33,7 @@ final class PgGameStore private (xa: Transactor[IO])
     with BotStore
     with GameResultsStore
     with GameArchiveStore
+    with RetentionStore
     with RatingStore
     with LeaderboardStore
     with BotCatalogStore
@@ -170,6 +171,65 @@ final class PgGameStore private (xa: Transactor[IO])
             )
           }
       }
+
+  // ── RetentionStore ──────────────────────────────────────────────────────────
+
+  /** See [[RetentionStore.pruneOnce]]. One transaction for the whole batch: the two deletes are ordered by the V2
+    * foreign key (`outbox.game_id REFERENCES games(id)`, no `ON DELETE`), so a snapshot can only go once its outbox row
+    * has, and doing both atomically means a crash can never leave a game whose outbox row is gone while the row that
+    * needed it survives. Bounding the batch — rather than one giant statement — is what keeps that transaction short.
+    *
+    * Two rules make this safe to run against live data:
+    *   - only `status = 'ended'` rows are ever considered, so a game in progress is untouchable regardless of age (boot
+    *     resume reads `WHERE status='active'`, and pruning a live snapshot would forfeit a real game);
+    *   - a snapshot is dropped only when its history is preserved elsewhere — an archive row exists, or the game was
+    *     aborted and therefore has no history to serve by design (`GameArchive.payload` excludes exactly those). An
+    *     ended, non-aborted game with no archive row is RETAINED and counted, never quietly destroyed.
+    *
+    * A parked outbox row (`failed_permanently`) is left alone for inspection, which by the FK also pins its snapshot —
+    * the `NOT EXISTS (outbox)` guard below needs no special case for it.
+    */
+  def pruneOnce(olderThan: Instant, limit: Int): IO[RetentionSweep] =
+    val deleteOutbox =
+      sql"""DELETE FROM play.outbox
+            WHERE game_id IN (
+              SELECT o.game_id FROM play.outbox o
+              WHERE o.delivered_at IS NOT NULL
+                AND NOT o.failed_permanently
+                AND o.delivered_at < $olderThan
+              ORDER BY o.game_id
+              LIMIT $limit
+            )""".update.run
+
+    val deleteSnapshots =
+      sql"""DELETE FROM play.games
+            WHERE id IN (
+              SELECT g.id FROM play.games g
+              LEFT JOIN play.game_results r ON r.game_id = g.id
+              WHERE g.status = 'ended'
+                AND g.updated_at < $olderThan
+                AND NOT EXISTS (SELECT 1 FROM play.outbox o WHERE o.game_id = g.id)
+                AND (
+                  EXISTS (SELECT 1 FROM play.game_archive a WHERE a.game_id = g.id)
+                  OR r.termination = 'aborted'
+                )
+              ORDER BY g.id
+              LIMIT $limit
+            )""".update.run
+
+    // Counted, not deleted: the ended snapshots this pass refuses to touch because their history exists nowhere else.
+    val countRetained =
+      sql"""SELECT count(*) FROM play.games g
+            LEFT JOIN play.game_results r ON r.game_id = g.id
+            WHERE g.status = 'ended'
+              AND g.updated_at < $olderThan
+              AND NOT EXISTS (SELECT 1 FROM play.game_archive a WHERE a.game_id = g.id)
+              AND COALESCE(r.termination, '') <> 'aborted'""".query[Int].unique
+
+    (deleteOutbox, deleteSnapshots, countRetained)
+      .mapN(RetentionSweep.apply)
+      .transact(xa)
+      .timeout(PgGameStore.BackfillTimeout)
 
   // ── BotStore ────────────────────────────────────────────────────────────────
 

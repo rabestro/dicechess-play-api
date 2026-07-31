@@ -569,6 +569,190 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  /** Ages a finished game's operational rows past a retention cutoff. Production never back-dates anything, so there is
+    * no store method for this — but without it every retention test would have to wait out a real interval.
+    */
+  private def ageGame(xa: doobie.Transactor[IO], id: GameId, at: Instant): IO[Unit] =
+    (
+      sql"UPDATE play.games SET updated_at = $at WHERE id = ${id.value}::uuid".update.run,
+      sql"UPDATE play.outbox SET delivered_at = $at WHERE game_id = ${id.value}::uuid".update.run
+    ).mapN((_, _) => ()).transact(xa)
+
+  private val LongAgo: Instant  = Instant.parse("2020-01-01T00:00:00Z")
+  private val PruneCut: Instant = Instant.parse("2020-06-01T00:00:00Z")
+
+  test("retention prunes an old ended game's delivered outbox row and its snapshot, keeping the archive (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-prune-white")
+        val black = Principal.Bot("b5-team", "b5-prune-bot")
+        for
+          id           <- GameId.random
+          _            <- db.save(id, endedResultFixture(white, black, rated = true))
+          _            <- ageGame(xa, id, LongAgo)
+          _            <- db.pruneOnce(PruneCut, limit = 500)
+          snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+          outboxLeft <- sql"SELECT count(*) FROM play.outbox WHERE game_id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+          archive <- db.archiveFor(id)
+          results <- db.recentResultsFor(white.externalId)
+        yield
+          assertEquals(outboxLeft, 0, "a delivered outbox row past the cutoff is dead weight")
+          assertEquals(snapshotLeft, 0, "the ended snapshot is dead weight once the archive serves its history")
+          assert(archive.isDefined, "the archive is permanent by contract and must survive the prune")
+          assert(
+            results.exists(_.gameId.value == id.value),
+            "game_results is the list/rating projection and must survive the prune too"
+          )
+      }
+    }
+
+  test("a pruned game's history is still served from the archive — the whole point of #179"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-served-white")
+        val black = Principal.Bot("b5-team", "b5-served-bot")
+        for
+          id      <- GameId.random
+          _       <- db.save(id, endedResultFixture(white, black, rated = true))
+          before  <- db.archiveFor(id)
+          _       <- ageGame(xa, id, LongAgo)
+          _       <- db.pruneOnce(PruneCut, limit = 500)
+          after   <- db.archiveFor(id)
+          gameRow <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid".query[Int].unique.transact(xa)
+        yield
+          assertEquals(gameRow, 0, "the snapshot must actually be gone, or this proves nothing")
+          assertEquals(after.map(_.payload), before.map(_.payload), "replay must read identically after the prune")
+      }
+    }
+
+  test("an ACTIVE game is never pruned, however old its row looks (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        for
+          id <- GameId.random
+          _  <- db.save(id, snapshotFixture(GameStatus.Active))
+          // Back-date it far past the cutoff: only `status` may decide this, never age. Pruning a live snapshot would
+          // forfeit a real game on the next boot, since resume reads WHERE status='active'.
+          _ <- sql"UPDATE play.games SET updated_at = $LongAgo WHERE id = ${id.value}::uuid".update.run.transact(xa)
+          _ <- db.pruneOnce(PruneCut, limit = 500)
+          active <- db.loadActive
+        yield assert(
+          active.exists(_._1.value == id.value),
+          "an active game must survive retention and still be resumable"
+        )
+      }
+    }
+
+  test("a parked outbox row and its snapshot both survive retention (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-parked-white")
+        val black = Principal.Guest("b5-parked-black")
+        for
+          id         <- GameId.random
+          _          <- db.save(id, endedResultFixture(white, black))
+          _          <- ageGame(xa, id, LongAgo)
+          _          <- db.markParked(id, "422 from the replay gate")
+          _          <- db.pruneOnce(PruneCut, limit = 500)
+          outboxLeft <- sql"SELECT count(*) FROM play.outbox WHERE game_id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+          snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+        yield
+          assertEquals(outboxLeft, 1, "a parked row is kept for manual inspection, not pruned")
+          assertEquals(
+            snapshotLeft,
+            1,
+            "and the FK pins its snapshot too — the evidence for that inspection stays whole"
+          )
+      }
+    }
+
+  test("an unarchived ended game is retained and counted, never silently destroyed (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-unarchived-white")
+        val black = Principal.Guest("b5-unarchived-black")
+        for
+          id <- GameId.random
+          _  <- db.save(id, endedResultFixture(white, black))
+          _  <- ageGame(xa, id, LongAgo)
+          // Forge the pre-#177 state: history exists ONLY in this snapshot. Pruning it would recreate exactly the loss
+          // #199 had to repair, so the pass must refuse and say so.
+          _            <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          sweep        <- db.pruneOnce(PruneCut, limit = 500)
+          snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+        yield
+          assertEquals(snapshotLeft, 1, "the only copy of this game's history must survive")
+          assert(sweep.retainedUnarchived >= 1, s"and the refusal must be visible, not silent: $sweep")
+      }
+    }
+
+  test("an aborted game's snapshot IS pruned — it has no history to preserve by design (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-aborted-white")
+        val black = Principal.Guest("b5-aborted-black")
+        for
+          id <- GameId.random
+          _  <- db.save(id, endedResultFixture(white, black, termination = Termination.Aborted))
+          _  <- ageGame(xa, id, LongAgo)
+          // An aborted game never gets an archive row (GameArchive.payload excludes it), so the archive-exists guard
+          // alone would retain it forever. The aborted carve-out is what lets it go.
+          archive      <- db.archiveFor(id)
+          _            <- db.pruneOnce(PruneCut, limit = 500)
+          snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+        yield
+          assertEquals(archive, None, "precondition: an aborted game is never archived")
+          // That its snapshot is gone IS the assertion: had the aborted carve-out been missing, the archive-exists
+          // guard would have retained it. `sweep.retainedUnarchived` is deliberately not asserted here — it counts
+          // table-wide, and this suite shares one database, so a row another test intentionally left behind (see the
+          // unarchived test above) legitimately shows up in it.
+          assertEquals(snapshotLeft, 0, "so it must be prunable without the unarchived guard blocking it")
+      }
+    }
+
+  test("retention leaves anything newer than the cutoff completely alone (#179)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b5-fresh-white")
+        val black = Principal.Guest("b5-fresh-black")
+        for
+          id <- GameId.random
+          _  <- db.save(id, endedResultFixture(white, black))
+          // Deliberately NOT aged: a just-finished game is exactly what an operator may still need.
+          _            <- db.pruneOnce(PruneCut, limit = 500)
+          snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+          outboxLeft <- sql"SELECT count(*) FROM play.outbox WHERE game_id = ${id.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+        yield
+          // Only this game's own rows are asserted, for the same shared-database reason as the aborted test above.
+          assertEquals(snapshotLeft, 1, "a fresh snapshot is untouched")
+          assertEquals(outboxLeft, 1, "and so is its outbox row")
+      }
+    }
+
   test("playerGamesPage keyset-paginates: `before` returns only strictly older games, still newest first (#173)"):
     withContainers { pg =>
       store(pg).use { db =>

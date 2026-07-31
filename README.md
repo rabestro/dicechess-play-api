@@ -128,6 +128,39 @@ are different: they only ever *tune* the `/strength` SPRT/Bradley-Terry report, 
 back to its own default when unset — none of them disable anything. The report itself is
 populated by the rating batch, so it only ever has data while `RATING_INTERVAL_SECONDS` is set.
 
+### Retention (#179)
+
+`RETENTION_INTERVAL_SECONDS` enables a periodic prune of the two tables that would otherwise
+grow forever: ended `games` snapshots and delivered `outbox` rows. Both are dead weight once
+`game_archive` holds the history and `GET /games/{id}/history` serves replay from it — nothing
+reads an ended snapshot (boot resume loads `WHERE status='active'`), and a delivered outbox row
+has done its job. Ended snapshots are also the only place per-seat join tokens persist after a
+game, so keeping them forever is a small standing liability, not just bytes.
+
+Unset means **nothing is ever deleted** — deliberately, since this is the only scheduled task
+that removes data. Knobs: `RETENTION_DAYS` (default `30`) and `RETENTION_BATCH_SIZE`
+(default `1000`); a non-positive or unparseable value for either falls back to its default
+rather than being honoured (a `RETENTION_DAYS=0` typo would otherwise prune a game the instant
+it ended).
+
+Never pruned: `game_archive` (permanent by contract), `game_results`, `bots`, `bot_webhooks`,
+anything still active regardless of age, parked outbox rows (`failed_permanently`) and the
+snapshots their foreign key pins — and, as a safety valve, **any ended non-aborted game with no
+archive row**. That last case means the snapshot is the only surviving copy of that game's
+history, so the pass retains it and reports the count in its log line instead of destroying it.
+An aborted game *is* pruned: `GameArchive.payload` excludes it by design, so there is no history
+to preserve.
+
+One log line per pass, only when something happened:
+
+```text
+[play][retention] cutoff 2026-07-01T…Z: pruned 1000 outbox row(s), 1000 ended snapshot(s)
+```
+
+Run the archive backfill (below) **before** enabling retention on a deployment that predates
+`game_archive` — otherwise the safety valve simply retains everything and the prune reclaims
+nothing.
+
 Container — the engine artifact needs a `read:packages` token, passed as a BuildKit secret so it never lands in a layer:
 
 ```bash
