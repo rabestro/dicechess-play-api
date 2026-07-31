@@ -137,6 +137,34 @@ trait GameArchiveStore:
     */
   def backfillArchive(after: Option[GameId], limit: Int): IO[ArchiveBackfillBatch]
 
+/** What one retention batch removed, and what it deliberately did not (#179).
+  *
+  * `retainedUnarchived` is the safety valve made visible: an ended, non-aborted game whose history is NOT in
+  * `game_archive` is never pruned, because its snapshot is then the only copy of that history — the exact loss #199 had
+  * to repair. Such a row would otherwise be deleted silently, so it is counted and logged instead.
+  *
+  * '''`retainedUnarchived` is only populated on a terminal batch''' — one where nothing was removed, i.e. `!
+  * removedAnything`. It is a whole-table aggregate with no `LIMIT`, and the only consumer (`Retention.drain`) reads it
+  * exclusively from the last page, so computing it per page would scan the table once per page purely to discard the
+  * result. On a page that DID remove rows the field is `0`, which means "not measured", not "none retained" — read it
+  * only after the drain has finished.
+  */
+final case class RetentionSweep(outboxDeleted: Int, snapshotsDeleted: Int, retainedUnarchived: Int):
+  def removedAnything: Boolean = outboxDeleted > 0 || snapshotsDeleted > 0
+
+/** Persistence seam for the retention pass (#179): the operational tables (`games` snapshots, delivered `outbox` rows)
+  * stop growing forever once `game_archive` is the durable history record. Postgres only, like the other projections —
+  * there is nothing to prune in the in-memory mode.
+  *
+  * Explicitly NOT pruned, ever: `game_archive` (permanent by contract), `game_results` (the list/rating projection),
+  * `bots`, `bot_webhooks`.
+  */
+trait RetentionStore:
+  /** One bounded batch: delivered outbox rows older than `olderThan`, then the ended snapshots older than it that are
+    * safe to drop. Bounded so a crash mid-pass leaves a consistent state and the next tick simply continues.
+    */
+  def pruneOnce(olderThan: java.time.Instant, limit: Int): IO[RetentionSweep]
+
 /** A registered bot's rating-ladder state (#100): Glicko-2 parameters plus whether it has opted into the ladder, and a
   * forward-looking owner slot for when human accounts arrive (always `None` today — nothing populates it yet; adding
   * the column now avoids a later migration).

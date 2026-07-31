@@ -27,7 +27,7 @@ import dicechess.play.server.{
 }
 import dicechess.play.ingest.IngestDeliverer
 import dicechess.play.rating.{RatingBatch, StrengthCache, StrengthReport}
-import dicechess.play.store.{BotStore, GameStore, PgGameStore, WebhookStore}
+import dicechess.play.store.{BotStore, GameStore, PgGameStore, Retention, WebhookStore}
 import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
@@ -127,6 +127,23 @@ object Main extends IOApp.Simple:
           val batch =
             new RatingBatch(botStore, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
           IO.pure(batch.scheduler())
+      // Retention (#179) follows the same opt-in shape, and for this one the shape is a safety property, not just
+      // consistency: it is the only scheduled task that DELETES, so leaving RETENTION_INTERVAL_SECONDS unset must be
+      // the state that does nothing. It also needs the database for the obvious reason — nothing to prune in memory.
+      retentionLoop <- (Retention.configFromEnv, pgStore) match
+        case (None, _) =>
+          IO.println("[play][retention] RETENTION_INTERVAL_SECONDS unset: ended snapshots are kept indefinitely")
+            .as(IO.never: IO[Unit])
+        case (Some(_), None) =>
+          cats.effect.std
+            .Console[IO]
+            .errorln("[play][retention] RETENTION_INTERVAL_SECONDS set but PLAY_DB_URL unset: retention disabled")
+            .as(IO.never: IO[Unit])
+        case (Some(retentionConfig), Some(pg)) =>
+          IO.println(
+            s"[play][retention] enabled: every ${retentionConfig.interval}, pruning operational rows older than " +
+              s"${retentionConfig.retentionDays} day(s)"
+          ).as(new Retention(pg, retentionConfig).scheduler())
       // Registration triggers an outbound verification POST, so it shares the strict per-IP budget of /bot/register.
       webhookLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       // The catalog wake probe (E3) also POSTs outward (the same unauthenticated handshake), but a visitor browsing
@@ -168,6 +185,7 @@ object Main extends IOApp.Simple:
           challenges.sweeper().background,
           ladderLoop.background,
           ratingLoop.background,
+          retentionLoop.background,
           webhookService.fold(IO.never: IO[Unit])(_.loop.void).background
         ).tupled
         loops.surround {
