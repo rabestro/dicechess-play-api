@@ -147,13 +147,13 @@ final class PgGameStore private (xa: Transactor[IO])
       .flatMap { rows =>
         rows
           .traverse { (id, json, finishedAt) =>
-            val archived = json.as[GameSnapshot].toOption.flatMap(GameArchive.payload)
-            archived match
-              case None =>
-                // Aborted, malformed, or an unparseable snapshot: nothing to archive. Logged rather than silently
-                // dropped, and the cursor still moves past it (see ArchiveBackfillBatch).
-                Console[IO].errorln(s"[play][backfill] game $id produced no archive payload — skipped").as(0)
-              case Some(payload) =>
+            PgGameStore.archivablePayload(json) match
+              case Left(reason) =>
+                // Never silently dropped, and the cursor still moves past it (see ArchiveBackfillBatch). The reason is
+                // spelled out because a run over tens of thousands of rows is useless to an operator who cannot tell an
+                // expected skip from one worth investigating.
+                Console[IO].errorln(s"[play][backfill] game $id skipped: $reason").as(0)
+              case Right(payload) =>
                 sql"""INSERT INTO play.game_archive (game_id, payload, finished_at)
                       VALUES ($id::uuid, $payload, $finishedAt)
                       ON CONFLICT (game_id) DO NOTHING""".update.run
@@ -620,6 +620,28 @@ object PgGameStore:
             pairingId = snapshot.pairingId
           )
         }
+
+  /** A stored snapshot's archive payload, or `Left(reason)` naming WHY there isn't one (#199). The three causes are not
+    * equivalent to whoever is watching a backfill run: an aborted game is a correct, permanent skip, whereas a snapshot
+    * that will not decode or is missing a seat is a data problem worth looking at. Collapsing them into one message —
+    * and swallowing circe's decode error — would leave an operator scanning tens of thousands of rows with no way to
+    * tell the two apart, which is exactly why `loadActive` logs its own decode failures in full.
+    */
+  private def archivablePayload(json: Json): Either[String, Json] =
+    json.as[GameSnapshot] match
+      case Left(error)     => Left(s"snapshot does not decode — investigate ($error)")
+      case Right(snapshot) =>
+        GameArchive.payload(snapshot) match
+          case Some(payload) => Right(payload)
+          case None          =>
+            snapshot.status match
+              case GameStatus.Ended(GameOver(_, Termination.Aborted)) =>
+                Left("aborted — expected, aborted games are never archived")
+              // The SQL filters on `status = 'ended'`, so an active snapshot here means the column and the JSON
+              // disagree — impossible through `save`, hence worth surfacing rather than quietly counting.
+              case GameStatus.Active   => Left("column says ended but the snapshot says active — investigate")
+              case GameStatus.Ended(_) =>
+                Left(s"ended but missing a player seat (${snapshot.players.keySet}) — investigate")
 
   private type ResultTuple =
     (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Instant)
