@@ -581,6 +581,13 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
   private val LongAgo: Instant  = Instant.parse("2020-01-01T00:00:00Z")
   private val PruneCut: Instant = Instant.parse("2020-06-01T00:00:00Z")
 
+  /** Prunes until a batch removes nothing and returns that terminal batch — the same loop `Retention.drain` runs, and
+    * the only state in which `RetentionSweep.retainedUnarchived` is measured rather than left at 0.
+    */
+  private def drainPrune(db: PgGameStore): IO[RetentionSweep] =
+    db.pruneOnce(PruneCut, limit = 500)
+      .flatMap(sweep => if sweep.removedAnything then drainPrune(db) else IO.pure(sweep))
+
   test("retention prunes an old ended game's delivered outbox row and its snapshot, keeping the archive (#179)"):
     withContainers { pg =>
       (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
@@ -689,8 +696,11 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _  <- ageGame(xa, id, LongAgo)
           // Forge the pre-#177 state: history exists ONLY in this snapshot. Pruning it would recreate exactly the loss
           // #199 had to repair, so the pass must refuse and say so.
-          _            <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
-          sweep        <- db.pruneOnce(PruneCut, limit = 500)
+          _ <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          // Drain to a terminal batch, exactly as `Retention.drain` does: `retainedUnarchived` is only measured on a
+          // batch that removed nothing (see RetentionSweep), so reading it off a single call would depend on whether
+          // some other test's aged row happened to still be prunable.
+          sweep        <- drainPrune(db)
           snapshotLeft <- sql"SELECT count(*) FROM play.games WHERE id = ${id.value}::uuid"
             .query[Int]
             .unique

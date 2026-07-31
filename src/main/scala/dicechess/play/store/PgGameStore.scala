@@ -226,8 +226,15 @@ final class PgGameStore private (xa: Transactor[IO])
               AND NOT EXISTS (SELECT 1 FROM play.game_archive a WHERE a.game_id = g.id)
               AND COALESCE(r.termination, '') <> 'aborted'""".query[Int].unique
 
-    (deleteOutbox, deleteSnapshots, countRetained)
-      .mapN(RetentionSweep.apply)
+    // Only on a batch that removed nothing — see `RetentionSweep.retainedUnarchived`. This count is a whole-table
+    // aggregate with no LIMIT, and `Retention.drain` reads it exclusively from the terminal batch, so computing it on
+    // every page would scan the table once per page to throw the answer away (~47 wasted scans on the first real run).
+    (deleteOutbox, deleteSnapshots)
+      .flatMapN { (outboxDeleted, snapshotsDeleted) =>
+        if outboxDeleted == 0 && snapshotsDeleted == 0 then
+          countRetained.map(RetentionSweep(outboxDeleted, snapshotsDeleted, _))
+        else RetentionSweep(outboxDeleted, snapshotsDeleted, 0).pure[ConnectionIO]
+      }
       .transact(xa)
       .timeout(PgGameStore.BackfillTimeout)
 

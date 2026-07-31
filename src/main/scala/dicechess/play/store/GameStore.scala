@@ -142,6 +142,12 @@ trait GameArchiveStore:
   * `retainedUnarchived` is the safety valve made visible: an ended, non-aborted game whose history is NOT in
   * `game_archive` is never pruned, because its snapshot is then the only copy of that history — the exact loss #199 had
   * to repair. Such a row would otherwise be deleted silently, so it is counted and logged instead.
+  *
+  * '''`retainedUnarchived` is only populated on a terminal batch''' — one where nothing was removed, i.e. `!
+  * removedAnything`. It is a whole-table aggregate with no `LIMIT`, and the only consumer (`Retention.drain`) reads it
+  * exclusively from the last page, so computing it per page would scan the table once per page purely to discard the
+  * result. On a page that DID remove rows the field is `0`, which means "not measured", not "none retained" — read it
+  * only after the drain has finished.
   */
 final case class RetentionSweep(outboxDeleted: Int, snapshotsDeleted: Int, retainedUnarchived: Int):
   def removedAnything: Boolean = outboxDeleted > 0 || snapshotsDeleted > 0
