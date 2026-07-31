@@ -98,6 +98,17 @@ lazy val root = (project in file("."))
     // Raised to a real threshold once 3a-core lands; the scaffold has no logic to cover yet.
     coverageFailOnMinimum := false,
     Test / fork           := true,
+    // Suites run one at a time (#176). This is NOT the fix for that issue's flake — that was a
+    // deadlock in the test itself — but running the four testcontainers suites (PgGameStore,
+    // IngestDeliverer, RatingBatch, HistoryRoutes) concurrently under scoverage does cause real
+    // CPU contention, severe enough to delay cats-effect timers: one measured run took 313s
+    // overall, with a single suite at 285.6s and a `timeoutTo(150.seconds)` firing 133s late.
+    //
+    // Measured on the same machine, coverage on, alternating runs: parallel 30s / 313s / 30s;
+    // serial 30s / 30s / 30s. Serialising is therefore not a speed-for-reliability trade — it is
+    // both stabler AND faster in the bad case, because container startup dominates and does not
+    // parallelise usefully. Do not re-enable parallel execution to "speed up" CI.
+    Test / parallelExecution := false,
     // docker-java defaults to Docker API 1.32, which Docker 29+ daemons reject (min 1.41);
     // pin a modern version for the testcontainers client (same fix as dicechess-analytics).
     Test / javaOptions += "-Dapi.version=1.43"
