@@ -39,6 +39,10 @@ run = "sbt test"
 description = "🏆 Print the E.1 strength report (SPRT on CRN pairs + Bradley-Terry pool) — needs PLAY_DB_URL, read-only"
 run = 'sbt "runMain dicechess.play.rating.LadderReportMain"'
 
+[tasks."archive:backfill"]
+description = "🗄️  One-off: write game_archive rows for ended games that predate #177 — needs PLAY_DB_URL, WRITES"
+run = 'sbt "runMain dicechess.play.store.ArchiveBackfillMain"'
+
 [tasks.coverage]
 description = "📊 Run tests with scoverage and generate a local report"
 run = "sbt clean coverage test coverageReport"

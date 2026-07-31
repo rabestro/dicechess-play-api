@@ -162,6 +162,40 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
 
 **Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Registered, durable identities come from `POST /bot/register` (or static `PLAY_BOT_TOKENS`), and only they can hold webhooks and join the ladder.
 
+### Owner-run maintenance tasks
+
+Neither task is an endpoint and neither runs on its own — both are operator actions against a
+database, with `PLAY_DB_URL`/`PLAY_DB_USER`/`PLAY_DB_PASSWORD` set in the environment.
+
+```bash
+mise run ladder:report            # read-only: SPRT + Bradley-Terry strength report (#120)
+mise run archive:backfill         # WRITES: one-off game_archive backfill (#199)
+```
+
+`archive:backfill` writes the `game_archive` rows (#177) that games finished *before* the archive
+existed never got — without it, the replay page (dicechess-play#163) answers "history unavailable"
+for every one of them, even though their per-turn history is still in `play.games.snapshot`.
+It reuses `GameArchive.payload`, so a back-filled row is identical to a natively written one, and
+takes `finished_at` from `game_results` rather than the column default — the replay page shows that
+field, so stamping it with the backfill time would date every game to the day of the run.
+
+Batch size is the first argument (`sbt "runMain …ArchiveBackfillMain 1000"`, default 500). Each row
+commits on its own and inserts `ON CONFLICT DO NOTHING`, so the run is safe to interrupt and safe to
+repeat — a re-run skips what exists and reports `+0`. Progress is one line per batch plus a final
+`scanned / inserted / skipped` summary; a non-zero `skipped` is expected and correct, since aborted
+games are deliberately never archived.
+
+**Run it before the snapshot-retention pass (#179)** — that prune is what makes the missing history
+unrecoverable. Verify afterwards with:
+
+```sql
+SELECT count(*) FROM play.games g
+WHERE g.status = 'ended'
+  AND NOT EXISTS (SELECT 1 FROM play.game_archive a WHERE a.game_id = g.id);
+```
+
+Whatever remains should be only aborted games.
+
 ## License
 
 [AGPL-3.0](./LICENSE) — inherited from the dice-chess engine this server links.
