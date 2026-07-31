@@ -296,7 +296,16 @@ class WebhooksSuite extends munit.CatsEffectSuite:
                   )
               )
               state <- room.snapshot
-              _     <- room.submit(Seat.White, GameCommand.Resign) // clean up: end the room's fibers
+              // Clean up, and WAIT for it: `submit` only offers to the room's inbox (`GameRoom.submit` is
+              // `inbox.offer`, unlike `submitTurn` which awaits a verdict), so returning here without awaiting the
+              // terminal state would let both scopes close while the room is still Active — leaving its detached
+              // writer fiber and idle-deadline timer running for the rest of the JVM. In a suite whose whole problem
+              // is background work competing for CPU, leaking one live room per run is the last thing we want.
+              _ <- room.submit(Seat.White, GameCommand.Resign)
+              _ <- room.result.timeoutTo(
+                10.seconds,
+                IO.raiseError(new RuntimeException("the room never reached a terminal state after Resign"))
+              )
             yield state
     yield
       assertEquals(state.status, GameStatus.Active)

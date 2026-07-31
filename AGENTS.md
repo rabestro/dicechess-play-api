@@ -120,7 +120,7 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   Docker — `PgGameStoreSuite`, `IngestDelivererSuite`, `RatingBatchSuite`, `HistoryRoutesSuite`;
   everything else is Docker-free.
 - **Suites run one at a time** (`Test / parallelExecution := false`, #176). Running the four
-  container suites concurrently under scoverage causes real CPU contention — measured badly enough
+  container suites concurrently under scoverage causes real CPU contention — severe enough, measured,
   to delay a cats-effect timer by 133s. Do not re-enable parallel execution to "speed up" CI:
   measured, serial is also the *faster* of the two (30s vs a bimodal 30s/313s), because container
   startup dominates and does not parallelise usefully.
