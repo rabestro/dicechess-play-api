@@ -107,12 +107,35 @@ object GameStore:
   */
 final case class ArchivedGame(payload: Json, finishedAt: java.time.Instant)
 
+/** One batch of the archive backfill (#199): how far the cursor advanced and what happened to the rows it scanned.
+  *
+  * `lastId` is the cursor for the NEXT batch — the highest `game_id` this batch looked at, whether or not it could be
+  * converted. That is the point: a row that is scanned but legitimately not inserted (an unparseable snapshot, or
+  * `GameArchive.payload` returning `None` for an aborted game) must not be re-selected forever, which is exactly what a
+  * plain `WHERE NOT EXISTS ... LIMIT n` loop would do. `scanned == 0` means the walk is finished.
+  */
+final case class ArchiveBackfillBatch(lastId: Option[GameId], scanned: Int, inserted: Int, skipped: Int)
+
 /** Read seam for the durable game-history archive (#177): a point lookup by id — there is no listing surface, per
   * `GameArchive`'s own doc. Postgres only, like `GameResultsStore`: `game_archive` doesn't exist without persistence,
   * so `GET /games/{id}/history` (#178) is simply not mounted in that mode, same idiom as the leaderboard.
   */
 trait GameArchiveStore:
   def archiveFor(id: GameId): IO[Option[ArchivedGame]]
+
+  /** One keyset-paginated batch of the one-off backfill (#199): ended games that still have a snapshot but no archive
+    * row (everything finished before #177 reached production) get the row they would have been written at game end.
+    *
+    * Ordered by `game_id` and resumed from `after`, NOT re-querying `NOT EXISTS` from the start each time — see
+    * [[ArchiveBackfillBatch]] for why a row this cannot convert would otherwise loop forever.
+    *
+    * The payload comes from `GameArchive.payload`, the very same pure function the live write path uses, so a
+    * backfilled row is indistinguishable from a natively written one. `finished_at`, however, is passed EXPLICITLY from
+    * `game_results.finished_at` (falling back to `games.updated_at`): the column's own `DEFAULT now()` is right for a
+    * game that just ended and badly wrong for a backfill, and `GET /games/{id}/history` serves that field straight to
+    * the replay page.
+    */
+  def backfillArchive(after: Option[GameId], limit: Int): IO[ArchiveBackfillBatch]
 
 /** A registered bot's rating-ladder state (#100): Glicko-2 parameters plus whether it has opted into the ladder, and a
   * forward-looking owner slot for when human accounts arrive (always `None` today — nothing populates it yet; adding

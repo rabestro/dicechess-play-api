@@ -7,10 +7,15 @@ import com.dimafeng.testcontainers.munit.TestContainerForAll
 import dicechess.play.core.*
 import dicechess.play.game.EngineOps
 import dicechess.play.server.GameRegistry
+import doobie.hikari.HikariTransactor
+import doobie.implicits.*
+import doobie.implicits.javatimedrivernative.*
+import doobie.util.ExecutionContexts
 import munit.CatsEffectSuite
 import org.testcontainers.utility.DockerImageName
 
 import java.security.MessageDigest
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Persistence against a real PostgreSQL (testcontainers): the store round-trip, and the property the whole feature
@@ -456,6 +461,111 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _       <- db.save(id, fixture) // re-save: same game id, ON CONFLICT (game_id) DO NOTHING must hold
           archive <- db.archiveFor(id)
         yield assert(archive.isDefined, "expected exactly one (unconflicted) game_archive row")
+      }
+    }
+
+  /** A second, unpooled connection to the SAME database, used only to forge the pre-#177 state the backfill exists to
+    * repair: an ended game whose snapshot is on disk but whose archive row is missing. No production path ever deletes
+    * an archive row, so there is no store method for it — and forging it is the only way to test the repair.
+    */
+  private def rawXa(pg: PostgreSQLContainer) =
+    for
+      connectEC <- ExecutionContexts.fixedThreadPool[IO](2)
+      xa        <- HikariTransactor
+        .newHikariTransactor[IO]("org.postgresql.Driver", pg.jdbcUrl, pg.username, pg.password, connectEC)
+    yield xa
+
+  test("the backfill stamps finished_at from the game's own finish time, not the backfill time (#199)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b4-backfill-when-white")
+        val black = Principal.Bot("b4-team", "b4-backfill-when-bot")
+        for
+          id <- GameId.random
+          _  <- db.save(id, endedResultFixture(white, black, rated = true))
+          // Forge the pre-#177 state, and age the game a week so "now()" and "the real finish time" cannot be
+          // confused for each other — this is the specific bug #199 exists to avoid.
+          realFinish = Instant.parse("2026-07-24T10:00:00Z")
+          _ <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          _ <- sql"UPDATE play.game_results SET finished_at = $realFinish WHERE game_id = ${id.value}::uuid".update.run
+            .transact(xa)
+          batch   <- db.backfillArchive(after = None, limit = 500)
+          archive <- db.archiveFor(id)
+        yield
+          assert(batch.inserted >= 1, s"the forged row must be back-filled: $batch")
+          val row = archive.getOrElse(fail(s"no game_archive row for $id after the backfill"))
+          assertEquals(
+            row.finishedAt,
+            realFinish,
+            "finished_at must come from game_results, NOT the column's DEFAULT now() — GET /games/{id}/history " +
+              "serves this field straight to the replay page"
+          )
+      }
+    }
+
+  test("a back-filled payload is identical to the one written natively at game end (#199)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b4-backfill-same-white")
+        val black = Principal.Bot("b4-team", "b4-backfill-same-bot")
+        for
+          id     <- GameId.random
+          _      <- db.save(id, endedResultFixture(white, black, rated = true))
+          native <- db.archiveFor(id)
+          _      <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          _      <- db.backfillArchive(after = None, limit = 500)
+          filled <- db.archiveFor(id)
+        yield assertEquals(
+          filled.map(_.payload),
+          native.map(_.payload),
+          "the backfill reuses GameArchive.payload, so the row must be byte-identical — no second code path to drift"
+        )
+      }
+    }
+
+  test("the backfill is idempotent: a second pass over the same games inserts nothing (#199)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b4-backfill-twice-white")
+        val black = Principal.Guest("b4-backfill-twice-black")
+        for
+          id     <- GameId.random
+          _      <- db.save(id, endedResultFixture(white, black))
+          _      <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          first  <- db.backfillArchive(after = None, limit = 500)
+          second <- db.backfillArchive(after = None, limit = 500)
+        yield
+          assert(first.inserted >= 1, s"the first pass must insert the forged row: $first")
+          // `inserted`, not `scanned`: a second pass legitimately still SCANS the rows that can never be archived —
+          // this suite shares one database across every test, and an aborted game (see the #177 test above) is a
+          // permanent, correct skip. Idempotence means writing nothing new, not running out of rows to look at.
+          assertEquals(second.inserted, 0, s"a second pass must write nothing new: $second")
+      }
+    }
+
+  test("the cursor advances past a game it cannot convert, instead of re-scanning it forever (#199)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val white = Principal.Guest("b4-backfill-corrupt-white")
+        val black = Principal.Guest("b4-backfill-corrupt-black")
+        for
+          id <- GameId.random
+          _  <- db.save(id, endedResultFixture(white, black))
+          _  <- sql"DELETE FROM play.game_archive WHERE game_id = ${id.value}::uuid".update.run.transact(xa)
+          // Corrupt the snapshot so `json.as[GameSnapshot]` fails: the row can never be converted, and a loop that
+          // re-queried `NOT EXISTS` from the start would spin on it forever.
+          _ <- sql"""UPDATE play.games SET snapshot = '{"not":"a snapshot"}'::jsonb
+                     WHERE id = ${id.value}::uuid""".update.run.transact(xa)
+          batch <- db.backfillArchive(after = None, limit = 500)
+          // The batch that saw it must report a cursor at least as far as this game, so the next call starts beyond it.
+          next <- db.backfillArchive(batch.lastId, limit = 500)
+        yield
+          assert(batch.skipped >= 1, s"the corrupt row must be counted as skipped, not inserted: $batch")
+          assert(
+            batch.lastId.exists(_.value >= id.value),
+            s"the cursor must move past the unconvertible row: ${batch.lastId} vs $id"
+          )
+          assertEquals(next.scanned, 0, s"nothing may remain after the cursor: $next")
       }
     }
 

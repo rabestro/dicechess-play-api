@@ -122,6 +122,55 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map((payload, finishedAt) => ArchivedGame(payload, finishedAt)))
 
+  /** See [[GameArchiveStore.backfillArchive]]. `LEFT JOIN game_results` rather than an inner one so a game missing its
+    * projection row still gets archived (falling back to `games.updated_at` for `finished_at`) instead of being
+    * silently stranded — the archive is the durable record, and it should not depend on another projection being
+    * intact.
+    *
+    * Each row is inserted in its own transaction, not one per batch: an interrupted run then leaves every row it
+    * already converted committed, and the cursor simply restarts from the last `game_id` the caller logged.
+    */
+  def backfillArchive(after: Option[GameId], limit: Int): IO[ArchiveBackfillBatch] =
+    val cursor = after.map(_.value).getOrElse(PgGameStore.ZeroUuid)
+    sql"""SELECT g.id::text, g.snapshot, COALESCE(r.finished_at, g.updated_at)
+          FROM play.games g
+          LEFT JOIN play.game_results r ON r.game_id = g.id
+          WHERE g.status = 'ended'
+            AND g.id > $cursor::uuid
+            AND NOT EXISTS (SELECT 1 FROM play.game_archive a WHERE a.game_id = g.id)
+          ORDER BY g.id
+          LIMIT $limit"""
+      .query[(String, Json, Instant)]
+      .to[List]
+      .transact(xa)
+      .timeout(PgGameStore.BackfillTimeout)
+      .flatMap { rows =>
+        rows
+          .traverse { (id, json, finishedAt) =>
+            val archived = json.as[GameSnapshot].toOption.flatMap(GameArchive.payload)
+            archived match
+              case None =>
+                // Aborted, malformed, or an unparseable snapshot: nothing to archive. Logged rather than silently
+                // dropped, and the cursor still moves past it (see ArchiveBackfillBatch).
+                Console[IO].errorln(s"[play][backfill] game $id produced no archive payload — skipped").as(0)
+              case Some(payload) =>
+                sql"""INSERT INTO play.game_archive (game_id, payload, finished_at)
+                      VALUES ($id::uuid, $payload, $finishedAt)
+                      ON CONFLICT (game_id) DO NOTHING""".update.run
+                  .transact(xa)
+                  .timeout(PgGameStore.BackfillTimeout)
+          }
+          .map { inserts =>
+            val inserted = inserts.sum
+            ArchiveBackfillBatch(
+              lastId = rows.lastOption.map((id, _, _) => GameId(id)),
+              scanned = rows.size,
+              inserted = inserted,
+              skipped = rows.size - inserted
+            )
+          }
+      }
+
   // ── BotStore ────────────────────────────────────────────────────────────────
 
   /** Claim the identity atomically: the primary key makes a concurrent double-register lose cleanly. */
@@ -597,6 +646,17 @@ object PgGameStore:
 
   /** Bound on the boot-time resume scan (one query for all live games). */
   private val BootTimeout: FiniteDuration = 30.seconds
+
+  /** Bound on one backfill batch's query/insert (#199). Generous compared with `SaveTimeout`: this is an offline
+    * maintenance run scanning a large table, and unlike a live snapshot write there is no game waiting on it — a
+    * spurious timeout here would just make the operator re-run a batch.
+    */
+  private val BackfillTimeout: FiniteDuration = 60.seconds
+
+  /** The keyset cursor's starting point — `uuid` has no `-infinity`, so the first batch compares against the lowest
+    * possible value rather than special-casing the predicate away.
+    */
+  private val ZeroUuid: String = "00000000-0000-0000-0000-000000000000"
 
   /** Connection settings, from the environment. Persistence is opt-in: with `PLAY_DB_URL` unset the server runs
     * in-memory exactly as before (games do not survive a restart).
