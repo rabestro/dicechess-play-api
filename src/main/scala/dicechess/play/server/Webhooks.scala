@@ -324,12 +324,23 @@ object Webhooks:
     * webhooks (routes + dispatcher) and bounds each delivery attempt; the effective per-turn timeout is additionally
     * capped by the mover's remaining clock.
     *
-    * Sizing it is a platform decision, not a preference. The floor is what the engine's `TimeManager` legitimately asks
-    * for — on Fischer(600,10) its target reaches ~57 s once `movesToGo` bottoms out, and more still on a clock grown by
-    * the increment. The ceiling is whatever sits in front of the bots: a Cloudflare-proxied endpoint is cut at 100 s,
-    * an OCI API Gateway at 60 s, an AWS API Gateway at 29 s by default. Above the ceiling the intermediary answers
-    * instead of the bot and the failure reads as the bot's, so the value belongs below it — 120 s covers the engine's
-    * hard cap at a 600 s clock while staying under the proxy limits bots actually sit behind.
+    * Sizing it is a deployment decision, and it is a *cap*, not a promise: what a given bot actually gets is
+    * `min(its remaining clock, this cap, whatever its own hosting allows)`.
+    *
+    * The floor is what the engine's `TimeManager` legitimately asks for — on Fischer(600,10) its target reaches ~57 s
+    * once `movesToGo` bottoms out, and ~68 s on a clock the increment has grown (observed in production). Configure
+    * below that and correct bots get truncated mid-thought.
+    *
+    * The intermediaries in front of the bots are deliberately NOT the ceiling here, because they differ per bot and
+    * belong to their authors: a Cloudflare-proxied endpoint is cut at 100 s, an OCI API Gateway at 60 s, an AWS API
+    * Gateway at 29 s by default. A bot behind a narrower limit hits it first and its proxy answers — which this server
+    * logs as `endpoint answered HTTP …`, a diagnosable outcome, unlike the silent truncation an under-sized cap
+    * produces. Note that the derived client deadlines sit *above* this value ([[Config.clientTimeout]],
+    * [[Config.clientIdleTimeout]]), so a 120 s cap means holding a connection open for up to ~150 s.
+    *
+    * 120 s is the deployed choice: it clears the engine's hard cap at a 600 s clock and keeps this server from being
+    * the binding constraint for bots whose path allows more (Cloud Run 300 s, Azure 230 s). An operator whose bots all
+    * sit behind a narrower proxy can configure less and lose nothing.
     */
   def configFromEnv: Option[Config] = Config.fromValues(sys.env.get("WEBHOOK_TIMEOUT_SECONDS"))
 
