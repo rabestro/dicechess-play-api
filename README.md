@@ -3,6 +3,7 @@
 [![CI Pipeline](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml/badge.svg)](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml)
 [![Play Live](https://img.shields.io/badge/Play-Live-success)](https://play.jc.id.lv/)
 [![Bot API Docs](https://img.shields.io/badge/Docs-Bot%20API-orange)](https://bots.jc.id.lv/)
+[![Contributor Docs](https://img.shields.io/badge/Docs-Contributor-blue)](https://jc.id.lv/dicechess-play-api/)
 [![Leaderboard](https://img.shields.io/badge/Bots-Leaderboard-blue)](https://play.jc.id.lv/leaderboard)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-lightgrey)](./LICENSE)
 

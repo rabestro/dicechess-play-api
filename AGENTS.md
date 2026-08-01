@@ -245,7 +245,7 @@ failures cheaply. When in doubt, escalate one tier — reviewer time costs more 
 
 ## Documentation
 
-Three layers, by audience (see ADR-0012 for the boundary):
+Four layers, by audience (see ADR-0012 for the boundary):
 
 1. **File-head comments** — the authoritative contract for a module lives at the top of its
    source file (cross-repo invariants, decisions). Code is the source of truth.
@@ -256,8 +256,18 @@ Three layers, by audience (see ADR-0012 for the boundary):
    provably-fair verification procedure. Pages under `docs/src/content/docs/`. Run locally with
    `mise run docs:dev`; build with `mise run docs:build`. `docs/bot-api.md` is now a **stub**
    pointing here (kept because AGENTS.md and external links reference the path).
-3. **Wiki** (`dicechess-docs` vault, Russian) — internal design docs, ADRs, roadmap: ADR-0007
-   (server authority), ADR-0008 (dice fairness), ADR-0009 (Bot API), ADR-0012 (this site).
+3. **Contributor docs site** (`contributor-docs/`, Astro + Starlight → GitHub Pages at
+   https://jc.id.lv/dicechess-play-api, English) — how the server is built, for people changing
+   it: architecture and package map, database schema, concurrency doctrine, configuration,
+   development setup, testing conventions. Pages under `contributor-docs/src/content/docs/`.
+   Run locally with `mise run contrib-docs:dev`; build with `mise run contrib-docs:build`.
+   This slot used to serve the Bot API docs, so `astro.config.mjs` carries **redirects** from
+   the old bot-doc slugs to bots.jc.id.lv — extend them if a bot-docs page is ever renamed.
+   **Public**: GitHub Pages has no private mode, so nothing may go here that is not already
+   derivable from this public repo (no host topology, no env values).
+4. **Wiki** (`dicechess-docs` vault, Russian, PRIVATE) — internal design docs, ADRs, roadmap:
+   ADR-0007 (server authority), ADR-0008 (dice fairness), ADR-0009 (Bot API), ADR-0012 (docs
+   sites). Reference ADRs by number in public docs; never link to the vault.
 
 - Other in-repo docs: `README.md` (orientation; status sections stale, see Gotchas),
   `CONTRIBUTING.md`, `SECURITY.md`, `CLA.md`.
@@ -269,7 +279,12 @@ Three layers, by audience (see ADR-0012 for the boundary):
   `starlight-openapi` at build (an invalid spec fails the build, so it can't drift silently); dice
   protocol → `provably-fair.md` (+ `examples/random_bot.py` if affected); a new public API surface
   → a new site page + sidebar entry in `astro.config.mjs`; server env vars or compose → README
-  run/deploy sections; `wire/Codecs.scala` → coordinate with dicechess-play.
-- The docs site deploys independently (`deploy-docs.yaml`, paths-filtered to `docs/**`); backend
-  CI ignores docs-only changes and vice versa. `docs/package.json` is watched by Dependabot.
+  run/deploy sections **AND `contributor-docs/.../configuration.md`**; `wire/Codecs.scala` →
+  coordinate with dicechess-play; a new Flyway migration → `contributor-docs/.../database.md`
+  (the narrative "why"; the column-level reference is generated in CI); architecture, testing,
+  or concurrency conventions changed → the matching contributor-docs page.
+- Both sites deploy independently and are paths-filtered: `deploy-docs.yaml` on `docs/**` (→
+  Cloudflare) and `deploy-contributor-docs.yaml` on `contributor-docs/**` (→ GitHub Pages);
+  backend CI ignores docs-only changes and vice versa. Both `package.json` files are watched by
+  Dependabot.
 - Markdown rules per `.markdownlint.yaml` (MD013 disabled). All docs in English.
