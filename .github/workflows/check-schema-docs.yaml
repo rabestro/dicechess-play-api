@@ -27,13 +27,24 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup tbls
-        # Third-party action, pinned to a reviewed commit rather than a mutable tag.
-        uses: k1LoW/setup-tbls@f25e3d013a596865b2db90dac7ee19e9f15b5780 # v1.4.0
-        with:
+      # Installed from the release tarball rather than via k1LoW/setup-tbls: that action's
+      # downloader fails on this release with "bufio.Scanner: token too long". A direct,
+      # checksum-verified download is also one less third-party action in the supply chain.
+      - name: Install tbls
+        env:
           # Keep in lockstep with the tbls pinned in mise.toml, so a laptop and a runner
           # introspect identically — a version skew would show up as phantom drift.
-          version: 1.95.0
+          TBLS_VERSION: "1.95.0"
+        run: |
+          set -euo pipefail
+          base="https://github.com/k1LoW/tbls/releases/download/v${TBLS_VERSION}"
+          archive="tbls_v${TBLS_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "${archive}" "${base}/${archive}"
+          curl -fsSL -o checksums-linux.txt "${base}/checksums-linux.txt"
+          grep " ${archive}\$" checksums-linux.txt | sha256sum -c -
+          tar -xzf "${archive}" tbls
+          install -m 0755 tbls /usr/local/bin/tbls
+          tbls version
 
       - name: Regenerate the schema reference
         run: ./scripts/generate-schema-docs.sh
