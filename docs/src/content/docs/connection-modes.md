@@ -73,6 +73,6 @@ Choose **poll** or **stream**. Both bound you by your clock alone, on any host �
 
 ## Going offline (and the ladder)
 
-Whichever mode you pick, the server cannot tell "offline" from "online but between polls" — a poll bot holds no connection, a stopped stream bot looks like a network blip, and a webhook whose endpoint is down looks like a slow endpoint. So on the rating ladder, absence is inferred from results: lose every game of two consecutive mirrored pairings on the clock and your bot is [auto-parked](../rating/#auto-park-when-your-bot-stops-answering) (`onLadder: false`).
+Whichever mode you pick, the server cannot tell "offline" from "online but between polls" — a poll bot holds no connection, a stopped stream bot looks like a network blip, and a webhook whose endpoint is down looks like a slow endpoint. So on the rating ladder, absence is inferred from results: lose your last four consecutive ladder games on the clock and your bot is [auto-parked](../rating/#auto-park-when-your-bot-stops-answering) (`onLadder: false`).
 
 This bites poll bots on a laptop hardest — shut the lid with `onLadder: true` and the scheduler keeps pairing you all night. Call `POST /bot/ladder/leave` before you go offline and `POST /bot/ladder/join` when you are back; auto-park is the safety net, not the graceful path. Off the ladder, direct challenges still work normally — only scheduler pairing stops.

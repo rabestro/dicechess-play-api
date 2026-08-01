@@ -1,13 +1,8 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref}
-import cats.syntax.all.*
-import dicechess.engine.search.{BotRegistry, SearchAlgorithm}
 import dicechess.play.core.*
-import dicechess.play.game.{BotConnection, GameRoom}
 import dicechess.play.store.{GameSnapshot, GameStore}
-
-import scala.concurrent.duration.*
 
 /** The rated/casual policy (#97): a game is rated only when both requested AND every participant is non-anonymous.
   * `isRated` itself is checked directly as a pure matrix; the `create` tests confirm the policy actually reaches the
@@ -21,24 +16,6 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
   private def capturingStore(written: Ref[IO, Vector[GameSnapshot]]): GameStore = new GameStore:
     def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = written.update(_ :+ snapshot)
     def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
-
-  /** Keyed by game id, since a mirrored pair writes two independent games through the same store. */
-  private def capturingStoreById(written: Ref[IO, Map[GameId, GameSnapshot]]): GameStore = new GameStore:
-    def save(id: GameId, snapshot: GameSnapshot): IO[Unit] = written.update(_.updated(id, snapshot))
-    def loadActive: IO[List[(GameId, GameSnapshot)]]       = IO.pure(Nil)
-
-  /** Drive a room to completion with a bot on each seat — same idiom as `GameRoomPersistenceSuite`'s full-game test.
-    * `BotConnection.run` submits its own dice seed first, but the mirrored pair has already preset both seats' seeds,
-    * and the room's own `SubmitSeed` gate is idempotent-per-seat — so the bot's seed is silently a no-op and the fixed
-    * seed stands.
-    */
-  private def playToEnd(room: GameRoom, white: Principal, black: Principal, algorithm: SearchAlgorithm): IO[Unit] =
-    val whiteConn = BotConnection(white, Seat.White, algorithm)
-    val blackConn = BotConnection(black, Seat.Black, algorithm)
-    (whiteConn.run(room).background, blackConn.run(room).background).tupled
-      .use(_ => room.start *> room.result)
-      .void
-      .timeoutTo(20.seconds, IO.raiseError(RuntimeException("mirrored game did not finish in time")))
 
   // ── isRated: the pure policy matrix ──────────────────────────────────────────
 
@@ -110,99 +87,5 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
               )
             }
         }
-      }
-    }
-
-  // ── createMirroredPair: CRN (#101) ───────────────────────────────────────────
-
-  test("createMirroredPair: identical dice sequence per ply, colours swapped, sharing one pairing id"):
-    val greedy = BotRegistry.getAlgorithm("greedy").get
-    Ref.of[IO, Map[GameId, GameSnapshot]](Map.empty).flatMap { written =>
-      GameRegistry.create(store = capturingStoreById(written)).flatMap { registry =>
-        registry.createMirroredPair(alice, bob, TimeControl.Unlimited).flatMap {
-          case Left(error) => IO.raiseError(RuntimeException(s"createMirroredPair failed: $error"))
-          case Right(pair) =>
-            for
-              roomA <- registry.get(pair.gameAWhite).map(_.getOrElse(fail("game A not registered")))
-              roomB <- registry.get(pair.gameBWhite).map(_.getOrElse(fail("game B not registered")))
-              _     <- playToEnd(roomA, alice, bob, greedy) // A = White, B = Black
-              _     <- playToEnd(roomB, bob, alice, greedy) // mirror: B = White, A = Black
-              snaps <- written.get
-            yield
-              val snapA = snaps.getOrElse(pair.gameAWhite, fail("game A snapshot missing"))
-              val snapB = snaps.getOrElse(pair.gameBWhite, fail("game B snapshot missing"))
-              assertEquals(snapA.pairingId, Some(pair.pairingId))
-              assertEquals(snapB.pairingId, Some(pair.pairingId))
-              val diceA     = snapA.turns.map(_.dice)
-              val diceB     = snapB.turns.map(_.dice)
-              val commonLen = math.min(diceA.size, diceB.size)
-              assert(commonLen > 0, s"expected at least one completed turn in both games, got $diceA / $diceB")
-              assertEquals(
-                diceA.take(commonLen),
-                diceB.take(commonLen),
-                "dice must be identical ply-for-ply once colours are swapped"
-              )
-        }
-      }
-    }
-
-  test("createMirroredPair: neither game's reveal becomes public before both have concluded (#115)"):
-    GameRegistry.create().flatMap { registry =>
-      registry.createMirroredPair(alice, bob, TimeControl.Unlimited).flatMap {
-        case Left(error) => IO.raiseError(RuntimeException(s"createMirroredPair failed: $error"))
-        case Right(pair) =>
-          for
-            roomA <- registry.get(pair.gameAWhite).map(_.getOrElse(fail("game A not registered")))
-            roomB <- registry.get(pair.gameBWhite).map(_.getOrElse(fail("game B not registered")))
-            // End game A only; game B is still active.
-            _      <- roomA.submit(Seat.White, GameCommand.Resign)
-            _      <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
-            snapA1 <- roomA.snapshot
-            _ = assertEquals(snapA1.seed, None, "game A must withhold its reveal while its partner is still active")
-            _ = assertEquals(snapA1.clientSeeds, None, "and withhold the client seeds too — same secret")
-            // Now end game B too.
-            _      <- roomB.submit(Seat.White, GameCommand.Resign)
-            _      <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
-            snapB  <- roomB.snapshot
-            snapA2 <- roomA.snapshot // re-poll game A now that its partner has also ended
-          yield
-            assert(
-              snapB.seed.nonEmpty,
-              "game B (the second to end) must reveal immediately — no partner left to protect"
-            )
-            assert(snapA2.seed.nonEmpty, "game A must reveal on a later poll, now that its partner has ended too")
-            assertEquals(snapA2.seed, snapB.seed, "both games share the same server seed")
-            assertEquals(snapA2.clientSeeds, snapB.clientSeeds, "and the same fixed client-seed pair")
-      }
-    }
-
-  test(
-    "a paired game stays registered (GET /games/{id}-reachable) while its partner is still active, and is " +
-      "eventually evicted once both have ended (#116 review)"
-  ):
-    GameRegistry.create().flatMap { registry =>
-      registry.createMirroredPair(alice, bob, TimeControl.Unlimited).flatMap {
-        case Left(error) => IO.raiseError(RuntimeException(s"createMirroredPair failed: $error"))
-        case Right(pair) =>
-          for
-            roomA <- registry.get(pair.gameAWhite).map(_.getOrElse(fail("game A not registered")))
-            _     <- roomA.submit(Seat.White, GameCommand.Resign)
-            _     <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
-            // The whole point of #116: an ended-but-partner-still-active room must NOT vanish from the registry —
-            // GET /games/{id} has no fallback to the database, so eviction here would make the reveal unrecoverable
-            // forever instead of merely delayed.
-            stillThere <- registry.get(pair.gameAWhite)
-            _ = assert(stillThere.isDefined, "an ended game must stay registered while its CRN partner is still active")
-            roomB <- registry.get(pair.gameBWhite).map(_.getOrElse(fail("game B not registered")))
-            _     <- roomB.submit(Seat.White, GameCommand.Resign)
-            _     <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
-            // Now that both have ended, game A's own deferred eviction (polling every 2s) should eventually fire —
-            // it must not linger forever either, or the registry leaks a map entry per finished ladder pair.
-            evicted <- registry
-              .get(pair.gameAWhite)
-              .map(_.isEmpty)
-              .iterateUntil(identity)
-              .timeoutTo(10.seconds, IO.raiseError(RuntimeException("game A was never evicted after both games ended")))
-          yield assert(evicted, "game A must eventually be evicted once its partner has also ended")
       }
     }

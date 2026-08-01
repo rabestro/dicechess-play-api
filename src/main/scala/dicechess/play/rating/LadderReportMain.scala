@@ -6,8 +6,8 @@ import dicechess.play.store.PgGameStore
 import java.time.Instant
 
 /** Owner-facing E.1 (#120) report runner — NOT a public endpoint. Loads every rated decided game from `game_results`
-  * (via the same store the server uses) and prints [[StrengthReport.render]]: pairwise SPRT verdicts on CRN pairs plus
-  * the Bradley-Terry pool ranking.
+  * (via the same store the server uses) and prints [[StrengthReport.render]]: pairwise SPRT verdicts plus the
+  * Bradley-Terry pool ranking.
   *
   * Run: `mise run ladder:report [elo0 elo1 alpha beta]` (defaults 0 20 0.05 0.05) with `PLAY_DB_URL` set — read-only
   * against the database. All analysis logic lives in the separately unit-tested `Sprt`/`BradleyTerry`/

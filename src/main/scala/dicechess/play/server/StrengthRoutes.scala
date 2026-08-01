@@ -44,10 +44,11 @@ final case class StrengthReportResponse(
 /** Just the matchups involving one bot — the profile-page-sized slice of the same report. */
 final case class BotStrengthProfile(team: String, name: String, pairwise: List[PairwiseResult]) derives Codec.AsObject
 
-/** Public, unauthenticated read API over the statistical strength report (E.1, #120 / #181): pairwise SPRT verdicts on
-  * CRN mirror pairs plus a Bradley-Terry pool ranking — the precise, error-rate-bounded complement to the Glicko-2
-  * leaderboard (`LeaderboardRoutes`). See [[dicechess.play.rating.StrengthReport]] for why this exists alongside a
-  * rating every bot already has.
+/** Public, unauthenticated read API over the statistical strength report (E.1, #120 / #181): pairwise SPRT verdicts
+  * (pentanomial on historical CRN mirror pairs, trinomial on ordinary games since #190 dropped that mechanism) plus a
+  * Bradley-Terry pool ranking — the precise, error-rate-bounded complement to the Glicko-2 leaderboard
+  * (`LeaderboardRoutes`). See [[dicechess.play.rating.StrengthReport]] for why this exists alongside a rating every bot
+  * already has.
   *
   * Reads only ever touch `cache`: `StrengthReport.build` folds the full `game_results` history and its Bradley-Terry
   * ranking runs a four-figure bootstrap by default, both too expensive to pay per request on an unauthenticated route.

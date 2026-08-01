@@ -55,12 +55,12 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       white: Principal,
       black: Principal,
       rated: Boolean = false,
-      pairingId: Option[String] = None,
+      ladder: Boolean = false,
       result: GameResult = GameResult.Win(Side.White),
       termination: Termination = Termination.Resign
   ): GameSnapshot =
     snapshotFixture(GameStatus.Ended(GameOver(result, termination)))
-      .copy(players = Map(Seat.White -> white, Seat.Black -> black), rated = Some(rated), pairingId = pairingId)
+      .copy(players = Map(Seat.White -> white, Seat.Black -> black), rated = Some(rated), ladder = Some(ladder))
 
   test("a snapshot round-trips through jsonb, and upserts replace by game id"):
     withContainers { pg =>
@@ -241,14 +241,13 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
   test("finishing a game inserts exactly one game_results row with the expected fields (#98)"):
     withContainers { pg =>
       store(pg).use { db =>
-        val white     = Principal.Guest("b2-white-1")
-        val black     = Principal.Bot("b2-team", "b2-bot-1")
-        val pairingId = "11111111-1111-1111-1111-111111111111"
+        val white = Principal.Guest("b2-white-1")
+        val black = Principal.Bot("b2-team", "b2-bot-1")
         for
           id <- GameId.random
           _  <- db.save(
             id,
-            endedResultFixture(white, black, rated = true, pairingId = Some(pairingId))
+            endedResultFixture(white, black, rated = true, ladder = true)
           )
           rows <- db.recentResultsFor(white.externalId)
         yield
@@ -260,7 +259,8 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assert(row.rated)
           assertEquals(row.timeControl, TimeControl.Fischer(300, 3).toString)
           assertEquals(row.serverSeed, "ab12cd34")
-          assertEquals(row.pairingId, Some(pairingId))
+          assertEquals(row.ladder, true, "the ladder marker (#190) must round-trip through the database")
+          assertEquals(row.pairingId, None, "new rows never set pairing_id — it stays for historical CRN rows only")
       }
     }
 
@@ -336,30 +336,6 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assert(ids.contains(idAfterRated.value), "a rated game finished after the cursor must be included")
           assert(!ids.contains(idAfterCasual.value), "a casual (non-rated) game must be excluded regardless of timing")
       }
-    }
-
-  test("pairFor returns both games sharing a pairing id, and nothing for an unknown one (#98)"):
-    withContainers { pg =>
-      store(pg).use { db =>
-        val pairingId = "22222222-2222-2222-2222-222222222222"
-        val alice     = Principal.Bot("b2-team", "b2-alice")
-        val bob       = Principal.Bot("b2-team", "b2-bob")
-        for
-          idA     <- GameId.random
-          _       <- db.save(idA, endedResultFixture(alice, bob, rated = true, pairingId = Some(pairingId)))
-          idB     <- GameId.random
-          _       <- db.save(idB, endedResultFixture(bob, alice, rated = true, pairingId = Some(pairingId)))
-          paired  <- db.pairFor(pairingId)
-          unknown <- db.pairFor("33333333-3333-3333-3333-333333333333")
-        yield
-          assertEquals(paired.map(_.gameId.value).toSet, Set(idA.value, idB.value))
-          assertEquals(unknown, Nil)
-      }
-    }
-
-  test("pairFor returns an empty list for a malformed pairing id, instead of a database error (#98)"):
-    withContainers { pg =>
-      store(pg).use(db => db.pairFor("not-a-uuid").map(assertEquals(_, Nil)))
     }
 
   test("recentResultsFor does not double-count a self-played game (#98)"):
@@ -1099,54 +1075,6 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             Some(ClientSeeds("white-client-seed-0001", "black-client-seed-0001")),
             "the submitted client seeds survive the crash into the reveal"
           )
-      }
-    }
-
-  test("a mirrored pair's reveal-withholding survives a crash: resume correctly rebuilds the partner check (#116)"):
-    withContainers { pg =>
-      store(pg).use { db =>
-        for
-          // Life before the crash: a CRN mirrored pair, both games live.
-          registry1 <- GameRegistry.create(store = db)
-          paired    <- registry1.createMirroredPair(
-            Principal.Bot("acme", "alice"),
-            Principal.Bot("acme", "bob"),
-            TimeControl.Unlimited
-          )
-          pair = paired.toOption.getOrElse(fail("createMirroredPair failed"))
-
-          // The "crash": a brand-new registry over the same store — the in-memory partnerEnded closures from before
-          // the restart are gone; resume must rebuild them from the persisted partnerGameId (#115).
-          registry2 <- GameRegistry.create(store = db)
-          resumed   <- registry2.resume
-          _ = assert(resumed >= 2, s"both mirrored games must be resumed, got $resumed")
-          roomA <- registry2.get(pair.gameAWhite).map(_.getOrElse(fail("resumed game A not found")))
-          roomB <- registry2.get(pair.gameBWhite).map(_.getOrElse(fail("resumed game B not found")))
-
-          // End the resumed game A only; its rebuilt partnerEnded check must still correctly see B as active.
-          _      <- roomA.submit(Seat.White, GameCommand.Resign)
-          _      <- roomA.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game A never ended")))
-          snapA1 <- roomA.snapshot
-          _ = assertEquals(snapA1.seed, None, "a resumed paired game must still withhold its reveal while B is active")
-          // A FRESH lookup through the registry, not the held `roomA` reference: this is what actually exercises
-          // `register`'s own (separately threaded) partnerEnded check, not just GameRoom.restore's — the two are
-          // easy to fix one and forget the other (as review on #116 caught), and a held reference can't tell the
-          // difference, since it works identically whether or not the room is still in the registry's map.
-          stillThere <- registry2.get(pair.gameAWhite)
-          _ = assert(
-            stillThere.isDefined,
-            "a resumed paired game must stay registered (hence GET /games/{id}-reachable) while its partner is active"
-          )
-
-          // End B too; both now reveal, proving the rebuilt checks correctly see each other post-restart.
-          _      <- roomB.submit(Seat.White, GameCommand.Resign)
-          _      <- roomB.result.timeoutTo(5.seconds, IO.raiseError(RuntimeException("game B never ended")))
-          snapB  <- roomB.snapshot
-          snapA2 <- roomA.snapshot
-        yield
-          assert(snapB.seed.nonEmpty, "game B must reveal once it (the second to end) concludes")
-          assert(snapA2.seed.nonEmpty, "game A must reveal on a later poll, now that B has also ended")
-          assertEquals(snapA2.seed, snapB.seed, "both resumed games still share the same server seed")
       }
     }
 

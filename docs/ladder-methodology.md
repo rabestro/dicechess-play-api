@@ -8,14 +8,22 @@ complementary instruments run over the same `game_results` corpus:
 | **Glicko-2** (continuous) | "roughly how strong is each bot right now?" | rating batch → `bots.glicko_*` → public `/leaderboard` |
 | **SPRT + Bradley-Terry** (batch report) | "is B stronger than A, with controlled error rates?" | `mise run ladder:report` (owner-facing, read-only) |
 
-## Common random numbers (CRN)
+## Common random numbers (CRN) — historical only, dropped in #190
 
-The scheduler starts ladder games as **mirrored pairs**: two games between the same two bots,
-colours swapped, sharing one dice sequence (`pairing_id` ties them together). Whatever luck the
-dice hand White in game 1, they hand the *other* bot in game 2 — so over a pair, dice luck and
-colour advantage cancel, and what remains is skill difference. This is the Fishtest/Stockfish
-testing methodology adapted to dice chess, where the dice make single games far noisier than
-regular chess.
+The scheduler used to start ladder games as **mirrored pairs**: two games between the same two
+bots, colours swapped, sharing one dice sequence (`pairing_id` tied them together). Whatever luck
+the dice handed White in game 1, they handed the *other* bot in game 2 — so over a pair, dice luck
+and colour advantage cancelled, and what remained was skill difference. This was the
+Fishtest/Stockfish testing methodology adapted to dice chess, where the dice make single games far
+noisier than regular chess.
+
+It was removed (#190) once measurement showed the actual variance reduction was modest (~16% on
+2247 production pairs — far short of a real pentanomial's) while the shared dice sequence leaked
+each game's future rolls to anyone seated in both halves of a pair, since dice are public in real
+time and the two games routinely finished tens of seconds to several minutes apart. The scheduler
+now starts one independent game per pairing; colour balance is a scheduling property instead of a
+shared-seed side effect. Historical CRN rows are untouched and still scored as pairs below — the
+sections after this one describe mechanics that are permanent, not tied to CRN's presence.
 
 ## Pairwise SPRT (pentanomial)
 
@@ -29,9 +37,9 @@ at error rates α = β = 0.05 (both configurable: `mise run ladder:report -- 0 2
 One **complete CRN pair is a single observation** with score ∈ {0, ¼, ½, ¾, 1} (both game scores
 summed, normalised) — the *pentanomial* model. Scoring pairs as units, rather than their games
 independently, keeps the correlated halves of a pair from being double-counted and captures the
-variance reduction CRN creates. Unpaired rated games (rare — a scheduler pair whose partner was
-never finished) fall back to ordinary per-game *trinomial* observations; the two families'
-log-likelihood contributions add.
+variance reduction CRN created. Since #190 every new ladder game is unpaired and falls back to
+ordinary per-game *trinomial* observations — the pentanomial family only ever has historical CRN
+rows left to draw on; the two families' log-likelihood contributions add regardless.
 
 The LLR uses the GSPRT normal approximation (Van den Bergh, as deployed by Fishtest): for a
 sample with mean `m` and variance `v` of the per-observation score and hypothesis means
@@ -61,7 +69,7 @@ against the next-ranked bot — the fraction of bootstrap worlds in which the or
 ## Reading the report
 
 - `CONTINUE` is not a failure: it means the corpus hasn't accumulated enough evidence for the
-  requested elo gap and error rates — let the scheduler play more pairs.
+  requested elo gap and error rates — let the scheduler play more games.
 - Overlapping CIs with LOS ≈ 50% mean the bots are indistinguishable so far.
 - The report is read-only and deterministic for a given corpus (fixed bootstrap seed), so two
   runs on the same data render identically.

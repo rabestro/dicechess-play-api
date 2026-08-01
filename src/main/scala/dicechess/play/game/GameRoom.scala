@@ -38,11 +38,7 @@ final class GameRoom private (
     disconnectGrace: FiniteDuration,
     seedGrace: FiniteDuration,
     maxInlinePaths: Int,
-    persist: GameSnapshot => IO[Unit],
-    // "May I reveal my dice secret yet?" (#115) — a capability, not data, so it isn't part of `Session`: an ordinary
-    // game gets `IO.pure(true)` (reveal immediately, exactly as before); a CRN-paired game gets a check that queries
-    // its partner room (see `GameRegistry.partnerEndedCheck`). Consulted fresh at every reveal decision, never cached.
-    partnerEnded: IO[Boolean]
+    persist: GameSnapshot => IO[Unit]
 ):
   import GameRoom.*
 
@@ -59,10 +55,8 @@ final class GameRoom private (
       .flatMap: sub =>
         val snapshot =
           Stream.eval(
-            (stateRef.get, IO.monotonic, partnerEnded)
-              .mapN((s, now, eligible) =>
-                GameEvent.Snapshot(s.version, s.publicAt(now, maxInlinePaths, eligible), snapshotHistory(s))
-              )
+            (stateRef.get, IO.monotonic)
+              .mapN((s, now) => GameEvent.Snapshot(s.version, s.publicAt(now, maxInlinePaths), snapshotHistory(s)))
           )
         val live = Stream.fromQueueUnterminated(sub.queue)
         (snapshot ++ live)
@@ -168,9 +162,7 @@ final class GameRoom private (
   /** Completes when the game ends. */
   def result: IO[GameOver] = done.get
 
-  /** A cheap, non-blocking peek at whether the game has ended yet — unlike `result`, never awaits. Lets a sibling
-    * CRN-paired room's reveal-eligibility check (#115) ask "has my partner finished" without holding a subscription.
-    */
+  /** A cheap, non-blocking peek at whether the game has ended yet — unlike `result`, never awaits. */
   def hasEnded: IO[Boolean] = stateRef.get.map(_.ended)
 
   /** Who is seated where. */
@@ -190,7 +182,7 @@ final class GameRoom private (
 
   /** Current public state (for a REST snapshot or a freshly-joining client). */
   def snapshot: IO[PublicGameState] =
-    (stateRef.get, IO.monotonic, partnerEnded).mapN((s, now, eligible) => s.publicAt(now, maxInlinePaths, eligible))
+    (stateRef.get, IO.monotonic).mapN((s, now) => s.publicAt(now, maxInlinePaths))
 
   /** The full legal-move tree for the pending roll — never capped, unlike the inline `legalMoves` on the events (see
     * `GET /games/{id}/moves`). Empty when no roll is pending or the roll is a forced pass.
@@ -216,19 +208,10 @@ final class GameRoom private (
       if s.ended then IO.unit
       else
         val over = GameOver(GameResult.Draw, Termination.Aborted)
-        revealIfEligible(s).flatMap { (seed, seeds) =>
-          emit(
-            s.copy(pending = false, status = GameStatus.Ended(over)),
-            v => GameEvent.GameEnded(v, over, seed, seeds)
-          ).flatTap(_ => done.complete(over).attempt.void).void
-        }
-
-  /** Whether to include the dice reveal in a terminal event right now (#115): withheld for a CRN-paired game until its
-    * partner has also concluded, so neither game's secret becomes public before both are decided. An ordinary
-    * (unpaired) game's `partnerEnded` is always `IO.pure(true)`, so this reveals immediately, exactly as before.
-    */
-  private def revealIfEligible(s: Session): IO[(Option[String], Option[ClientSeeds])] =
-    partnerEnded.map(eligible => if eligible then (Some(s.dice.reveal), Some(s.clientSeedsRevealed)) else (None, None))
+        emit(
+          s.copy(pending = false, status = GameStatus.Ended(over)),
+          v => GameEvent.GameEnded(v, over, Some(s.dice.reveal), Some(s.clientSeedsRevealed))
+        ).flatTap(_ => done.complete(over).attempt.void).void
 
   private def consume: IO[Unit] =
     // No command within the deadline while a turn is pending => the player to move forfeits. The deadline is the mover's
@@ -369,8 +352,7 @@ final class GameRoom private (
       status = s.status,
       timeControl = s.timeControl,
       rated = Some(s.rated), // always written going forward; only pre-existing rows lack the key (see GameSnapshot)
-      pairingId = s.pairingId,
-      partnerGameId = s.partnerGameId,
+      ladder = Some(s.ladder),
       remainingMs = s.remaining.map((seat, left) => seat -> left.toMillis),
       lastRoll = s.lastRoll,
       turns = s.turns,
@@ -423,12 +405,10 @@ final class GameRoom private (
     else beginTurn(s)
 
   private def endGame(s: Session, over: GameOver): IO[Session] =
-    revealIfEligible(s).flatMap { (seed, seeds) =>
-      emit(
-        s.copy(pending = false, status = GameStatus.Ended(over)),
-        v => GameEvent.GameEnded(v, over, seed, seeds)
-      ).flatTap(_ => done.complete(over).attempt.void)
-    }
+    emit(
+      s.copy(pending = false, status = GameStatus.Ended(over)),
+      v => GameEvent.GameEnded(v, over, Some(s.dice.reveal), Some(s.clientSeedsRevealed))
+    ).flatTap(_ => done.complete(over).attempt.void)
 
   private def process(
       s: Session,
@@ -579,11 +559,11 @@ object GameRoom:
       // Decided once at creation (`GameRegistry.isRated`) and carried verbatim into every snapshot; never
       // recomputed mid-game.
       rated: Boolean = false,
-      // Ties two CRN mirror games together (#101). `None` outside the ladder — see GameSnapshot.pairingId.
-      pairingId: Option[String] = None,
-      // The partner game's id (#115), persisted so `GameRegistry.resume` can rebuild the reveal-eligibility check
-      // after a restart. Plain data — the live check itself is `GameRoom`'s `partnerEnded`, not part of `Session`.
-      partnerGameId: Option[String] = None,
+      // Whether the ladder scheduler started this game, as opposed to a direct challenge or a catalog game —
+      // decided once at creation, carried verbatim like `rated`. The only marker in `game_results` distinguishing
+      // a scheduler-started game, which is what keeps a casual/challenge timeout from ever tripping ladder
+      // auto-park (`RatingBatch.shouldPark`, #150).
+      ladder: Boolean = false,
       remaining: Map[Seat, FiniteDuration] = Map.empty,
       turnStartedAt: Option[FiniteDuration] = None,
       // Provably-fair dice gate: `started` flips on the first Begin; `startedAt` stamps it (to measure the seed grace);
@@ -622,18 +602,11 @@ object GameRoom:
 
     /** Public state with clocks live as of `now` (the mover's elapsed-this-turn already subtracted). The pending roll's
       * legal-move tree rides along inline unless it exceeds `maxInlinePaths` (then `GET /games/{id}/moves`).
-      *
-      * `revealEligible` (#115) is the caller's already-resolved answer to "may the dice secret be shown yet" — for an
-      * unpaired game this is always `true` (immediate reveal, unchanged); for a CRN-paired game it's `false` until the
-      * partner has also ended. Kept as a plain `Boolean` parameter (not looked up here) so `publicAt` itself stays a
-      * pure function of `Session` — the caller (`GameRoom`) is the one with an `IO` to consult the partner room.
       */
-    def publicAt(now: FiniteDuration, maxInlinePaths: Int, revealEligible: Boolean): PublicGameState =
-      // Reveal the seeds only once the game is over AND (no partner, or the partner has also concluded);
-      // secret while active, and secret while ended-but-pending-partner too.
+    def publicAt(now: FiniteDuration, maxInlinePaths: Int): PublicGameState =
       val (revealed, seeds) = status match
-        case GameStatus.Ended(_) if revealEligible => (Some(dice.reveal), Some(clientSeedsRevealed))
-        case _                                     => (None, None)
+        case GameStatus.Ended(_) => (Some(dice.reveal), Some(clientSeedsRevealed))
+        case _                   => (None, None)
       PublicGameState(
         version,
         EngineOps.serialize(state),
@@ -663,20 +636,11 @@ object GameRoom:
       // Whether this game should count toward rating — decided by the caller (see `GameRegistry.isRated`) before
       // the room exists; the room itself never judges anonymity, it just carries the flag into every snapshot.
       rated: Boolean = false,
-      // Ties this room to its CRN mirror (#101) — see `Session.pairingId`. `None` outside the ladder.
-      pairingId: Option[String] = None,
-      // The partner game's id (#115), persisted for `GameRegistry.resume` — see `Session.partnerGameId`.
-      partnerGameId: Option[String] = None,
-      // Fixed per-seat dice-seed entropy, set at creation instead of arriving via `SubmitSeed` (#101's mirrored
-      // pairs need the SAME (white, black) seed pair in both games regardless of which bot sits in which seat — a
-      // per-player seed would change the dice on a colour swap). Empty for an ordinary game: seats fill in their own
-      // seed the normal way, through the gate below.
-      presetClientSeeds: Map[Seat, String] = Map.empty,
+      // Whether the ladder scheduler is starting this game — see `Session.ladder`. `false` outside the ladder.
+      ladder: Boolean = false,
       seedGrace: FiniteDuration = DefaultSeedGrace,
       maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
-      persist: GameSnapshot => IO[Unit] = _ => IO.unit,
-      // "May I reveal my dice secret yet?" (#115) — see the `GameRoom` constructor field of the same name.
-      partnerEnded: IO[Boolean] = IO.pure(true)
+      persist: GameSnapshot => IO[Unit] = _ => IO.unit
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(initialDfen) match
       case Left(error)   => IO.pure(Left(error))
@@ -693,9 +657,7 @@ object GameRoom:
             GameStatus.Active,
             timeControl,
             rated = rated,
-            pairingId = pairingId,
-            partnerGameId = partnerGameId,
-            clientSeeds = presetClientSeeds,
+            ladder = ladder,
             remaining = initialRemaining(timeControl, players.keys),
             createdAtEpochMs = Some(createdAt.toMillis)
           )
@@ -708,8 +670,7 @@ object GameRoom:
             disconnectGrace,
             seedGrace,
             maxInlinePaths,
-            persist,
-            partnerEnded
+            persist
           )
           // The creation row must be durable before anyone plays: the seat tokens and the dice commitment have been
           // handed out, so a restart in the first seconds must not lose them.
@@ -730,10 +691,7 @@ object GameRoom:
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
       seedGrace: FiniteDuration = DefaultSeedGrace,
       maxInlinePaths: Int = DefaultMaxInlineTurnPaths,
-      persist: GameSnapshot => IO[Unit] = _ => IO.unit,
-      // "May I reveal my dice secret yet?" (#115) — the caller rebuilds this from `snapshot.partnerGameId` (the
-      // in-memory closure from before the restart is gone). `IO.pure(true)` for an unpaired game, as always.
-      partnerEnded: IO[Boolean] = IO.pure(true)
+      persist: GameSnapshot => IO[Unit] = _ => IO.unit
   ): IO[Either[String, GameRoom]] =
     EngineOps.parse(snapshot.dfen) match
       case Left(error)   => IO.pure(Left(s"corrupt snapshot dfen: $error"))
@@ -754,8 +712,7 @@ object GameRoom:
             // A pre-existing row from before this field existed has no key at all (see GameSnapshot.rated) —
             // resolve that to unrated, exactly like createdAtEpochMs's own absent-key story.
             rated = snapshot.rated.getOrElse(false),
-            pairingId = snapshot.pairingId,
-            partnerGameId = snapshot.partnerGameId,
+            ladder = snapshot.ladder.getOrElse(false),
             remaining = snapshot.remainingMs.map((seat, ms) => seat -> FiniteDuration(ms, "milliseconds")),
             // A pending turn's clock restarts NOW: monotonic time is process-scoped, so the pre-crash start is
             // meaningless — but leaving it unset would let `debit` charge zero for the whole post-restart turn.
@@ -777,8 +734,7 @@ object GameRoom:
             disconnectGrace,
             seedGrace,
             maxInlinePaths,
-            persist,
-            partnerEnded
+            persist
           )
             .flatTap(_.supervisedConsume.start)
             .map(Right(_))
@@ -792,8 +748,7 @@ object GameRoom:
       disconnectGrace: FiniteDuration,
       seedGrace: FiniteDuration,
       maxInlinePaths: Int,
-      persist: GameSnapshot => IO[Unit],
-      partnerEnded: IO[Boolean]
+      persist: GameSnapshot => IO[Unit]
   ): IO[GameRoom] =
     for
       ref         <- Ref.of[IO, Session](session0)
@@ -817,8 +772,7 @@ object GameRoom:
       disconnectGrace,
       seedGrace,
       maxInlinePaths,
-      persist,
-      partnerEnded
+      persist
     )
 
   /** Starting clocks for a timed control: both seats get the initial bank (SuddenDeath/Fischer). PerMove keeps no bank

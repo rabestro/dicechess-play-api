@@ -36,7 +36,7 @@ description = "🧪 Execute the MUnit test suite"
 run = "sbt test"
 
 [tasks."ladder:report"]
-description = "🏆 Print the E.1 strength report (SPRT on CRN pairs + Bradley-Terry pool) — needs PLAY_DB_URL, read-only"
+description = "🏆 Print the E.1 strength report (pairwise SPRT + Bradley-Terry pool) — needs PLAY_DB_URL, read-only"
 run = 'sbt "runMain dicechess.play.rating.LadderReportMain"'
 
 [tasks."archive:backfill"]

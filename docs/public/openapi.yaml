@@ -118,7 +118,7 @@ paths:
       summary: Join the rating ladder
       description: >
         Opts a registered bot into the server-paired rating ladder. Passive: the server starts
-        server-chosen mirror-pair games on its own. Registered bots only.
+        server-chosen games on its own. Registered bots only.
       responses:
         '200':
           description: Ladder membership state.
@@ -363,8 +363,8 @@ paths:
       summary: Get a game snapshot (public)
       description: >
         The polling read of a single game — the same state object the game stream sends on
-        connect. Also where a withheld dice reveal (mirror-pair games) becomes available once both
-        games of the pair conclude.
+        connect. The dice reveal appears here the instant the game ends, exactly as on the live
+        stream.
       security: []
       parameters: [{ $ref: '#/components/parameters/GameId' }]
       responses:
@@ -395,9 +395,9 @@ paths:
       description: >
         The full replay of a FINISHED game — every turn's dice and moves, plus the dice-fairness reveal —
         independent of whether the live room has been evicted from memory. `fairness.commit` is always
-        present; `seed`/`clientSeeds` are null until the game is reveal-eligible (immediately for an
-        ordinary game, or once a mirror-pair partner has also concluded). A fully revealed response is
-        cached as immutable forever; a withheld one only briefly.
+        present, and `seed`/`clientSeeds` are populated immediately: every game recorded here has
+        already finished, so nothing is ever withheld. The response is cached as immutable forever,
+        since a finished game's history can never change again.
       security: []
       parameters: [{ $ref: '#/components/parameters/GameId' }]
       responses:
@@ -450,8 +450,8 @@ paths:
       tags: [Strength]
       summary: Strength report (public)
       description: >
-        The whole cached report: every pairwise SPRT verdict on CRN mirror pairs, plus the Bradley-Terry
-        pool ranking. Refreshed on the rating batch's own cadence, not per request — see
+        The whole cached report: every pairwise SPRT verdict, plus the Bradley-Terry pool ranking.
+        Refreshed on the rating batch's own cadence, not per request — see
         [Rating & Ladder](https://bots.jc.id.lv/rating/) for why this exists alongside Glicko.
       security: []
       responses:
@@ -791,7 +791,7 @@ components:
         timeControl: { $ref: '#/components/schemas/TimeControl' }
         clocks: { $ref: '#/components/schemas/Clocks' }
         commit: { type: string, description: SHA-256 of the server seed (the dice commitment). }
-        seed: { type: [string, 'null'], description: Revealed server seed after the game ends (null until then; withheld for a pending mirror pair). }
+        seed: { type: [string, 'null'], description: Revealed server seed after the game ends (null until then; nothing is withheld once it has). }
         clientSeeds: { type: [object, 'null'], description: The two revealed client seeds, or null. }
         legalMoves:
           anyOf: [{ $ref: '#/components/schemas/MoveTree' }, { type: 'null' }]
@@ -838,8 +838,9 @@ components:
     HistoryFairness:
       type: object
       description: >
-        The dice-fairness reveal (#115). commit is always present. seed/clientSeeds are null until the game
-        is reveal-eligible — see GameHistory's own description.
+        The dice-fairness reveal. Every game in the archive has already finished, so all three fields are
+        populated here — the nullable types are kept for wire compatibility, not because a finished history
+        ever withholds them. (Active-state nullability is PublicGameState's story, not this one.)
       properties:
         commit: { type: [string, 'null'] }
         seed: { type: [string, 'null'] }

@@ -86,7 +86,7 @@ Shipped and running in production:
 - **Analytics hand-off** — finished games flow to
   [`dicechess-analytics`](https://github.com/rabestro/dicechess-analytics) via a transactional
   outbox.
-- **Rating ladder** — a continuously-paired, mirrored-dice scheduler with Glicko-2 ratings, a
+- **Rating ladder** — a continuously-paired matchmaking scheduler with Glicko-2 ratings, a
   public [leaderboard](https://play.jc.id.lv/leaderboard), and per-bot profiles. Opt-in via
   `LADDER_INTERVAL_SECONDS`/`RATING_INTERVAL_SECONDS` — see [Running](#running).
 - **Open seek lobby** — bots and humans meet and start games.
@@ -113,9 +113,9 @@ By default `sbt run` starts fully in-memory: no database, no analytics, no ladde
 for local development, and a restart drops live games. Every persistent or outbound feature
 is **opt-in via env vars** (`PLAY_DB_URL` for durability, `INGEST_URL`/`INGEST_TOKEN` for
 analytics, `PLAY_BOT_TOKENS` for static bots, `LADDER_INTERVAL_SECONDS` (plus optional
-`LADDER_MAX_CONCURRENT_PAIRS`, default `4`) for automatic ladder pairing,
+`LADDER_MAX_CONCURRENT_GAMES`, default `8`) for automatic ladder pairing,
 `RATING_INTERVAL_SECONDS` (plus optional `RATING_BATCH_SIZE`, default `100`, and
-`LADDER_TIMEOUT_PARK_PAIRS`, default `2`) for Glicko-2 updates and ladder auto-park,
+`LADDER_TIMEOUT_PARK_GAMES`, default `4`) for Glicko-2 updates and ladder auto-park,
 `WEBHOOK_TIMEOUT_SECONDS` for bot webhook push, `PLAY_OPEN_TO_HUMANS` for the human-catalog
 roster) — see the deploy section below. Leaving any of these unset disables that one feature
 silently: the server still boots clean and `/health` still returns 200, it just never does

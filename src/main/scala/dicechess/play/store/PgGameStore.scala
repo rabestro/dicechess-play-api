@@ -73,9 +73,9 @@ final class PgGameStore private (xa: Transactor[IO])
       case Some(fg) =>
         sql"""INSERT INTO play.game_results
                 (game_id, white_external_id, black_external_id, result, termination, rated, time_control,
-                 server_seed, pairing_id)
+                 server_seed, ladder)
               VALUES (${id.value}::uuid, ${fg.whiteExternalId}, ${fg.blackExternalId}, ${fg.result},
-                      ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.pairingId}::uuid)
+                      ${fg.termination}, ${fg.rated}, ${fg.timeControl}, ${fg.serverSeed}, ${fg.ladder})
               ON CONFLICT (game_id) DO NOTHING""".update.run.void
     val archive = GameArchive.payload(snapshot) match
       case None          => ().pure[ConnectionIO]
@@ -394,14 +394,14 @@ final class PgGameStore private (xa: Transactor[IO])
     */
   def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
     sql"""(SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                  server_seed, pairing_id::text, finished_at
+                  server_seed, pairing_id::text, ladder, finished_at
            FROM play.game_results
            WHERE white_external_id = $externalId
            ORDER BY finished_at DESC
            LIMIT $limit)
           UNION
           (SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                  server_seed, pairing_id::text, finished_at
+                  server_seed, pairing_id::text, ladder, finished_at
            FROM play.game_results
            WHERE black_external_id = $externalId
            ORDER BY finished_at DESC
@@ -416,7 +416,7 @@ final class PgGameStore private (xa: Transactor[IO])
 
   def finishedRatedSince(since: Instant): IO[List[GameResultRow]] =
     sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                 server_seed, pairing_id::text, finished_at
+                 server_seed, pairing_id::text, ladder, finished_at
           FROM play.game_results
           WHERE rated = true AND finished_at > $since
           ORDER BY finished_at ASC"""
@@ -425,24 +425,6 @@ final class PgGameStore private (xa: Transactor[IO])
       .transact(xa)
       .timeout(SaveTimeout)
       .map(_.map(PgGameStore.toRow))
-
-  /** `None` for a malformed `pairingId` short-circuits to an empty result without touching the database: the `::uuid`
-    * cast below would otherwise raise a Postgres error (22P02) instead of "found nothing", and a caller with a
-    * genuinely-minted pairing id (this method's only realistic caller today) never hits this path anyway.
-    */
-  def pairFor(pairingId: String): IO[List[GameResultRow]] =
-    scala.util.Try(java.util.UUID.fromString(pairingId)).toOption match
-      case None    => IO.pure(Nil)
-      case Some(_) =>
-        sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                     server_seed, pairing_id::text, finished_at
-              FROM play.game_results
-              WHERE pairing_id = ${pairingId}::uuid"""
-          .query[PgGameStore.ResultTuple]
-          .to[List]
-          .transact(xa)
-          .timeout(SaveTimeout)
-          .map(_.map(PgGameStore.toRow))
 
   /** One side's `WHERE` clause: the participant match plus whichever optional filters are present, folded from a list
     * rather than built with always-present `col IS NULL OR ...` guards — the latter risks the planner falling back to a
@@ -470,7 +452,7 @@ final class PgGameStore private (xa: Transactor[IO])
     ).flatten
     val where = predicates.reduce(_ ++ fr" AND " ++ _)
     fr"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                server_seed, pairing_id::text, finished_at
+                server_seed, pairing_id::text, ladder, finished_at
          FROM play.game_results
          WHERE""" ++ where ++ fr"ORDER BY finished_at DESC LIMIT $fetchLimit"
 
@@ -558,7 +540,7 @@ final class PgGameStore private (xa: Transactor[IO])
 
   def unappliedRatedGames(limit: Int): IO[List[GameResultRow]] =
     sql"""SELECT game_id::text, white_external_id, black_external_id, result, termination, rated, time_control,
-                 server_seed, pairing_id::text, finished_at
+                 server_seed, pairing_id::text, ladder, finished_at
           FROM play.game_results
           WHERE rated = true AND rating_applied_at IS NULL
           ORDER BY finished_at ASC
@@ -659,7 +641,7 @@ object PgGameStore:
       rated: Boolean,
       timeControl: String,
       serverSeed: String,
-      pairingId: Option[String]
+      ladder: Boolean
   )
 
   /** `None` while the game is still active (or, for an ended snapshot, if `players` is unexpectedly missing a seat —
@@ -684,7 +666,7 @@ object PgGameStore:
             rated = !aborted && snapshot.rated.getOrElse(false),
             timeControl = snapshot.timeControl.toString,
             serverSeed = snapshot.serverSeed,
-            pairingId = snapshot.pairingId
+            ladder = snapshot.ladder.getOrElse(false)
           )
         }
 
@@ -711,10 +693,10 @@ object PgGameStore:
                 Left(s"ended but missing a player seat (${snapshot.players.keySet}) — investigate")
 
   private type ResultTuple =
-    (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Instant)
+    (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Boolean, Instant)
 
   private def toRow(t: ResultTuple): GameResultRow =
-    val (gameId, white, black, result, termination, rated, timeControl, serverSeed, pairingId, finishedAt) = t
+    val (gameId, white, black, result, termination, rated, timeControl, serverSeed, pairingId, ladder, finishedAt) = t
     GameResultRow(
       GameId(gameId),
       white,
@@ -725,6 +707,7 @@ object PgGameStore:
       timeControl,
       serverSeed,
       pairingId,
+      ladder,
       finishedAt
     )
 

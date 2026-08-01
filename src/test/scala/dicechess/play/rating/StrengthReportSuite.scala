@@ -33,6 +33,7 @@ class StrengthReportSuite extends munit.FunSuite:
       "Fischer(300,3)",
       "ab",
       pairingId,
+      false,
       at
     )
 

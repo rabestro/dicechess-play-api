@@ -9,11 +9,16 @@ import dicechess.play.store.BotStore
 import scala.concurrent.duration.*
 
 /** Background matchmaker for the bot rating ladder (#102): on an interval, randomly selects two on-ladder bots and
-  * starts a CRN mirrored pair (`GameRegistry.createMirroredPair`, #101) between them, up to a concurrency cap. Pairings
-  * are **server-chosen only** — a bot cannot pick its opponent, so an owner can't farm rating with two colluding bots.
-  * MVP policy: uniform-random subject to a one-step anti-repeat (don't immediately re-pick the pair just started,
-  * unless it's the only pair available); rating-aware pairing (prefer close ratings / high RD) is a future refinement,
-  * not required for the ladder to start producing results.
+  * starts one rated game between them, up to a concurrency cap. Pairings are **server-chosen only** — a bot cannot pick
+  * its opponent, so an owner can't farm rating with two colluding bots. MVP policy: uniform-random subject to a
+  * one-step anti-repeat (don't immediately re-pick the pair just started, unless it's the only pair available);
+  * rating-aware pairing (prefer close ratings / high RD) is a future refinement, not required for the ladder to start
+  * producing results.
+  *
+  * Colour balance across a matchup is a scheduling property, not a by-product of one call spawning two games (#190
+  * dropped that CRN mirroring — see the issue for why): the anti-repeat state already tracks each bot's most recent
+  * opponent, so alternating colours over successive picks is a natural extension if it's ever worth adding; today each
+  * tick starts exactly one game with whichever seats `GameRegistry.create` assigns.
   */
 final class LadderScheduler private (
     botStore: BotStore,
@@ -24,13 +29,13 @@ final class LadderScheduler private (
     config: LadderScheduler.Config
 ):
 
-  /** One scheduling tick: if under the concurrency cap and at least two bots are on the ladder, start one mirrored
-    * pair. A no-op — not an error — when there's nothing to do yet, whether too few bots are on the ladder or the cap
-    * is already spent.
+  /** One scheduling tick: if under the concurrency cap and at least two bots are on the ladder, start one game. A no-op
+    * — not an error — when there's nothing to do yet, whether too few bots are on the ladder or the cap is already
+    * spent.
     */
   def tick: IO[Unit] =
     inFlight.get.flatMap: running =>
-      if running >= config.maxConcurrentPairs then IO.unit
+      if running >= config.maxConcurrentGames then IO.unit
       else
         botStore.onLadderBots.flatMap: pool =>
           pickPair(pool).flatMap:
@@ -52,32 +57,28 @@ final class LadderScheduler private (
 
   private def startPair(botA: Principal.Bot, botB: Principal.Bot): IO[Unit] =
     registry
-      .createMirroredPair(botA, botB, config.timeControl)
+      .create(botA, botB, config.timeControl, requestedRated = true, ladder = true)
       .flatMap:
-        case Left(error) => Console[IO].errorln(s"[play][ladder] pairing failed: $error")
-        case Right(pair) =>
+        case Left(error)    => Console[IO].errorln(s"[play][ladder] pairing failed: $error")
+        case Right((id, _)) =>
           // lastPairedWith is updated synchronously, before this method (hence tick) returns: the very next tick's
           // anti-repeat check depends on seeing this pairing immediately, not whenever a forked fiber happens to be
           // scheduled. An earlier version of the #117 inFlight-leak fix moved this update into the forked block
           // below (to close a different gap), which raced it against the next tick and silently broke anti-repeat
-          // — caught by a dedicated regression test. Only notifyBoth/awaitBothEnded — the parts that can genuinely
-          // take a while or, for notifyBoth, throw — are forked and guaranteed.
+          // — caught by a dedicated regression test. Only notifyBoth/awaitEnded — the parts that can genuinely take
+          // a while or, for notifyBoth, throw — are forked and guaranteed.
           lastPairedWith.update(current => current + (botA -> botB) + (botB -> botA)) *>
             inFlight.update(_ + 1) *>
-            (notifyBoth(botA, botB, pair) *> awaitBothEnded(pair))
+            (notifyBoth(botA, botB, id) *> awaitEnded(id))
               .guarantee(inFlight.update(_ - 1))
               .start
               .void
 
-  /** Push `gameStart` for both games of the pair to both bots — same advisory-push idiom as `Challenges.accept` — so a
-    * listening bot learns immediately; a poll-only bot still discovers both games via `GET /bot/games`.
+  /** Push `gameStart` to both bots — same advisory-push idiom as `Challenges.accept` — so a listening bot learns
+    * immediately; a poll-only bot still discovers the game via `GET /bot/games`.
     */
-  private def notifyBoth(botA: Principal.Bot, botB: Principal.Bot, pair: GameRegistry.MirroredPair): IO[Unit] =
-    val started = List(BotEvent.GameStart(pair.gameAWhite.value), BotEvent.GameStart(pair.gameBWhite.value))
-    List(botA, botB).traverse_(bot => started.traverse_(events.publish(bot, _)))
-
-  private def awaitBothEnded(pair: GameRegistry.MirroredPair): IO[Unit] =
-    (awaitEnded(pair.gameAWhite), awaitEnded(pair.gameBWhite)).parTupled.void
+  private def notifyBoth(botA: Principal.Bot, botB: Principal.Bot, id: GameId): IO[Unit] =
+    List(botA, botB).traverse_(events.publish(_, BotEvent.GameStart(id.value)))
 
   private def awaitEnded(id: GameId): IO[Unit] =
     registry
@@ -94,17 +95,19 @@ final class LadderScheduler private (
 
 object LadderScheduler:
 
-  /** `interval` between ticks; `maxConcurrentPairs` bounds simultaneously in-flight mirrored pairs; `timeControl` is
-    * used for every scheduler-started game — **`Fischer`, not `Unlimited`/`PerMove`**, which are being removed from the
-    * client (`rabestro/dicechess-play#99`) and would leave a ladder game with no clock enforcement.
+  /** `interval` between ticks; `maxConcurrentGames` bounds simultaneously in-flight scheduler-started games;
+    * `timeControl` is used for every scheduler-started game — **`Fischer`, not `Unlimited`/`PerMove`**, which are being
+    * removed from the client (`rabestro/dicechess-play#99`) and would leave a ladder game with no clock enforcement.
     */
-  final case class Config(interval: FiniteDuration, maxConcurrentPairs: Int, timeControl: TimeControl)
+  final case class Config(interval: FiniteDuration, maxConcurrentGames: Int, timeControl: TimeControl)
 
   object Config:
     val DefaultInterval: FiniteDuration = 60.seconds
-    val DefaultMaxConcurrentPairs: Int  = 4
+    // Matches the real capacity the previous `maxConcurrentPairs=4` (2 games per pair) produced (#190) — chosen so a
+    // deployment that hasn't yet renamed its env var keeps today's actual throughput unchanged, not halved.
+    val DefaultMaxConcurrentGames: Int  = 8
     val DefaultTimeControl: TimeControl = TimeControl.Fischer(300, 3)
-    val Default: Config                 = Config(DefaultInterval, DefaultMaxConcurrentPairs, DefaultTimeControl)
+    val Default: Config                 = Config(DefaultInterval, DefaultMaxConcurrentGames, DefaultTimeControl)
 
     /** Parse from explicit optional raw values (also used by tests — same split as `BotAuth.fromSpec`/`fromEnv`). Both
       * are filtered to strictly positive: a non-positive interval makes `IO.sleep` resolve immediately, busy-spinning
@@ -113,17 +116,21 @@ object LadderScheduler:
       * through to `None` (scheduler not built at all); an invalid cap falls back to the default instead, since it's a
       * secondary tuning knob rather than the feature's own on/off switch.
       */
-    def fromValues(intervalSecondsRaw: Option[String], maxConcurrentPairsRaw: Option[String]): Option[Config] =
+    def fromValues(intervalSecondsRaw: Option[String], maxConcurrentGamesRaw: Option[String]): Option[Config] =
       intervalSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map { seconds =>
-        val cap = maxConcurrentPairsRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultMaxConcurrentPairs)
+        val cap = maxConcurrentGamesRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultMaxConcurrentGames)
         Config(seconds.seconds, cap, DefaultTimeControl)
       }
 
   /** Opt-in by env, same "absence disables" idiom as `PgGameStore.configFromEnv`/`IngestDeliverer.configFromEnv`: with
     * `LADDER_INTERVAL_SECONDS` unset, the scheduler is never built and no ladder games start automatically.
+    *
+    * `LADDER_MAX_CONCURRENT_GAMES` (#190) replaces `LADDER_MAX_CONCURRENT_PAIRS`, which counted CRN mirror pairs (2
+    * games each) — a deployment carrying the old var name over unchanged simply falls back to
+    * `DefaultMaxConcurrentGames`, sized to match what that deployment's configured pair count actually produced.
     */
   def configFromEnv: Option[Config] =
-    Config.fromValues(sys.env.get("LADDER_INTERVAL_SECONDS"), sys.env.get("LADDER_MAX_CONCURRENT_PAIRS"))
+    Config.fromValues(sys.env.get("LADDER_INTERVAL_SECONDS"), sys.env.get("LADDER_MAX_CONCURRENT_GAMES"))
 
   def create(
       botStore: BotStore,

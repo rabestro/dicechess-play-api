@@ -24,13 +24,13 @@ import scala.concurrent.duration.*
   * missing result, self-play — are logged and stamped applied anyway: left unstamped they would sit at the head of the
   * queue forever.
   *
-  * '''Ladder auto-park (#150)''' rides along here. A bot whose last `ladderTimeoutParkPairs` mirrored pairings were all
-  * lost on the clock is opted out of the ladder — `on_ladder = false`, exactly what `POST /bot/ladder/leave` writes —
-  * which stops a dead bot bleeding rating all night AND stops every opponent it is paired with banking free timeout
-  * wins. The check lives in the batch rather than in `LadderScheduler` because the batch already visits every finished
-  * rated game exactly once: it costs one extra bounded query on the rare timeout loss and nothing at all otherwise.
-  * There is deliberately no auto-rejoin — returning is an explicit `POST /bot/ladder/join` by the owner, since an
-  * automatic cooldown would just send a still-offline bot back out to bleed again.
+  * '''Ladder auto-park (#150)''' rides along here. A bot whose last `ladderTimeoutParkGames` ladder games were all lost
+  * on the clock is opted out of the ladder — `on_ladder = false`, exactly what `POST /bot/ladder/leave` writes — which
+  * stops a dead bot bleeding rating all night AND stops every opponent it is paired with banking free timeout wins. The
+  * check lives in the batch rather than in `LadderScheduler` because the batch already visits every finished rated game
+  * exactly once: it costs one extra bounded query on the rare timeout loss and nothing at all otherwise. There is
+  * deliberately no auto-rejoin — returning is an explicit `POST /bot/ladder/join` by the owner, since an automatic
+  * cooldown would just send a still-offline bot back out to bleed again.
   *
   * The park write is a separate transaction from the rating write it follows, so a crash between them leaves a rating
   * applied and the bot still on the ladder. That is deliberately not worth a shared transaction: the streak is
@@ -115,10 +115,10 @@ final class RatingBatch(
     *
     * Two cheap guards keep the history query off the hot path. Only the loser of a `timeout` game can start or extend a
     * streak, so every other outcome returns without touching the database. And a bot already off the ladder is skipped:
-    * without that guard, the whole backlog a night of downtime produces — a game a minute, both mirror games of every
-    * pairing — would re-park an already-parked bot once per game, each with its own UPDATE and its own log line,
-    * drowning the one line that carries information. `onLadder` is the value `applyGame` read before the rating write;
-    * that write never touches `on_ladder`, so it cannot be stale here.
+    * without that guard, the whole backlog a night of downtime produces — roughly a game a minute — would re-park an
+    * already-parked bot once per game, each with its own UPDATE and its own log line, drowning the one line that
+    * carries information. `onLadder` is the value `applyGame` read before the rating write; that write never touches
+    * `on_ladder`, so it cannot be stale here.
     */
   private def parkIfStreakReached(bot: Principal.Bot, row: GameResultRow, onLadder: Boolean): IO[Unit] =
     if !onLadder || !RatingBatch.isTimeoutLossFor(row, bot) then IO.unit
@@ -135,16 +135,16 @@ final class RatingBatch(
     */
   private def evaluateStreak(bot: Principal.Bot): IO[Unit] =
     resultsStore
-      .recentResultsFor(bot.externalId, RatingBatch.parkScanLimit(config.ladderTimeoutParkPairs))
+      .recentResultsFor(bot.externalId, RatingBatch.parkScanLimit(config.ladderTimeoutParkGames))
       .flatMap: recent =>
-        park(bot).whenA(RatingBatch.shouldPark(recent, bot, config.ladderTimeoutParkPairs))
+        park(bot).whenA(RatingBatch.shouldPark(recent, bot, config.ladderTimeoutParkGames))
 
   private def park(bot: Principal.Bot): IO[Unit] =
     botStore.setOnLadder(bot.team, bot.name, onLadder = false).flatMap {
       case Some(_) =>
         Console[IO].errorln(
           s"[play][rating] auto-parked ${bot.team}/${bot.name} off the ladder: " +
-            s"${config.ladderTimeoutParkPairs} consecutive fully-timed-out pairings"
+            s"${config.ladderTimeoutParkGames} consecutive fully-timed-out ladder games"
         )
       // Unreachable through `applyGame`, which already required `ratingOf` to find both participants — kept because a
       // future caller without that precondition should get a loud line, not a silent no-op.
@@ -177,84 +177,77 @@ object RatingBatch:
   /** The park rule of #150 as a pure function of `recent` (a bot's newest-first results) — the streak logic is worth
     * testing without a database, and this is the whole of it.
     *
-    * Counted by mirrored PAIRING, not by raw game: an offline bot flags both games of a pair within seconds of each
-    * other, so a two-GAME threshold would really be one pairing and would trip on a single transient blip. Only ladder
-    * games carry a `pairingId`, which is also what keeps a casual or challenge timeout from ever parking anyone. A
-    * pairing with only one result recorded so far is not yet evidence either way and is skipped — that merely defers
-    * the decision to the game that completes it.
+    * Counted by ladder GAME (#190), not by CRN mirror pairing as originally shipped — `ladder` (set by
+    * `GameRegistry.create`/`LadderScheduler.startPair`) is what keeps a casual or challenge timeout from ever parking
+    * anyone; it replaced `pairingId.isDefined`, the marker CRN pairing happened to also serve as, once pairing itself
+    * was dropped. `recent` is already newest-first (`GameResultsStore.recentResultsFor`), and `filter` preserves that
+    * order, so no re-sort is needed the way grouping by pairing id used to require.
     */
-  private[rating] def shouldPark(recent: List[GameResultRow], bot: Principal.Bot, parkPairs: Int): Boolean =
-    val newestFirst = recent
-      .filter(_.pairingId.isDefined)
-      .groupBy(_.pairingId)
-      .collect { case (Some(_), games) if games.sizeIs == 2 => games }
-      .toList
-      // The game id breaks `finished_at` ties deterministically. Both are needed: the two mirror games of one pairing
-      // finish within seconds, so equal timestamps are realistic, and the grouping above went through a Map, which
-      // leaves the pre-sort order as hash order — a stable sort alone would make the answer depend on it.
-      .sortBy(pairing => (pairing.map(_.finishedAt).max, pairing.map(_.gameId.value).max))(using
-        Ordering[(Instant, String)].reverse
-      )
-      .take(parkPairs)
-    // Size first, and load-bearing: `forall` on a shorter list is vacuously true, so a bot with only one pairing to its
-    // name would otherwise be parked by a threshold of two.
-    newestFirst.sizeIs == parkPairs && newestFirst.forall(_.forall(isTimeoutLossFor(_, bot)))
+  private[rating] def shouldPark(recent: List[GameResultRow], bot: Principal.Bot, parkGames: Int): Boolean =
+    val ladderGames = recent.filter(_.ladder).take(parkGames)
+    // Size first, and load-bearing: `forall` on a shorter list is vacuously true, so a bot with fewer than
+    // `parkGames` ladder games to its name would otherwise be parked by a threshold it hasn't even reached.
+    ladderGames.sizeIs == parkGames && ladderGames.forall(isTimeoutLossFor(_, bot))
 
   /** How much history one park check reads. Bounded on purpose: it runs per applied timeout loss, and an on-ladder bot
-    * accrues games at roughly a pairing a minute, so an unbounded scan grows without limit — precisely what
+    * accrues games at roughly one a minute, so an unbounded scan grows without limit — precisely what
     * `recentResultsFor`'s default page size exists to prevent, and what its `UNION` of two `LIMIT`ed index scans is
     * built around.
     *
-    * Generous rather than tight, because casual and challenge games share this history and dilute it: `parkPairs * 2`
-    * is the exact ladder-only need, and any bound near it would silently stop parking as soon as a bot mixed in a few
-    * non-ladder games. Erring wide is safe in one direction only, which is the useful one — truncation drops the OLDEST
-    * games while the rule reads the NEWEST pairings, so a too-small window can only ever defer a park to the next
+    * Generous rather than tight, because casual and challenge games share this history and dilute it: `parkGames`
+    * itself is the exact ladder-only need, and any bound near it would silently stop parking as soon as a bot mixed in
+    * a few non-ladder games. Erring wide is safe in one direction only, which is the useful one — truncation drops the
+    * OLDEST games while the rule reads the NEWEST ones, so a too-small window can only ever defer a park to the next
     * timeout loss, never cause a wrong one.
     */
-  private[rating] def parkScanLimit(parkPairs: Int): Int =
-    math.max(GameResultsStore.DefaultRecentLimit, parkPairs * 8)
+  private[rating] def parkScanLimit(parkGames: Int): Int =
+    math.max(GameResultsStore.DefaultRecentLimit, parkGames * 4)
 
   /** `interval` between queue polls; `batchSize` is the page size of one poll (the tick keeps paging until a short
-    * page, so the backlog after downtime still drains in one tick); `ladderTimeoutParkPairs` is the auto-park threshold
-    * (#150), counted in consecutive fully-timed-out mirrored pairings.
+    * page, so the backlog after downtime still drains in one tick); `ladderTimeoutParkGames` is the auto-park threshold
+    * (#150), counted in consecutive fully-timed-out ladder games.
     */
   final case class Config(
       interval: FiniteDuration,
       batchSize: Int,
-      ladderTimeoutParkPairs: Int
+      ladderTimeoutParkGames: Int
   )
 
   object Config:
-    val DefaultInterval: FiniteDuration    = 60.seconds
-    val DefaultBatchSize: Int              = 100
-    val DefaultLadderTimeoutParkPairs: Int = 2
-    val Default: Config                    = Config(DefaultInterval, DefaultBatchSize, DefaultLadderTimeoutParkPairs)
+    val DefaultInterval: FiniteDuration = 60.seconds
+    val DefaultBatchSize: Int           = 100
+    // Matches the real threshold the previous `ladderTimeoutParkPairs=2` (2 games per pairing) enforced (#190).
+    val DefaultLadderTimeoutParkGames: Int = 4
+    val Default: Config                    = Config(DefaultInterval, DefaultBatchSize, DefaultLadderTimeoutParkGames)
 
     /** Parse from explicit optional raw values (also used by tests — same split, and the same strictly-positive
       * validation, as `LadderScheduler.Config.fromValues`): a non-positive interval would busy-spin the loop, a
       * non-positive batch size would make every tick a no-op; either is treated as absent/unparseable. An invalid
-      * interval disables the batch entirely; an invalid batch size or ladder timeout park pairs falls back to the
+      * interval disables the batch entirely; an invalid batch size or ladder timeout park games falls back to the
       * default, since they are tuning knobs, not the on/off switch.
       */
     def fromValues(
         intervalSecondsRaw: Option[String],
         batchSizeRaw: Option[String],
-        ladderTimeoutParkPairsRaw: Option[String]
+        ladderTimeoutParkGamesRaw: Option[String]
     ): Option[Config] =
       intervalSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map { seconds =>
         val size      = batchSizeRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultBatchSize)
-        val parkPairs = ladderTimeoutParkPairsRaw
+        val parkGames = ladderTimeoutParkGamesRaw
           .flatMap(_.toIntOption)
           .filter(_ > 0)
-          .getOrElse(DefaultLadderTimeoutParkPairs)
-        Config(seconds.seconds, size, parkPairs)
+          .getOrElse(DefaultLadderTimeoutParkGames)
+        Config(seconds.seconds, size, parkGames)
       }
 
   /** Opt-in by env, same "absence disables" idiom as `LADDER_INTERVAL_SECONDS`: with `RATING_INTERVAL_SECONDS` unset,
     * no ratings are ever recomputed — and, since auto-park rides on this batch, no bot is ever auto-parked either.
     *
-    * `LADDER_TIMEOUT_PARK_PAIRS` is named for the feature it governs (the ladder), matching
-    * `LADDER_INTERVAL_SECONDS`/`LADDER_MAX_CONCURRENT_PAIRS`, not for the component that happens to host the check. The
+    * `LADDER_TIMEOUT_PARK_GAMES` (#190) replaces `LADDER_TIMEOUT_PARK_PAIRS`, which counted CRN mirror pairings (2
+    * games each) — a deployment carrying the old var name over unchanged simply falls back to
+    * `DefaultLadderTimeoutParkGames`, sized to match what that deployment's configured pairing count actually enforced.
+    * It is named for the feature it governs (the ladder), matching
+    * `LADDER_INTERVAL_SECONDS`/`LADDER_MAX_CONCURRENT_GAMES`, not for the component that happens to host the check. The
     * price of that choice is exactly the coupling above — a `LADDER_*` knob that does nothing without a `RATING_*` one
     * — so it is spelled out here and in AGENTS.md rather than left to be discovered on a new deployment.
     */
@@ -262,7 +255,7 @@ object RatingBatch:
     Config.fromValues(
       sys.env.get("RATING_INTERVAL_SECONDS"),
       sys.env.get("RATING_BATCH_SIZE"),
-      sys.env.get("LADDER_TIMEOUT_PARK_PAIRS")
+      sys.env.get("LADDER_TIMEOUT_PARK_GAMES")
     )
 
   /** White-POV stored result → (whiteScore, blackScore) in Glicko terms; `None` for any out-of-vocabulary value. */

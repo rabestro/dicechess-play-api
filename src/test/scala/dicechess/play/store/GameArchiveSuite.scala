@@ -11,9 +11,7 @@ class GameArchiveSuite extends munit.FunSuite:
   private def snapshot(
       status: GameStatus,
       clientSeeds: Map[Seat, String] = Map(Seat.White -> "white-seed", Seat.Black -> "black-seed"),
-      rated: Option[Boolean] = Some(true),
-      pairingId: Option[String] = Some("11111111-1111-1111-1111-111111111111"),
-      partnerGameId: Option[String] = Some("22222222-2222-2222-2222-222222222222")
+      rated: Option[Boolean] = Some(true)
   ): GameSnapshot =
     GameSnapshot(
       version = 9L,
@@ -34,9 +32,7 @@ class GameArchiveSuite extends munit.FunSuite:
         TurnRecord(2L, "b", List(2, 3, 6), Nil, "fen-2") // a forced pass: dice rolled, no legal move
       ),
       createdAtEpochMs = Some(1_782_000_000_000L),
-      rated = rated,
-      pairingId = pairingId,
-      partnerGameId = partnerGameId
+      rated = rated
     )
 
   private def ended(result: GameResult, termination: Termination) = GameStatus.Ended(GameOver(result, termination))
@@ -46,8 +42,6 @@ class GameArchiveSuite extends munit.FunSuite:
     val fields = json.getOrElse(fail("a finished game must produce a payload"))
     val c      = fields.hcursor
     assertEquals(c.get[Boolean]("rated").toOption, Some(true))
-    assertEquals(c.get[String]("pairing_id").toOption, Some("11111111-1111-1111-1111-111111111111"))
-    assertEquals(c.get[String]("partner_game_id").toOption, Some("22222222-2222-2222-2222-222222222222"))
     assertEquals(c.get[Int]("result").toOption, Some(1))
     assertEquals(c.get[String]("termination").toOption, Some("king_captured"))
     assertEquals(c.downField("players").get[String]("white").toOption, Some("guest:w-uuid"))
@@ -83,8 +77,6 @@ class GameArchiveSuite extends munit.FunSuite:
     val json    = GameArchive.payload(fixture).getOrElse(fail("a finished game must produce a payload"))
     val record  = GameArchive.decode(json).getOrElse(fail(s"decode must succeed for its own payload: $json"))
     assertEquals(record.rated, true)
-    assertEquals(record.pairingId, Some("11111111-1111-1111-1111-111111111111"))
-    assertEquals(record.partnerGameId, Some("22222222-2222-2222-2222-222222222222"))
     assertEquals(record.timeControl, TimeControl.Fischer(300, 3))
     assertEquals(record.result, 1)
     assertEquals(record.termination, "king_captured")
@@ -102,16 +94,7 @@ class GameArchiveSuite extends munit.FunSuite:
       .copy(players = Map(Seat.White -> Principal.Guest("w-uuid"))) // Black seat missing
     assertEquals(GameArchive.payload(malformed), None)
 
-  test("an unrated, unpaired game omits rated/pairing/partner correctly"):
-    val json = GameArchive.payload(
-      snapshot(
-        ended(GameResult.Win(Side.Black), Termination.Resign),
-        rated = None,
-        pairingId = None,
-        partnerGameId = None
-      )
-    )
-    val c = json.getOrElse(fail("a finished game must produce a payload")).hcursor
+  test("a snapshot with no rated key archives as rated=false"):
+    val json = GameArchive.payload(snapshot(ended(GameResult.Win(Side.Black), Termination.Resign), rated = None))
+    val c    = json.getOrElse(fail("a finished game must produce a payload")).hcursor
     assertEquals(c.get[Boolean]("rated").toOption, Some(false)) // None resolves to false, same as game_results
-    assert(c.downField("pairing_id").focus.exists(_.isNull))
-    assert(c.downField("partner_game_id").focus.exists(_.isNull))
