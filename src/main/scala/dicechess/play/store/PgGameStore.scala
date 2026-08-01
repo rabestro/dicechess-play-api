@@ -30,6 +30,7 @@ import scala.concurrent.duration.*
 final class PgGameStore private (xa: Transactor[IO])
     extends GameStore
     with OutboxStore
+    with ClientReportStore
     with BotStore
     with GameResultsStore
     with GameArchiveStore
@@ -113,6 +114,49 @@ final class PgGameStore private (xa: Transactor[IO])
           SET failed_permanently = true, attempts = attempts + 1, last_error = $error
           WHERE game_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
 
+  // ── ClientReportStore ───────────────────────────────────────────────────────
+
+  /** See [[ClientReportStore.insertClientReport]]. Same first-write-wins shape as the outbox enqueue in `save`, but the
+    * key is the report's own idempotency UUID — a browser game never has a `games` row to reference.
+    */
+  def insertClientReport(id: GameId, payload: Json): IO[Boolean] =
+    sql"""INSERT INTO play.client_reports (report_id, payload)
+          VALUES (${id.value}::uuid, $payload)
+          ON CONFLICT (report_id) DO NOTHING""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
+
+  /** See [[ClientReportStore.clientReports]] — a mirror of the OutboxStore methods above over `client_reports`, so one
+    * `IngestDeliverer` drains each queue with identical semantics.
+    */
+  val clientReports: OutboxStore = new OutboxStore:
+    def due(limit: Int): IO[List[OutboxRow]] =
+      sql"""SELECT report_id::text, payload, attempts FROM play.client_reports
+            WHERE delivered_at IS NULL AND NOT failed_permanently AND next_attempt_at <= now()
+            ORDER BY next_attempt_at
+            LIMIT $limit"""
+        .query[(String, Json, Int)]
+        .to[List]
+        .transact(xa)
+        .timeout(SaveTimeout)
+        .map(_.map((id, payload, attempts) => OutboxRow(GameId(id), payload, attempts)))
+
+    def markDelivered(gameId: GameId): IO[Unit] =
+      sql"""UPDATE play.client_reports SET delivered_at = now(), last_error = NULL
+            WHERE report_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
+
+    def markRetry(gameId: GameId, attempts: Int, retryIn: FiniteDuration, error: String): IO[Unit] =
+      sql"""UPDATE play.client_reports
+            SET attempts = $attempts, next_attempt_at = now() + make_interval(secs => ${retryIn.toSeconds.toDouble}),
+                last_error = $error
+            WHERE report_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
+
+    def markParked(gameId: GameId, error: String): IO[Unit] =
+      sql"""UPDATE play.client_reports
+            SET failed_permanently = true, attempts = attempts + 1, last_error = $error
+            WHERE report_id = ${gameId.value}::uuid""".update.run.transact(xa).void.timeout(SaveTimeout)
+
   // ── GameArchiveStore ────────────────────────────────────────────────────────
 
   def archiveFor(id: GameId): IO[Option[ArchivedGame]] =
@@ -188,6 +232,10 @@ final class PgGameStore private (xa: Transactor[IO])
     *
     * A parked outbox row (`failed_permanently`) is left alone for inspection, which by the FK also pins its snapshot —
     * the `NOT EXISTS (outbox)` guard below needs no special case for it.
+    *
+    * Delivered `client_reports` rows (#212) are pruned by the same rule as delivered outbox rows — the row has done its
+    * job — and parked ones are likewise kept for inspection. They join this transaction for the summary count only:
+    * with no FK anywhere, they have no ordering relationship with the other two deletes.
     */
   def pruneOnce(olderThan: Instant, limit: Int): IO[RetentionSweep] =
     val deleteOutbox =
@@ -198,6 +246,17 @@ final class PgGameStore private (xa: Transactor[IO])
                 AND NOT o.failed_permanently
                 AND o.delivered_at < $olderThan
               ORDER BY o.game_id
+              LIMIT $limit
+            )""".update.run
+
+    val deleteClientReports =
+      sql"""DELETE FROM play.client_reports
+            WHERE report_id IN (
+              SELECT c.report_id FROM play.client_reports c
+              WHERE c.delivered_at IS NOT NULL
+                AND NOT c.failed_permanently
+                AND c.delivered_at < $olderThan
+              ORDER BY c.report_id
               LIMIT $limit
             )""".update.run
 
@@ -229,11 +288,11 @@ final class PgGameStore private (xa: Transactor[IO])
     // Only on a batch that removed nothing — see `RetentionSweep.retainedUnarchived`. This count is a whole-table
     // aggregate with no LIMIT, and `Retention.drain` reads it exclusively from the terminal batch, so computing it on
     // every page would scan the table once per page to throw the answer away (~47 wasted scans on the first real run).
-    (deleteOutbox, deleteSnapshots)
-      .flatMapN { (outboxDeleted, snapshotsDeleted) =>
-        if outboxDeleted == 0 && snapshotsDeleted == 0 then
-          countRetained.map(RetentionSweep(outboxDeleted, snapshotsDeleted, _))
-        else RetentionSweep(outboxDeleted, snapshotsDeleted, 0).pure[ConnectionIO]
+    (deleteOutbox, deleteSnapshots, deleteClientReports)
+      .flatMapN { (outboxDeleted, snapshotsDeleted, reportsDeleted) =>
+        if outboxDeleted == 0 && snapshotsDeleted == 0 && reportsDeleted == 0 then
+          countRetained.map(RetentionSweep(outboxDeleted, snapshotsDeleted, reportsDeleted, _))
+        else RetentionSweep(outboxDeleted, snapshotsDeleted, reportsDeleted, 0).pure[ConnectionIO]
       }
       .transact(xa)
       .timeout(PgGameStore.BackfillTimeout)

@@ -27,6 +27,7 @@ Regenerate with `mise run contrib-docs:schema` after adding a migration.
 erDiagram
     bot_webhooks
     bots
+    client_reports
     game_archive
     game_results
     games
@@ -35,8 +36,10 @@ erDiagram
     games ||--o| outbox : ""
 ```
 
-Only foreign keys appear as edges. Two tables carry no foreign key on purpose —
-`game_results` and `game_archive` must outlive the snapshots they describe.
+Only foreign keys appear as edges. Three tables carry no foreign key on purpose —
+`game_results` and `game_archive` must outlive the snapshots they describe, and
+`client_reports` holds browser-submitted reports for games that never had a
+`games` row on this server (kept separate from authoritative game data by design).
 
 ## Tables
 
@@ -76,6 +79,24 @@ Indexes:
 
 - `bots_pkey` — `CREATE UNIQUE INDEX bots_pkey ON public.bots USING btree (team, name)`
 - `bots_token_hash_key` — `CREATE UNIQUE INDEX bots_token_hash_key ON public.bots USING btree (token_hash)`
+
+### `client_reports`
+
+| Column | Type | Null | Default | Key |
+| --- | --- | --- | --- | --- |
+| `report_id` | `uuid` | no | — | PK |
+| `payload` | `jsonb` | no | — | — |
+| `attempts` | `integer` | no | `0` | — |
+| `next_attempt_at` | `timestamp with time zone` | no | `now()` | — |
+| `failed_permanently` | `boolean` | no | `false` | — |
+| `last_error` | `text` | yes | — | — |
+| `created_at` | `timestamp with time zone` | no | `now()` | — |
+| `delivered_at` | `timestamp with time zone` | yes | — | — |
+
+Indexes:
+
+- `client_reports_due_idx` — `CREATE INDEX client_reports_due_idx ON public.client_reports USING btree (next_attempt_at) WHERE ((delivered_at IS NULL) AND (NOT failed_permanently))`
+- `client_reports_pkey` — `CREATE UNIQUE INDEX client_reports_pkey ON public.client_reports USING btree (report_id)`
 
 ### `game_archive`
 

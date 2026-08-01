@@ -15,6 +15,7 @@ import dicechess.play.server.{
   GameRegistry,
   HealthRoutes,
   HistoryRoutes,
+  IngestRoutes,
   LadderScheduler,
   LeaderboardRoutes,
   Lobby,
@@ -32,6 +33,8 @@ import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
+
+import scala.concurrent.duration.*
 
 /** Boots the authoritative HTTP/WebSocket server. */
 object Main extends IOApp.Simple:
@@ -72,9 +75,18 @@ object Main extends IOApp.Simple:
               case None =>
                 cats.effect.std
                   .Console[IO]
-                  .errorln("[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games accumulate in the outbox")
+                  .errorln(
+                    "[play][ingest] INGEST_URL/INGEST_TOKEN unset: finished games and browser reports accumulate " +
+                      "in the outbox/client_reports queues"
+                  )
                   *> IO.never
-              case Some(ingestConfig) => IngestDeliverer(store, http, ingestConfig).loop.void
+              case Some(ingestConfig) =>
+                // Two queues, one deliverer each (#212): the first-party outbox and the browser-submitted
+                // client_reports drain in parallel with identical retry/parking semantics.
+                (
+                  IngestDeliverer(store, http, ingestConfig).loop.void,
+                  IngestDeliverer(store.clientReports, http, ingestConfig).loop.void
+                ).parTupled.void
             (store, store, Some(store), http, deliverer)
           }
     }
@@ -153,6 +165,9 @@ object Main extends IOApp.Simple:
       // Starting a catalog game (E4) is a heavier action than a mere wake ping, but playing several bot games in an
       // hour is completely normal usage — the same generous budget, not the strict register one.
       playBotLimit <- AnonMintLimiter.create()
+      // Browser game reports (#212) arrive in bursts when a returning visitor's IndexedDB outbox flushes, so this
+      // budget is per-minute, not per-hour — the gateway's 60/min, carried over.
+      ingestLimit <- AnonMintLimiter.create(limit = IngestLimitPerMinute, window = 1.minute)
       // Webhook push (F.2, #104) is opt-in the same way (WEBHOOK_TIMEOUT_SECONDS). Unlike the rating batch it does
       // NOT require the database: in-memory mode registers webhooks for the process's lifetime, matching how
       // registered-bot identities behave there. The service is a Resource because it owns its per-game runner
@@ -207,6 +222,9 @@ object Main extends IOApp.Simple:
           // The durable replay endpoint (#178) reads game_archive — DB-only seam again, same idiom as every route
           // above.
           val history = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => HistoryRoutes(pg))
+          // Browser report intake (#212) writes client_reports — DB-only seam once more: without persistence there
+          // is no queue to accept into, so the SPA's POST gets a 404 and its outbox simply retries later.
+          val ingest = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => IngestRoutes(pg, ingestLimit))
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -214,7 +232,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  catalog <+> playerGames <+> strength <+> history <+>
+                  catalog <+> playerGames <+> strength <+> history <+> ingest <+>
                   WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
                   BotRoutes(
                     botAuth,
@@ -235,6 +253,9 @@ object Main extends IOApp.Simple:
 
   /** Per-IP hourly budget for `POST /bot/register` — a team registers a handful of identities, not thirty. */
   private val RegisterLimitPerHour = 5
+
+  /** Per-IP per-minute budget for `POST /ingest/games` (#212) — the gateway's rate limit, carried over unchanged. */
+  private val IngestLimitPerMinute = 60
 
   /** Renamed when #190 dropped mirrored pairs: a "pair" was two games, so the unit these knobs count changed. */
   private val RenamedLadderVars: List[(String, String)] = List(

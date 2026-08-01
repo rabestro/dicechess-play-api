@@ -7,7 +7,7 @@ import cats.syntax.all.*
 import java.time.Instant
 import scala.concurrent.duration.*
 
-/** Periodic retention pass (#179): the two operational tables stop growing forever once `game_archive` (#177) is the
+/** Periodic retention pass (#179): the operational tables stop growing forever once `game_archive` (#177) is the
   * durable history record and `GET /games/{id}/history` (#178) serves replay from it.
   *
   * What it removes, and why each is dead weight rather than history:
@@ -15,6 +15,8 @@ import scala.concurrent.duration.*
   *     and no HTTP path touches an ended snapshot). They are also the only place per-seat join tokens persist past a
   *     game, so keeping them indefinitely is a small standing liability, not just bytes.
   *   - **delivered `outbox` rows** — `markDelivered` only stamps `delivered_at`; the row has done its job.
+  *   - **delivered `client_reports` rows (#212)** — same rule: a browser report exists only to be forwarded, and its
+  *     durable home is analytics, not this queue.
   *
   * Never touched: `game_archive` (permanent by contract), `game_results` (the list/rating projection), `bots`,
   * `bot_webhooks`, anything still active, and any snapshot whose history is not safely in the archive (see
@@ -33,19 +35,34 @@ final class Retention(store: RetentionStore, config: Retention.Config):
   def tick: IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       val cutoff = now.minusSeconds(config.retentionDays.toLong * 24 * 60 * 60)
-      drain(cutoff, outbox = 0, snapshots = 0).flatMap { (outbox, snapshots, retained) =>
+      drain(cutoff, outbox = 0, snapshots = 0, reports = 0).flatMap { (outbox, snapshots, reports, retained) =>
         val retainedNote =
           if retained > 0 then s"; retained $retained unarchived snapshot(s) — history exists nowhere else" else ""
         IO.println(
-          s"[play][retention] cutoff $cutoff: pruned $outbox outbox row(s), $snapshots ended snapshot(s)$retainedNote"
-        ).whenA(outbox > 0 || snapshots > 0 || retained > 0)
+          s"[play][retention] cutoff $cutoff: pruned $outbox outbox row(s), $snapshots ended snapshot(s), " +
+            s"$reports client report(s)$retainedNote"
+        ).whenA(outbox > 0 || snapshots > 0 || reports > 0 || retained > 0)
       }
     }
 
-  private def drain(cutoff: Instant, outbox: Int, snapshots: Int): IO[(Int, Int, Int)] =
+  private def drain(cutoff: Instant, outbox: Int, snapshots: Int, reports: Int): IO[(Int, Int, Int, Int)] =
     store.pruneOnce(cutoff, config.batchSize).flatMap { sweep =>
-      if sweep.removedAnything then drain(cutoff, outbox + sweep.outboxDeleted, snapshots + sweep.snapshotsDeleted)
-      else IO.pure((outbox + sweep.outboxDeleted, snapshots + sweep.snapshotsDeleted, sweep.retainedUnarchived))
+      if sweep.removedAnything then
+        drain(
+          cutoff,
+          outbox + sweep.outboxDeleted,
+          snapshots + sweep.snapshotsDeleted,
+          reports + sweep.clientReportsDeleted
+        )
+      else
+        IO.pure(
+          (
+            outbox + sweep.outboxDeleted,
+            snapshots + sweep.snapshotsDeleted,
+            reports + sweep.clientReportsDeleted,
+            sweep.retainedUnarchived
+          )
+        )
     }
 
   /** Background loop; start once at boot. A failure is logged and the loop lives on to retry next interval — same
