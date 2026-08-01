@@ -133,10 +133,11 @@ populated by the rating batch, so it only ever has data while `RATING_INTERVAL_S
 ### Retention (#179)
 
 `RETENTION_INTERVAL_SECONDS` enables a periodic prune of the tables that would otherwise
-grow forever: ended `games` snapshots and delivered `outbox`/`client_reports` rows. All are dead weight once
-`game_archive` holds the history and `GET /games/{id}/history` serves replay from it — nothing
-reads an ended snapshot (boot resume loads `WHERE status='active'`), and a delivered outbox row
-has done its job. Ended snapshots are also the only place per-seat join tokens persist after a
+grow forever: ended `games` snapshots and delivered `outbox`/`client_reports` rows. A delivered
+delivery row (`outbox` or `client_reports`) has simply done its job and is pruned by age alone;
+an ended snapshot is dead weight only once `game_archive` holds the history and
+`GET /games/{id}/history` serves replay from it — nothing reads an ended snapshot after that
+(boot resume loads `WHERE status='active'`). Ended snapshots are also the only place per-seat join tokens persist after a
 game, so keeping them forever is a small standing liability, not just bytes.
 
 Unset means **nothing is ever deleted** — deliberately, since this is the only scheduled task

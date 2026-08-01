@@ -577,7 +577,12 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _ <-
             sql"UPDATE play.client_reports SET delivered_at = $LongAgo WHERE report_id = ${deliveredId.value}::uuid".update.run
               .transact(xa)
-          _             <- db.clientReports.markParked(parkedId, "422 from the replay gate")
+          _ <- db.clientReports.markParked(parkedId, "422 from the replay gate")
+          // Back-date the parked row's delivered_at too (production leaves it NULL): with only the NULL check
+          // protecting it, this test would pass even if the NOT failed_permanently guard were dropped.
+          _ <-
+            sql"UPDATE play.client_reports SET delivered_at = $LongAgo WHERE report_id = ${parkedId.value}::uuid".update.run
+              .transact(xa)
           _             <- db.pruneOnce(PruneCut, limit = 500)
           deliveredLeft <- sql"SELECT count(*) FROM play.client_reports WHERE report_id = ${deliveredId.value}::uuid"
             .query[Int]

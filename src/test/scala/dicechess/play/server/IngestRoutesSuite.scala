@@ -49,10 +49,9 @@ class IngestRoutesSuite extends munit.CatsEffectSuite:
     yield (response.status, stored)
 
   test("a valid report is accepted with 201 and enqueued verbatim"):
-    run(validReport().noSpaces).map { (status, stored) =>
+    run(validReport().noSpaces).map: (status, stored) =>
       assertEquals(status, Status.Created)
       assertEquals(stored.get(reportId), Some(validReport()))
-    }
 
   test("a duplicate report answers 200 and does not overwrite the first write"):
     for
@@ -68,10 +67,9 @@ class IngestRoutesSuite extends munit.CatsEffectSuite:
       assertEquals(stored(reportId), validReport(), "the duplicate's payload must not replace the original")
 
   test("malformed JSON answers 400 and stores nothing"):
-    run("{not json").map { (status, stored) =>
+    run("{not json").map: (status, stored) =>
       assertEquals(status, Status.BadRequest)
       assert(stored.isEmpty)
-    }
 
   test("a JSON array body is structurally rejected with 422"):
     run(Json.arr(validReport()).noSpaces).map((status, _) => assertEquals(status, Status.UnprocessableEntity))
@@ -108,10 +106,9 @@ class IngestRoutesSuite extends munit.CatsEffectSuite:
     val oversized = validReport()
       .deepMerge(Json.obj("padding" -> ("x" * IngestRoutes.MaxBodyBytes.toInt).asJson))
       .noSpaces
-    run(oversized).map { (status, stored) =>
+    run(oversized).map: (status, stored) =>
       assertEquals(status, Status.PayloadTooLarge)
       assert(stored.isEmpty)
-    }
 
   test("the per-IP rate limit answers 429 with Retry-After once spent"):
     for

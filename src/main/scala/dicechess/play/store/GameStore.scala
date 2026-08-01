@@ -165,8 +165,9 @@ final case class RetentionSweep(
   */
 trait RetentionStore:
   /** One bounded batch: delivered outbox and client-report rows older than `olderThan`, then the ended snapshots older
-    * than it that are safe to drop. Bounded so a crash mid-pass leaves a consistent state and the next tick simply
-    * continues.
+    * than it that are safe to drop. Client reports are pruned purely by delivery age — unlike snapshots they carry no
+    * archive relationship, so no "history preserved elsewhere" check applies to them. Bounded so a crash mid-pass
+    * leaves a consistent state and the next tick simply continues.
     */
   def pruneOnce(olderThan: java.time.Instant, limit: Int): IO[RetentionSweep]
 

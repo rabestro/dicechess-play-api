@@ -36,8 +36,10 @@ erDiagram
     games ||--o| outbox : ""
 ```
 
-Only foreign keys appear as edges. Two tables carry no foreign key on purpose —
-`game_results` and `game_archive` must outlive the snapshots they describe.
+Only foreign keys appear as edges. Three tables carry no foreign key on purpose —
+`game_results` and `game_archive` must outlive the snapshots they describe, and
+`client_reports` holds browser-submitted reports for games that never had a
+`games` row on this server (kept separate from authoritative game data by design).
 
 ## Tables
 

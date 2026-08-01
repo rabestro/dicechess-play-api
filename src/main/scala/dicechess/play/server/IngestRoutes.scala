@@ -9,11 +9,10 @@ import org.http4s.headers.`Retry-After`
 import org.http4s.{HttpRoutes, Request, Response}
 
 import java.nio.charset.StandardCharsets
-import java.util.UUID
 
 /** Public intake for browser-submitted game reports (#212): the SPA's games against its own in-browser bots, previously
-  * relayed by the standalone Koyeb gateway (ADR-0005). Unauthenticated by design — the browser must never hold the
-  * analytics Bearer token — so every cheap defense the gateway had runs here, cheapest first: the per-IP rate limit
+  * relayed by a standalone token-holding gateway (ADR-0005). Unauthenticated by design — the browser must never hold
+  * the analytics Bearer token — so every cheap defense the gateway had runs here, cheapest first: the per-IP rate limit
   * before the body is read, the size cap while it streams, then structural validation. What survives is enqueued into
   * `client_reports` and drained by the same [[dicechess.play.ingest.IngestDeliverer]] as the first-party outbox;
   * acceptance is therefore asynchronous, and the analytics replay gate — still the authoritative validator — parks a
@@ -47,20 +46,29 @@ object IngestRoutes:
     // Streamed with a hard stop one byte past the cap — the declared Content-Length is not trusted, same as the
     // gateway's readBody. No other route needs a cap because every other POST body is tiny by construction; a whole
     // game's turn list is not.
-    req.body.take(MaxBodyBytes + 1).compile.to(Array).flatMap { bytes =>
-      if bytes.length > MaxBodyBytes then PayloadTooLarge(s"body exceeds $MaxBodyBytes bytes")
-      else
-        io.circe.parser.parse(String(bytes, StandardCharsets.UTF_8)) match
-          case Left(_)        => BadRequest("invalid JSON body")
-          case Right(payload) =>
-            validate(payload) match
-              case Left(reason) => UnprocessableEntity(reason)
-              case Right(id)    =>
-                reports.insertClientReport(id, payload).flatMap {
-                  case true  => Created("report accepted")
-                  case false => Ok("report already accepted")
-                }
-    }
+    req.body
+      .take(MaxBodyBytes + 1)
+      .compile
+      .to(Array)
+      .flatMap: bytes =>
+        if bytes.length > MaxBodyBytes then PayloadTooLarge(s"body exceeds $MaxBodyBytes bytes")
+        else
+          io.circe.parser.parse(String(bytes, StandardCharsets.UTF_8)) match
+            case Left(_)        => BadRequest("invalid JSON body")
+            case Right(payload) =>
+              validate(payload) match
+                case Left(reason) => UnprocessableEntity(reason)
+                case Right(id)    =>
+                  reports
+                    .insertClientReport(id, payload)
+                    .flatMap:
+                      case true  => Created("report accepted")
+                      case false => Ok("report already accepted")
+
+  /** Canonical 8-4-4-4-12 hex form — a syntactic gate, not a parse: stricter than `UUID.fromString` (which accepts
+    * non-canonical forms) and exception-free.
+    */
+  private val UuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$".r
 
   /** The gateway's structural check (`validate.ts`), ported — deliberately NOT a decode into a case class: the wire
     * contract is owned by analytics and the payload is forwarded verbatim, so decoding here would make this server a
@@ -69,13 +77,10 @@ object IngestRoutes:
     */
   private[server] def validate(payload: Json): Either[String, GameId] =
     for
-      obj  <- payload.asObject.toRight("body must be a JSON object")
-      id   <- obj("id").flatMap(_.asString).toRight("id (string) is required")
-      uuid <- scala.util
-        .Try(UUID.fromString(id))
-        .toOption
-        .toRight("id must be a UUID")
-      _ <- Either.cond(
+      obj <- payload.asObject.toRight("body must be a JSON object")
+      id  <- obj("id").flatMap(_.asString).toRight("id (string) is required")
+      _   <- Either.cond(UuidPattern.matches(id), (), "id must be a UUID")
+      _   <- Either.cond(
         obj("source").flatMap(_.asString).contains(ExpectedSource),
         (),
         s"source must be \"$ExpectedSource\""
@@ -86,4 +91,4 @@ object IngestRoutes:
         .toRight("initial_fen (string) is required")
       _ <- Either.cond(obj("turns").exists(_.isArray), (), "turns (array) is required")
       _ <- Either.cond(obj("events").forall(_.isArray), (), "events must be an array when present")
-    yield GameId(uuid.toString)
+    yield GameId(id.toLowerCase)
