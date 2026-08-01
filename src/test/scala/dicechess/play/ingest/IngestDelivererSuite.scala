@@ -6,7 +6,7 @@ import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
 import dicechess.play.core.*
 import dicechess.play.ingest.IngestDeliverer.Outcome
-import dicechess.play.store.{GameSnapshot, PgGameStore, TurnRecord}
+import dicechess.play.store.{GameSnapshot, OutboxStore, PgGameStore, TurnRecord}
 import munit.CatsEffectSuite
 import org.http4s.dsl.io.*
 import org.http4s.ember.client.EmberClientBuilder
@@ -69,11 +69,11 @@ class IngestDelivererSuite extends CatsEffectSuite with TestContainerForAll:
       )
       .build
 
-  private def deliverer(db: PgGameStore, base: Uri) =
+  private def deliverer(queue: OutboxStore, base: Uri) =
     EmberClientBuilder
       .default[IO]
       .build
-      .map(http => IngestDeliverer(db, http, IngestDeliverer.Config(base / "api" / "games", "test-token")))
+      .map(http => IngestDeliverer(queue, http, IngestDeliverer.Config(base / "api" / "games", "test-token")))
 
   test("saving a finished game enqueues its payload exactly once; an aborted one never"):
     withContainers { pg =>
@@ -139,6 +139,54 @@ class IngestDelivererSuite extends CatsEffectSuite with TestContainerForAll:
             assertEquals(first, List(Outcome.Retried))
             assert(parked.forall(_.gameId.value != id.value), "a retried row is not due until its backoff elapses")
             assertEquals(second, List(Outcome.Delivered))
+        }
+      }
+    }
+
+  test("a browser report drains from client_reports with the same delivery semantics (#212)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        (for
+          status <- Resource.eval(Ref.of[IO, Status](Status.Created))
+          tokens <- Resource.eval(Ref.of[IO, List[String]](Nil))
+          server <- stubIngest(status, tokens)
+          d      <- deliverer(db.clientReports, Uri.unsafeFromString(s"http://127.0.0.1:${server.address.getPort}"))
+        yield (d, tokens)).use { (d, tokens) =>
+          for
+            id <- GameId.random
+            payload = io.circe.Json.obj("id" -> io.circe.Json.fromString(id.value))
+            inserted  <- db.insertClientReport(id, payload)
+            duplicate <- db.insertClientReport(id, payload)
+            outcomes  <- d.deliverDueOnce
+            after     <- db.clientReports.due(10)
+            sent      <- tokens.get
+          yield
+            assert(inserted, "the first write must report acceptance (201)")
+            assert(!duplicate, "the second write must report a known report (200)")
+            assertEquals(outcomes, List(Outcome.Delivered))
+            assert(after.forall(_.gameId.value != id.value), "a delivered report must not come due again")
+            assert(sent.exists(_.contains("test-token")), "the Bearer token must be sent for reports too")
+        }
+      }
+    }
+
+  test("a 422 from the replay gate parks a browser report permanently (#212)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        (for
+          status <- Resource.eval(Ref.of[IO, Status](Status.UnprocessableEntity))
+          tokens <- Resource.eval(Ref.of[IO, List[String]](Nil))
+          server <- stubIngest(status, tokens)
+          d      <- deliverer(db.clientReports, Uri.unsafeFromString(s"http://127.0.0.1:${server.address.getPort}"))
+        yield d).use { d =>
+          for
+            id       <- GameId.random
+            _        <- db.insertClientReport(id, io.circe.Json.obj("id" -> io.circe.Json.fromString(id.value)))
+            outcomes <- d.deliverDueOnce
+            after    <- db.clientReports.due(10)
+          yield
+            assertEquals(outcomes, List(Outcome.Parked))
+            assert(after.forall(_.gameId.value != id.value), "a parked report must never come due again")
         }
       }
     }

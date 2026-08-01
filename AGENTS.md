@@ -14,6 +14,10 @@ Lichess-shaped Bot API — the server side of the dicechess play platform.
     consumed by the `dicechess-play` SvelteKit SPA — verify both sides when changing it.
   - **Publishes** the analytics ingest payload built in `ingest/PlaysiteIngest.scala` (POST to
     dicechess-analytics `/api/games`, `source=playsite`, idempotent first-writer-wins).
+  - **Accepts** browser-submitted game reports at `POST /ingest/games` (#212) from the
+    `dicechess-play` SPA (its games against in-browser bots) and relays them to analytics —
+    the same wire contract, structurally validated at ingress; reports land ONLY in the
+    `client_reports` relay queue, never in `game_results`/`game_archive`/`/history`.
   - **Publishes** the public Bot API documented in `docs/bot-api.md`; first-party consumers:
     `rabestro/dicechess-reference-bot` and `docs/examples/random_bot.py`.
 - CD publishes a multi-arch image to `ghcr.io/rabestro/dicechess-play-api`.
@@ -29,11 +33,13 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
 - `game/` — `GameRoom` (actor-style room; see concurrency doctrine below), `EngineOps`
   (the only engine wrapper), `PlayerConnection` (transport-agnostic player handle).
 - `server/` — http4s routes and services: `HealthRoutes` (/health, /version), `PlayRoutes`
-  (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*), plus
+  (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*),
+  `IngestRoutes` (/ingest/games, browser report intake), plus
   `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `BotEvents`, `AnonMintLimiter`, `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
-  `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots).
-- `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics.
+  `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports).
+- `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics, plus a
+  second deliverer instance draining browser reports from `client_reports` (#212).
 - `wire/Codecs.scala` — Circe codecs; the wire contract.
 
 ## Commands
@@ -158,8 +164,11 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   (`warnOnNonMainThreadDetected=false`, `--sun-misc-unsafe-memory-access=allow`) — keep them.
 - `ThisBuild/version` is frozen at `0.1.0-SNAPSHOT`; real versions come exclusively from git
   tags via the CD workflow (`APP_VERSION` build-arg → GET /version). Do not bump it.
-- `PLAY_DB_URL` set without `INGEST_URL`/`INGEST_TOKEN`: finished games silently accumulate in
-  the outbox (boot warns on stderr); a 4xx from analytics parks the row as `failed_permanently`.
+- `PLAY_DB_URL` set without `INGEST_URL`/`INGEST_TOKEN`: finished games and browser reports
+  silently accumulate in the outbox/`client_reports` queues (boot warns on stderr); a 4xx from
+  analytics parks the row as `failed_permanently`. Note the asymmetry for browser reports
+  (#212): the SPA already got its `201` at intake, so a replay-gate rejection is visible only
+  in `client_reports.last_error` — never in the client.
 - `LADDER_INTERVAL_SECONDS`, `RATING_INTERVAL_SECONDS`, and `WEBHOOK_TIMEOUT_SECONDS` all follow
   an "absence silently disables the feature" idiom, with **no error surfaced anywhere** — the
   server starts clean, `/health` returns 200, but ladder pairing / rating updates / webhook push

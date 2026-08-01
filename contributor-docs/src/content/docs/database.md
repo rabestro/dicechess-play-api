@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-description: The six tables of the play-api Postgres schema, what each is for, and the deliberate absence of some foreign keys.
+description: The seven tables of the play-api Postgres schema, what each is for, and the deliberate absence of some foreign keys.
 ---
 
 Persistence is **opt-in**: with no database URL configured the server runs fully in memory and
@@ -32,6 +32,18 @@ existing, and the HTTP call is decoupled from the game's commit. `IngestDelivere
 partial index of rows that are undelivered, not permanently parked, and due; failures back off
 via `attempts` / `next_attempt_at`, and a 4xx parks the row as `failed_permanently` with the
 error preserved.
+
+### `client_reports` — browser-submitted reports awaiting relay
+
+The intake queue behind `POST /ingest/games` (#212): finished games the SPA played against its
+**own in-browser bots** — games this server never hosted, reported by the client and forwarded
+to analytics with the same deliverer semantics as `outbox` (backoff, 4xx parking). A separate
+table rather than more `outbox` rows because the two must never mix: an outbox row is what this
+server *played* (trusted, enqueued transactionally, FK to `games`), a client report is what a
+browser *claimed* (forgeable, structurally validated at ingress, no `games` row to reference).
+Nothing from this table reaches `game_results`, `game_archive`, or `/history`; the analytics
+engine-replay gate stays the authoritative validator. The primary key is the payload's own
+idempotency UUID, so a duplicate POST answers `200` without overwriting the first write.
 
 ### `bots` — durable identity plus ladder state
 
@@ -73,7 +85,7 @@ key would either block that or cascade away the very history these tables exist 
 `pairing_id` and its partial index remain — historical CRN-paired rows must stay interpretable
 by the strength report. What V10 actually does is *add* the `ladder` boolean that now marks
 ladder-origin games, taking over the role `pairing_id` used to imply. New rows leave
-`pairing_id` null. Across V1–V10, no column is ever dropped.
+`pairing_id` null. Across V1–V11, no column is ever dropped.
 
 ## Changing the schema
 

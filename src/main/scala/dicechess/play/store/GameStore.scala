@@ -148,19 +148,25 @@ trait GameArchiveStore:
   * result. On a page that DID remove rows the field is `0`, which means "not measured", not "none retained" — read it
   * only after the drain has finished.
   */
-final case class RetentionSweep(outboxDeleted: Int, snapshotsDeleted: Int, retainedUnarchived: Int):
-  def removedAnything: Boolean = outboxDeleted > 0 || snapshotsDeleted > 0
+final case class RetentionSweep(
+    outboxDeleted: Int,
+    snapshotsDeleted: Int,
+    clientReportsDeleted: Int,
+    retainedUnarchived: Int
+):
+  def removedAnything: Boolean = outboxDeleted > 0 || snapshotsDeleted > 0 || clientReportsDeleted > 0
 
-/** Persistence seam for the retention pass (#179): the operational tables (`games` snapshots, delivered `outbox` rows)
-  * stop growing forever once `game_archive` is the durable history record. Postgres only, like the other projections —
-  * there is nothing to prune in the in-memory mode.
+/** Persistence seam for the retention pass (#179): the operational tables (`games` snapshots, delivered `outbox` and
+  * `client_reports` rows) stop growing forever once `game_archive` is the durable history record. Postgres only, like
+  * the other projections — there is nothing to prune in the in-memory mode.
   *
   * Explicitly NOT pruned, ever: `game_archive` (permanent by contract), `game_results` (the list/rating projection),
   * `bots`, `bot_webhooks`.
   */
 trait RetentionStore:
-  /** One bounded batch: delivered outbox rows older than `olderThan`, then the ended snapshots older than it that are
-    * safe to drop. Bounded so a crash mid-pass leaves a consistent state and the next tick simply continues.
+  /** One bounded batch: delivered outbox and client-report rows older than `olderThan`, then the ended snapshots older
+    * than it that are safe to drop. Bounded so a crash mid-pass leaves a consistent state and the next tick simply
+    * continues.
     */
   def pruneOnce(olderThan: java.time.Instant, limit: Int): IO[RetentionSweep]
 
@@ -331,6 +337,22 @@ object WebhookStore:
 
 /** An undelivered analytics handoff: the game's `GameIngest` payload plus its retry bookkeeping. */
 final case class OutboxRow(gameId: GameId, payload: io.circe.Json, attempts: Int)
+
+/** Intake seam for browser-submitted game reports (#212): finished games the SPA played against its own in-browser
+  * bots, accepted by `POST /ingest/games` and relayed to analytics. Reports are forgeable — they land in the separate
+  * `client_reports` queue and nowhere else (never `game_results`/`game_archive`); the analytics replay gate stays the
+  * authoritative validator.
+  */
+trait ClientReportStore:
+  /** Enqueue a report: `true` = newly accepted (201), `false` = already known (200) — first write wins, a duplicate
+    * never overwrites the stored payload, and a delivered or parked report is not resurrected.
+    */
+  def insertClientReport(id: GameId, payload: io.circe.Json): IO[Boolean]
+
+  /** The deliverer's port onto `client_reports` — browser reports drain with the same retry/parking semantics as the
+    * first-party outbox, just from their own table.
+    */
+  def clientReports: OutboxStore
 
 /** The deliverer's port onto the outbox (rows are enqueued transactionally by the store itself when a finished game's
   * snapshot is saved). `due` returns undelivered, non-parked rows whose next attempt is due.

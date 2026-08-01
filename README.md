@@ -86,7 +86,8 @@ Shipped and running in production:
   `PLAY_DB_URL` (unset = in-memory dev mode, see [Running](#running)).
 - **Analytics hand-off** — finished games flow to
   [`dicechess-analytics`](https://github.com/rabestro/dicechess-analytics) via a transactional
-  outbox.
+  outbox; the SPA's own in-browser bot games are accepted at `POST /ingest/games` (#212) and
+  relayed through the same deliverer.
 - **Rating ladder** — a continuously-paired matchmaking scheduler with Glicko-2 ratings, a
   public [leaderboard](https://play.jc.id.lv/leaderboard), and per-bot profiles. Opt-in via
   `LADDER_INTERVAL_SECONDS`/`RATING_INTERVAL_SECONDS` — see [Running](#running).
@@ -131,8 +132,8 @@ populated by the rating batch, so it only ever has data while `RATING_INTERVAL_S
 
 ### Retention (#179)
 
-`RETENTION_INTERVAL_SECONDS` enables a periodic prune of the two tables that would otherwise
-grow forever: ended `games` snapshots and delivered `outbox` rows. Both are dead weight once
+`RETENTION_INTERVAL_SECONDS` enables a periodic prune of the tables that would otherwise
+grow forever: ended `games` snapshots and delivered `outbox`/`client_reports` rows. All are dead weight once
 `game_archive` holds the history and `GET /games/{id}/history` serves replay from it — nothing
 reads an ended snapshot (boot resume loads `WHERE status='active'`), and a delivered outbox row
 has done its job. Ended snapshots are also the only place per-seat join tokens persist after a
@@ -145,9 +146,9 @@ rather than being honoured (a `RETENTION_DAYS=0` typo would otherwise prune a ga
 it ended).
 
 Never pruned: `game_archive` (permanent by contract), `game_results`, `bots`, `bot_webhooks`,
-anything still active regardless of age, parked outbox rows (`failed_permanently`) and the
-snapshots their foreign key pins — and, as a safety valve, **any ended non-aborted game with no
-archive row**. That last case means the snapshot is the only surviving copy of that game's
+anything still active regardless of age, parked outbox and `client_reports` rows
+(`failed_permanently`) and the snapshots the outbox foreign key pins — and, as a safety valve,
+**any ended non-aborted game with no archive row**. That last case means the snapshot is the only surviving copy of that game's
 history, so the pass retains it and reports the count in its log line instead of destroying it.
 An aborted game *is* pruned: `GameArchive.payload` excludes it by design, so there is no history
 to preserve.
@@ -155,7 +156,7 @@ to preserve.
 One log line per pass, only when something happened:
 
 ```text
-[play][retention] cutoff 2026-07-01T…Z: pruned 1000 outbox row(s), 1000 ended snapshot(s)
+[play][retention] cutoff 2026-07-01T…Z: pruned 1000 outbox row(s), 1000 ended snapshot(s), 0 client report(s)
 ```
 
 Run the archive backfill (below) **before** enabling retention on a deployment that predates

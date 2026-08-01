@@ -11,8 +11,11 @@ import org.http4s.{AuthScheme, Credentials, Method, Request, Uri}
 
 import scala.concurrent.duration.*
 
-/** Delivers finished games from the durable outbox to the analytics ingest endpoint — `POST /api/games` with a Bearer
-  * token, DIRECTLY (play-api is a first-party trusted writer; the Koyeb gateway is for external untrusted sources).
+/** Delivers queued game payloads to the analytics ingest endpoint — `POST /api/games` with a Bearer token. play-api is
+  * the sole trusted writer for playsite games; it drains two queues through separate instances of this class (#212):
+  * the transactional outbox (games this server played) and `client_reports` (browser-submitted reports, structurally
+  * validated at `POST /ingest/games`). The deliverer itself is provenance-blind — payloads are forwarded verbatim, and
+  * the analytics engine-replay gate stays the authoritative validator for both.
   *
   * The endpoint is idempotent on the game UUID (201 created / 200 already-there), so at-least-once delivery is safe.
   * Transient trouble (5xx, timeouts, network) retries with exponential backoff; a 4xx — e.g. the replay gate's 422 —

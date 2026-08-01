@@ -564,6 +564,35 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
     db.pruneOnce(PruneCut, limit = 500)
       .flatMap(sweep => if sweep.removedAnything then drainPrune(db) else IO.pure(sweep))
 
+  test("retention prunes a delivered client report past the cutoff and keeps a parked one (#212)"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        for
+          deliveredId <- GameId.random
+          parkedId    <- GameId.random
+          payload = io.circe.Json.obj("id" -> io.circe.Json.fromString("irrelevant"))
+          _ <- db.insertClientReport(deliveredId, payload)
+          _ <- db.insertClientReport(parkedId, payload)
+          _ <- db.clientReports.markDelivered(deliveredId)
+          _ <-
+            sql"UPDATE play.client_reports SET delivered_at = $LongAgo WHERE report_id = ${deliveredId.value}::uuid".update.run
+              .transact(xa)
+          _             <- db.clientReports.markParked(parkedId, "422 from the replay gate")
+          _             <- db.pruneOnce(PruneCut, limit = 500)
+          deliveredLeft <- sql"SELECT count(*) FROM play.client_reports WHERE report_id = ${deliveredId.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+          parkedLeft <- sql"SELECT count(*) FROM play.client_reports WHERE report_id = ${parkedId.value}::uuid"
+            .query[Int]
+            .unique
+            .transact(xa)
+        yield
+          assertEquals(deliveredLeft, 0, "a delivered report past the cutoff is dead weight")
+          assertEquals(parkedLeft, 1, "a parked report is kept for manual inspection, not pruned")
+      }
+    }
+
   test("retention prunes an old ended game's delivered outbox row and its snapshot, keeping the archive (#179)"):
     withContainers { pg =>
       (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
