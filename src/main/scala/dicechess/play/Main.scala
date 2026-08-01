@@ -99,6 +99,7 @@ object Main extends IOApp.Simple:
       registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       lobby         <- Lobby.create(registry)
       cors          <- Cors.fromEnv
+      _             <- warnLegacyLadderVars
       // The ladder scheduler is opt-in by env (LADDER_INTERVAL_SECONDS) — same "absence disables" idiom as
       // persistence/ingest above. Unset, the ladder never starts games on its own even if bots are on_ladder.
       ladderLoop <- LadderScheduler.configFromEnv match
@@ -234,3 +235,26 @@ object Main extends IOApp.Simple:
 
   /** Per-IP hourly budget for `POST /bot/register` — a team registers a handful of identities, not thirty. */
   private val RegisterLimitPerHour = 5
+
+  /** Renamed when #190 dropped mirrored pairs: a "pair" was two games, so the unit these knobs count changed. */
+  private val RenamedLadderVars: List[(String, String)] = List(
+    "LADDER_MAX_CONCURRENT_PAIRS" -> "LADDER_MAX_CONCURRENT_GAMES",
+    "LADDER_TIMEOUT_PARK_PAIRS"   -> "LADDER_TIMEOUT_PARK_GAMES"
+  )
+
+  /** An old name left in a deployment's env is **ignored**, not translated — so a deployment that had tuned one away
+    * from its old default silently gets the new default instead (`LADDER_MAX_CONCURRENT_PAIRS=2` meant 4 games; it now
+    * yields 8). Only the old *defaults* happen to map onto the new ones. That is exactly the "set but useless env var,
+    * no error surfaced anywhere" failure this server has already been bitten by three times (see AGENTS.md), so it gets
+    * a loud line at boot rather than being left to be discovered from behaviour.
+    */
+  private def warnLegacyLadderVars: IO[Unit] =
+    RenamedLadderVars.traverse_ { (obsolete, replacement) =>
+      cats.effect.std
+        .Console[IO]
+        .errorln(
+          s"[play][ladder] $obsolete is obsolete since #190 and is being IGNORED — rename it to $replacement. " +
+            "A pair was two games, so double whatever value you had."
+        )
+        .whenA(sys.env.contains(obsolete))
+    }

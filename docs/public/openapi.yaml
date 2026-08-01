@@ -838,8 +838,9 @@ components:
     HistoryFairness:
       type: object
       description: >
-        The dice-fairness reveal (#115). commit is always present. seed/clientSeeds are null until the game
-        is reveal-eligible — see GameHistory's own description.
+        The dice-fairness reveal. Every game in the archive has already finished, so all three fields are
+        populated here — the nullable types are kept for wire compatibility, not because a finished history
+        ever withholds them. (Active-state nullability is PublicGameState's story, not this one.)
       properties:
         commit: { type: [string, 'null'] }
         seed: { type: [string, 'null'] }

@@ -168,10 +168,14 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   moving to a second environment: all three were missed, independently, one at a time). Verify
   a new deployment with a live check — `GET /games` becomes non-empty and `/leaderboard` counts
   increase over a minute — not just `/health`.
-- `LADDER_MAX_CONCURRENT_GAMES` (#190) replaces `LADDER_MAX_CONCURRENT_PAIRS`, which counted CRN
-  mirror pairs (2 games each) — its new default (`8` games) matches the real capacity the old
-  default (`4` pairs) produced, so a deployment carrying the old var name over unrenamed keeps its
-  actual throughput unchanged rather than silently halving it.
+- `LADDER_MAX_CONCURRENT_GAMES` (#190) replaces `LADDER_MAX_CONCURRENT_PAIRS`, and
+  `LADDER_TIMEOUT_PARK_GAMES` replaces `LADDER_TIMEOUT_PARK_PAIRS` — both because a "pair" was two
+  games, so the unit they count changed. **An old name left in place is IGNORED, not translated**:
+  the new default applies instead. Only the old *defaults* happen to map onto the new ones (`4`
+  pairs = `8` games; `2` pairings = `4` games), so a deployment that had tuned either away from its
+  default must rename the var AND double the value — `LADDER_MAX_CONCURRENT_PAIRS=2` meant 4 games
+  but now silently yields 8. `Main.warnLegacyLadderVars` logs a loud line at boot for each old name
+  still present, precisely so this isn't discovered from behaviour.
 - Retention (#179) will not reclaim anything on a deployment whose games predate `game_archive`,
   and this looks like the feature not working: the pass refuses to prune an ended non-aborted
   snapshot that has no archive row, because that snapshot is then the only copy of the game's
@@ -180,9 +184,8 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   nothing unless `RATING_INTERVAL_SECONDS` is also set: with rating updates off, a dead bot is
   never auto-parked and keeps bleeding rating while inflating every opponent it is paired with.
   The name follows the feature (the ladder), not the component that hosts the check. Renamed from
-  `LADDER_TIMEOUT_PARK_PAIRS` when #190 dropped CRN mirrored pairs — the new default (`4` games)
-  matches the real threshold the old default (`2` pairings, 2 games each) enforced, so a deployment
-  that hasn't renamed its env var sees no behaviour change.
+  `LADDER_TIMEOUT_PARK_PAIRS` by #190 — see the rename gotcha above for why an unrenamed old value
+  is not silently equivalent.
 - README status banner, the "in-memory for now" callout, and the roadmap placement of the seek
   lobby are stale — durability and the lobby shipped. Trust the code and `docs/bot-api.md`.
 - The house bot that opposes quickstart users is deployed outside this repo (via

@@ -94,7 +94,7 @@ class GameArchiveSuite extends munit.FunSuite:
       .copy(players = Map(Seat.White -> Principal.Guest("w-uuid"))) // Black seat missing
     assertEquals(GameArchive.payload(malformed), None)
 
-  test("an unrated game omits rated correctly"):
+  test("a snapshot with no rated key archives as rated=false"):
     val json = GameArchive.payload(snapshot(ended(GameResult.Win(Side.Black), Termination.Resign), rated = None))
     val c    = json.getOrElse(fail("a finished game must produce a payload")).hcursor
     assertEquals(c.get[Boolean]("rated").toOption, Some(false)) // None resolves to false, same as game_results

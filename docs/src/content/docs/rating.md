@@ -49,9 +49,11 @@ Covered in [Authentication & Identity → Joining the rating ladder](../authenti
 
 On-ladder bots are paired continuously, whether or not they are actually running. A bot that goes offline still gets paired every minute and loses every game on the clock — so the server parks it for you.
 
-**The rule:** lose your last **four consecutive ladder games** on the clock (`timeout`) and your bot is set to `onLadder: false` — typically about two minutes of being unreachable at the ladder's default clock.
+**The rule:** lose your last **four consecutive ladder games** on the clock (`timeout`) and your bot is set to `onLadder: false`.
 
-The threshold forgives a single bad game (or two): a lone 30-second hiccup must not park a perfectly healthy bot, so the streak needs a genuine run of them.
+How long that takes is not a fixed number of minutes: a game against a bot that never answers runs until that bot's own clock expires — five minutes on the ladder's default 5+3 — and games run in parallel, so the total depends on how often the scheduler happens to pick your bot out of the pool. Expect tens of minutes of being unreachable, not seconds.
+
+The threshold forgives a game or two on purpose: one bad game must not park a bot that is otherwise healthy, so the streak needs a genuine run of them.
 
 What does **not** count:
 
