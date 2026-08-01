@@ -8,8 +8,10 @@ a restart drops everything. When a database is configured, Flyway applies the mi
 `src/main/resources/db/migration/` at boot, and doobie does the querying.
 
 :::note
-The tables below are the current state after migrations V1–V10. The migrations themselves are
-the source of truth — this page explains *why* each table exists, which SQL cannot.
+This page explains *why* each table exists, which the SQL cannot. For the column-level
+reference — every type, default, constraint, and index — see
+[Schema Reference](/dicechess-play-api/reference/schema/), which is generated from the
+migrations and therefore always current.
 :::
 
 ## The tables
@@ -76,6 +78,9 @@ ladder-origin games, taking over the role `pairing_id` used to imply. New rows l
 ## Changing the schema
 
 - Add a new numbered migration; never edit one that has been applied anywhere.
+- Regenerate the reference with `mise run contrib-docs:schema` and commit it in the same pull
+  request — CI applies the migrations to a throwaway Postgres and fails if the committed page
+  is stale.
 - Migrations against a shared database are an operator action, not a CI action.
 - The four suites that touch Postgres run against Testcontainers, so a migration that fails to
   apply fails the build — see [Testing](/dicechess-play-api/testing/).

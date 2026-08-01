@@ -62,7 +62,11 @@ export default defineConfig({
 				},
 				{
 					label: 'Data',
-					items: [{ label: 'Database Schema', link: '/database/' }],
+					items: [
+						{ label: 'Database Schema', link: '/database/' },
+						// Generated from the migrations by scripts/generate-schema-docs.sh.
+						{ label: 'Schema Reference', link: '/reference/schema/' },
+					],
 				},
 				{
 					label: 'Working on It',

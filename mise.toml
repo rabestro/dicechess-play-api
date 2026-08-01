@@ -14,6 +14,7 @@ gh = "latest"         # GitHub CLI: PRs, issues, releases
 # Docs site (Astro/Starlight in docs/) — build only, unrelated to the Scala toolchain
 node = "22"           # matches the setup-node version in .github/workflows/deploy-docs.yaml
 jq = "latest"         # JSON processor
+tbls = "1.95.0"       # schema introspection for the generated contributor-docs reference
 
 [tasks.setup]
 description = "📦 Install tooling and register Git hooks locally"
@@ -105,3 +106,7 @@ run = "npm run dev"
 description = "🏗️  Compile the contributor docs to static HTML (contributor-docs/dist)"
 dir = "contributor-docs"
 run = "npm run build"
+
+[tasks."contrib-docs:schema"]
+description = "🗄️  Regenerate the schema reference from the Flyway migrations (needs Docker)"
+run = "./scripts/generate-schema-docs.sh"
