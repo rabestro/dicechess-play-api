@@ -13,7 +13,7 @@ The engine artifact resolves from GitHub Packages, which requires authentication
 public packages**; `build.sbt` reads the token via `gh auth token`. If you skip this, the
 failure looks like a broken build rather than a missing credential:
 
-```
+```text
 unresolved dependency: lv.id.jc#dicechess-engine-scala...
 ```
 
@@ -41,6 +41,8 @@ without them the test run hangs at container startup rather than failing.
 | `mise run check` | **The CI mirror**: scalafmtCheckAll, clean, coverage, test, coverageReport |
 | `mise run format` | `sbt scalafmtAll` |
 | `mise run run` | Start the server on `:8080` |
+| `mise run contrib-docs:dev` | This site, locally |
+| `mise run contrib-docs:schema` | Regenerate the schema reference from the migrations |
 | `mise run docs:dev` | The Bot API site, locally |
 
 For a targeted, Docker-free run: `sbt "testOnly dicechess.play.server.*"`.

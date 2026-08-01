@@ -54,7 +54,7 @@ undelivered. Boot warns on stderr, and nothing else complains.
 | `RETENTION_INTERVAL_SECONDS` | Enables the retention prune. Unset keeps ended snapshots and delivered outbox rows forever. |
 | `RETENTION_DAYS` | Optional, default `30`. |
 | `RETENTION_BATCH_SIZE` | Optional, default `1000`. |
-| `PLAY_BOT_TOKENS` | Statically configured bots, as `team|name|token` CSV. |
+| `PLAY_BOT_TOKENS` | Statically configured bots, as `team\|name\|token` CSV. |
 | `PLAY_CORS_ORIGINS` | Allowed origins; empty allows any. |
 | `APP_VERSION` | Surfaced at `GET /version`. Set by the CD workflow from the git tag. |
 

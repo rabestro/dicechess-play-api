@@ -24,19 +24,41 @@ const bare = (name) => name.replace(/^public\./, '');
 
 const tables = schema.tables.filter(isApplicationTable).sort(byName);
 
+/**
+ * Cardinality of a foreign key, derived rather than assumed: if the child's FK columns are
+ * themselves covered by a primary key or unique constraint, at most one child row can exist
+ * per parent (1:1); otherwise the parent may have many (1:many). Both of today's foreign keys
+ * happen to be the 1:1 shape, so hardcoding would look right until the first plain
+ * one-to-many migration silently rendered wrong.
+ */
+function cardinality(childTable, fkColumns) {
+	const covered = (childTable?.constraints ?? []).some(
+		(c) =>
+			(c.type === 'PRIMARY KEY' || c.type === 'UNIQUE') &&
+			fkColumns.length > 0 &&
+			fkColumns.every((col) => (c.columns ?? []).includes(col)) &&
+			(c.columns ?? []).length === fkColumns.length,
+	);
+	return covered ? '||--o|' : '||--o{';
+}
+
 /** Relations tbls inferred from foreign keys, as mermaid ER edges. */
 function erDiagram() {
 	const names = new Set(tables.map((t) => bare(t.name)));
+	const byTableName = new Map(tables.map((t) => [bare(t.name), t]));
+
 	const edges = (schema.relations ?? [])
-		.map((r) => ({ child: bare(r.table), parent: bare(r.parent_table) }))
+		.map((r) => ({ child: bare(r.table), parent: bare(r.parent_table), columns: r.columns ?? [] }))
 		.filter((e) => names.has(e.child) && names.has(e.parent))
-		.map((e) => `    ${e.parent} ||--o| ${e.child} : ""`)
+		.map((e) => `    ${e.parent} ${cardinality(byTableName.get(e.child), e.columns)} ${e.child} : ""`)
 		.sort();
 
-	const lines = ['```mermaid', 'erDiagram'];
-	for (const name of [...names].sort()) lines.push(`    ${name} {`, '    }');
-	lines.push(...new Set(edges), '```');
-	return lines.join('\n');
+	// Entities are declared as bare names: mermaid's ER grammar wants at least one attribute
+	// inside a `{ }` block, and we deliberately keep the diagram to relationships only — the
+	// columns are right below in the per-table sections.
+	return ['```mermaid', 'erDiagram', ...[...names].sort().map((n) => `    ${n}`), ...new Set(edges), '```'].join(
+		'\n',
+	);
 }
 
 /** A column's constraint markers, e.g. "PK", "FK → bots(team, name)". */

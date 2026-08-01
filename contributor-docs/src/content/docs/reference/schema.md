@@ -25,18 +25,12 @@ Regenerate with `mise run contrib-docs:schema` after adding a migration.
 
 ```mermaid
 erDiagram
-    bot_webhooks {
-    }
-    bots {
-    }
-    game_archive {
-    }
-    game_results {
-    }
-    games {
-    }
-    outbox {
-    }
+    bot_webhooks
+    bots
+    game_archive
+    game_results
+    games
+    outbox
     bots ||--o| bot_webhooks : ""
     games ||--o| outbox : ""
 ```
