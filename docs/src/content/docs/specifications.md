@@ -20,15 +20,15 @@ The OpenAPI document works with any generator. A few starting points:
 
 ```bash
 # TypeScript types (openapi-typescript)
-npx openapi-typescript https://jc.id.lv/dicechess-play-api/openapi.yaml -o dicechess.d.ts
+npx openapi-typescript https://bots.jc.id.lv/openapi.yaml -o dicechess.d.ts
 
 # A full client in any language (openapi-generator)
 openapi-generator-cli generate \
-  -i https://jc.id.lv/dicechess-play-api/openapi.yaml \
+  -i https://bots.jc.id.lv/openapi.yaml \
   -g python -o ./dicechess-client
 
 # Interactive browsing / try-it-out
-npx @scalar/cli reference https://jc.id.lv/dicechess-play-api/openapi.yaml
+npx @scalar/cli reference https://bots.jc.id.lv/openapi.yaml
 ```
 
 Prefer a ready-to-run starter over generating from scratch? Two MIT-licensed "Use this template" bots build on these contracts — clone and run in a minute:

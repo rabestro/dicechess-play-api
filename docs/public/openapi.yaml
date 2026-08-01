@@ -4,7 +4,7 @@ info:
   version: '1.0'
   description: >
     REST contract for connecting a bot to the Dice Chess play platform. This is the
-    machine-readable companion to the guides at https://jc.id.lv/dicechess-play-api/ —
+    machine-readable companion to the guides at https://bots.jc.id.lv/ —
     use it to generate a client (`openapi-generator`, `openapi-typescript`, etc.). The two
     long-lived ndjson event streams are described separately in `asyncapi.yaml`.
   license:
@@ -452,7 +452,7 @@ paths:
       description: >
         The whole cached report: every pairwise SPRT verdict on CRN mirror pairs, plus the Bradley-Terry
         pool ranking. Refreshed on the rating batch's own cadence, not per request — see
-        [Rating & Ladder](https://jc.id.lv/dicechess-play-api/rating/) for why this exists alongside Glicko.
+        [Rating & Ladder](https://bots.jc.id.lv/rating/) for why this exists alongside Glicko.
       security: []
       responses:
         '200':

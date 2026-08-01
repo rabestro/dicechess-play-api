@@ -239,7 +239,8 @@ Three layers, by audience (see ADR-0012 for the boundary):
 
 1. **File-head comments** — the authoritative contract for a module lives at the top of its
    source file (cross-repo invariants, decisions). Code is the source of truth.
-2. **Public docs site** (`docs/`, Astro + Starlight → GitHub Pages, English) — the
+2. **Public docs site** (`docs/`, Astro + Starlight → https://bots.jc.id.lv via an
+   assets-only Cloudflare Worker, English) — the
    authoritative **public** Bot API reference for third-party bot developers: auth tiers, REST
    endpoints, ndjson streams, webhooks, DFEN, the legal-move tree, time controls, and the
    provably-fair verification procedure. Pages under `docs/src/content/docs/`. Run locally with

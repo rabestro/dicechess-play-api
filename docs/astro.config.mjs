@@ -4,11 +4,11 @@ import starlight from '@astrojs/starlight';
 import mermaid from 'astro-mermaid';
 import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
 
-// GitHub Pages project site, served on the account's custom domain: https://jc.id.lv/dicechess-play-api
-// (same host/base pattern the engine and analytics docs sites use — see ADR-0012).
+// Dedicated bot-developer domain, served from a Cloudflare Worker with static assets (#203).
+// Contributor docs stay on the ADR-0012 pattern (jc.id.lv/<repo> project pages); this site
+// is the external-facing product and gets its own host with a root base.
 export default defineConfig({
-	site: 'https://jc.id.lv',
-	base: '/dicechess-play-api',
+	site: 'https://bots.jc.id.lv',
 	integrations: [
 		mermaid(),
 		starlight({
