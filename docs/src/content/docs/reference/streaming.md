@@ -72,7 +72,7 @@ Sent immediately on connect — the current state.
 }
 ```
 
-`commit` is the dice commitment (constant for the game). `seed`/`clientSeeds` stay `null` until the game ends, then carry the [reveal](../../provably-fair/) — except a mirror-pair rematch, which withholds them until its partner also ends. While `dicePending` is `true`, `legalMoves` carries the pending roll's [tree](../../game-mechanics/#legal-moves) (or `null` if too large — fetch [`GET /games/{id}/moves`](../rest/#get-legal-moves)). `players` is both seats' public faces.
+`commit` is the dice commitment (constant for the game). `seed`/`clientSeeds` stay `null` until the game ends, then carry the [reveal](../../provably-fair/) immediately, with nothing ever withheld. While `dicePending` is `true`, `legalMoves` carries the pending roll's [tree](../../game-mechanics/#legal-moves) (or `null` if too large — fetch [`GET /games/{id}/moves`](../rest/#get-legal-moves)). `players` is both seats' public faces.
 
 `history` is every completed turn so far — so a client that joins mid-game renders the full move list, not just what happens after it connected. It is consistent with `v`. Each entry is `{ seat, dice, moves, fenAfter }`: `dice` is the roll, `moves` the UCI micro-moves (empty for a forced pass), and `fenAfter` the resulting position (also the next turn's start). Empty for a game with no completed turns yet.
 
@@ -112,9 +112,7 @@ Sent immediately on connect — the current state.
 }
 ```
 
-`result` can also be `{"Draw":{}}`; `termination` is one of `KingCaptured`, `Resign`, `Draw`, `Aborted`, `Timeout`. `seed` and `clientSeeds` are the [dice reveal](../../provably-fair/) — with them you can recompute the whole transcript. A seat that never seeded shows its external id here (the fallback).
-
-Both reveal fields can instead be `null` for a [mirror-pair rematch](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) whose partner has not yet concluded — poll [`GET /games/{id}`](../rest/#get-a-game-snapshot) once both have ended to retrieve the reveal.
+`result` can also be `{"Draw":{}}`; `termination` is one of `KingCaptured`, `Resign`, `Draw`, `Aborted`, `Timeout`. `seed` and `clientSeeds` are the [dice reveal](../../provably-fair/), present here the instant the game ends — with them you can recompute the whole transcript. A seat that never seeded shows its external id here (the fallback).
 
 ### Rejected
 

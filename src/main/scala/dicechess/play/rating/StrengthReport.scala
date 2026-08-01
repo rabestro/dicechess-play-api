@@ -6,6 +6,10 @@ import dicechess.play.store.GameResultRow
 /** The E.1 (#120) strength report over `game_results`: pairwise SPRT verdicts on CRN pairs plus a Bradley-Terry pool
   * ranking — assembled purely from rows, so the whole pipeline is unit-testable without a database. The thin
   * `LadderReportMain` runner just loads rows and prints [[StrengthReport.render]].
+  *
+  * CRN pairs are historical only (#190 dropped the mirrored-pair mechanism that created them); the grouping logic below
+  * is otherwise unchanged and still scores any it finds, exactly as it always has — new rows simply never form one and
+  * degrade to trinomial singles, which every part of this pipeline already treats as first-class.
   */
 final case class StrengthReport(
     pairwise: List[StrengthReport.Pairwise],

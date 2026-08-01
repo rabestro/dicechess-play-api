@@ -11,10 +11,11 @@ package dicechess.play.rating
   *
   * Two observation kinds contribute additively (independent observations, same hypotheses):
   *   - '''Pentanomial''': one CRN mirror pair = ONE observation with score ∈ {0, ¼, ½, ¾, 1} (the pair's two game
-  *     scores summed, normalised by 2). This is the variance reduction the shared dice exist for — the pair's
-  *     colour-and-luck noise cancels inside the observation instead of inflating `v`.
-  *   - '''Trinomial''': an unpaired rated game = one observation with score ∈ {0, ½, 1} (a fallback; the scheduler
-  *     makes these rare).
+  *     scores summed, normalised by 2). This was the variance reduction the shared dice existed for — the pair's
+  *     colour-and-luck noise cancelled inside the observation instead of inflating `v`. Historical only: #190 dropped
+  *     the mirrored-pair mechanism that created these, so this family no longer grows.
+  *   - '''Trinomial''': an unpaired rated game = one observation with score ∈ {0, ½, 1} — the ladder's only kind of
+  *     observation since #190; CRN pairing made these the rare fallback before that.
   *
   * Each family's histogram is smoothed with a small per-bin pseudo-count before `m`/`v` are computed — see
   * `BinPseudoCount` for why that (and not a variance floor) is the degenerate-sample guard.

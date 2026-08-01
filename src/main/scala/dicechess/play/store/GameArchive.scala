@@ -16,9 +16,7 @@ import io.circe.{Decoder, Json}
   * Unlike `GameSnapshot` this drops the live secrets a client should never retain past the game (seat join tokens);
   * unlike the analytics payload it keeps raw `external_id`s (this table is server-private — anonymization is the
   * READING endpoint's job, via the same `PublicPlayer` rules the live wire uses) and the full fairness block (commit +
-  * server seed + client seeds), stored unconditionally. Gating what a caller actually SEES (the CRN partner-ended
-  * reveal check, #115) happens at read time in the endpoint, not here — gating at write time would need a second write
-  * once a slower partner game finishes, which is strictly worse.
+  * server seed + client seeds), stored unconditionally.
   */
 object GameArchive:
 
@@ -35,15 +33,13 @@ object GameArchive:
       case GameStatus.Ended(GameOver(result, termination))    =>
         (snapshot.players.get(Seat.White), snapshot.players.get(Seat.Black)).mapN { (white, black) =>
           Json.obj(
-            "started_at"      -> snapshot.createdAtEpochMs.asJson,
-            "rated"           -> snapshot.rated.getOrElse(false).asJson,
-            "pairing_id"      -> snapshot.pairingId.asJson,
-            "partner_game_id" -> snapshot.partnerGameId.asJson,
-            "time_control"    -> snapshot.timeControl.asJson,
-            "result"          -> PlaysiteIngest.resultOf(result).asJson,
-            "termination"     -> PlaysiteIngest.terminationOf(termination).asJson,
-            "players"         -> Json.obj("white" -> white.externalId.asJson, "black" -> black.externalId.asJson),
-            "initial_dfen"    -> EngineOps.InitialDfen.asJson, // every game starts here (GameRegistry never passes a
+            "started_at"   -> snapshot.createdAtEpochMs.asJson,
+            "rated"        -> snapshot.rated.getOrElse(false).asJson,
+            "time_control" -> snapshot.timeControl.asJson,
+            "result"       -> PlaysiteIngest.resultOf(result).asJson,
+            "termination"  -> PlaysiteIngest.terminationOf(termination).asJson,
+            "players"      -> Json.obj("white" -> white.externalId.asJson, "black" -> black.externalId.asJson),
+            "initial_dfen" -> EngineOps.InitialDfen.asJson, // every game starts here (GameRegistry never passes a
             // custom DFEN) — same invariant PlaysiteIngest's own start-position constant relies on.
             "turns"    -> snapshot.turns.map(t => Json.fromJsonObject(TurnRecord.json(t))).asJson,
             "fairness" -> Json.obj(
@@ -78,8 +74,6 @@ object GameArchive:
     */
   final case class Record(
       rated: Boolean,
-      pairingId: Option[String],
-      partnerGameId: Option[String],
       timeControl: TimeControl,
       result: Int,
       termination: String,
@@ -111,24 +105,20 @@ object GameArchive:
     val fairness    = c.downField("fairness")
     val clientSeeds = fairness.downField("client_seeds")
     for
-      rated         <- c.get[Boolean]("rated")
-      pairingId     <- c.get[Option[String]]("pairing_id")
-      partnerGameId <- c.get[Option[String]]("partner_game_id")
-      timeControl   <- c.get[TimeControl]("time_control")
-      result        <- c.get[Int]("result")
-      termination   <- c.get[String]("termination")
-      whiteId       <- players.get[String]("white")
-      blackId       <- players.get[String]("black")
-      initialDfen   <- c.get[String]("initial_dfen")
-      turns         <- c.get[List[TurnRecord]]("turns")
-      commit        <- fairness.get[Option[String]]("commit")
-      serverSeed    <- fairness.get[String]("server_seed")
-      seedWhite     <- clientSeeds.get[String]("white")
-      seedBlack     <- clientSeeds.get[String]("black")
+      rated       <- c.get[Boolean]("rated")
+      timeControl <- c.get[TimeControl]("time_control")
+      result      <- c.get[Int]("result")
+      termination <- c.get[String]("termination")
+      whiteId     <- players.get[String]("white")
+      blackId     <- players.get[String]("black")
+      initialDfen <- c.get[String]("initial_dfen")
+      turns       <- c.get[List[TurnRecord]]("turns")
+      commit      <- fairness.get[Option[String]]("commit")
+      serverSeed  <- fairness.get[String]("server_seed")
+      seedWhite   <- clientSeeds.get[String]("white")
+      seedBlack   <- clientSeeds.get[String]("black")
     yield Record(
       rated,
-      pairingId,
-      partnerGameId,
       timeControl,
       result,
       termination,

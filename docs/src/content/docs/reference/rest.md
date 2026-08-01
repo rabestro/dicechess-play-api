@@ -150,7 +150,7 @@ Every live game you are seated in — the polling counterpart of `GameStart` and
 
 ### Get a game snapshot
 
-`GET /games/{id}` — **public.** The polling read of a single game: the same `Snapshot.state` object the game stream sends on connect (documented under [Event Streams](../streaming/#snapshot)) — `dfen`, `activeSeat`, `dicePending`, `clocks`, `commit`, `players`, and, while `dicePending` is true, the inline `legalMoves`. This is also where a withheld [dice reveal](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) becomes available: for a mirror-pair game, `seed` and `clientSeeds` stay `null` on the live `GameEnded` event until both games conclude, then appear here on a re-poll. Errors: `404` unknown game.
+`GET /games/{id}` — **public.** The polling read of a single game: the same `Snapshot.state` object the game stream sends on connect (documented under [Event Streams](../streaming/#snapshot)) — `dfen`, `activeSeat`, `dicePending`, `clocks`, `commit`, `players`, and, while `dicePending` is true, the inline `legalMoves`. `seed`/`clientSeeds` are `null` while the game is active and appear the instant it ends, on this endpoint exactly as on the live `GameEnded` event. Errors: `404` unknown game.
 
 ### Get game history (replay)
 
@@ -171,7 +171,7 @@ Every live game you are seated in — the polling counterpart of `GameStart` and
 }
 ```
 
-`result` is white-POV (`1` white won, `-1` black won, `0` draw) and `termination` is one of `king_captured` / `timeout` / `resign` / `draw_agreement` / `aborted` — there is no requester identity here, so neither is reframed to a point of view the way a player's own games list is. `fairness.commit` is always present; `seed`/`clientSeeds` are `null` until the game is reveal-eligible — immediately for an ordinary game, or once its [mirror-pair partner](../../provably-fair/#the-mirror-pair-exception-withheld-reveal) has also concluded. A fully revealed response is cached `public, max-age=31536000, immutable` (it can never change again); a withheld one is cached only briefly, so a re-fetch after the partner concludes sees the reveal promptly. Errors: `404` unknown game, or a finished game with no archive row (pre-archive history — not backfilled).
+`result` is white-POV (`1` white won, `-1` black won, `0` draw) and `termination` is one of `king_captured` / `timeout` / `resign` / `draw_agreement` / `aborted` — there is no requester identity here, so neither is reframed to a point of view the way a player's own games list is. `fairness.commit` is always present, and `seed`/`clientSeeds` are populated immediately — every game recorded here has already finished, so nothing is ever withheld. The response is cached `public, max-age=31536000, immutable`, since a finished game's history can never change again. Errors: `404` unknown game, or a finished game with no archive row (pre-archive history — not backfilled).
 
 ## Leaderboard & bot profiles
 
@@ -258,7 +258,7 @@ Public, no `Authorization`. The precise, error-rate-bounded complement to the Gl
 
 `GET /strength`
 
-The whole cached report: every pairwise [SPRT](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict — combining CRN mirror-pair observations with any eligible single (unpaired) games for that matchup — plus a [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) pool ranking. `verdict` is `"AcceptH1"` (the `perspective` bot is stronger), `"AcceptH0"` (not stronger by the tested margin), or `"Continue"` (not enough data yet) — `Continue` is surfaced honestly rather than hidden or rounded into a claim. `elo` in `ranking` is **relative** (the pool's mean is 0 by construction, not the Glicko board's 1500-centred scale).
+The whole cached report: every pairwise [SPRT](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict, weighted over every eligible game for that matchup, plus a [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) pool ranking. `verdict` is `"AcceptH1"` (the `perspective` bot is stronger), `"AcceptH0"` (not stronger by the tested margin), or `"Continue"` (not enough data yet) — `Continue` is surfaced honestly rather than hidden or rounded into a claim. `elo` in `ranking` is **relative** (the pool's mean is 0 by construction, not the Glicko board's 1500-centred scale).
 
 ```json
 {

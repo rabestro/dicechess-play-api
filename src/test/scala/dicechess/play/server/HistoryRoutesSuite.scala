@@ -19,8 +19,8 @@ import org.testcontainers.utility.DockerImageName
 
 import scala.concurrent.duration.*
 
-/** `GET /games/{id}/history` (#178) against a real Postgres: reveal gating (#115) for both the unpaired and CRN-paired
-  * cases, anonymization, cache headers, and the two 404 paths.
+/** `GET /games/{id}/history` (#178) against a real Postgres: the fairness reveal, anonymization, cache headers, and the
+  * several 404 paths.
   */
 class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
 
@@ -30,18 +30,12 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
   private def store(pg: PostgreSQLContainer) =
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
-  private def app(pg: PgGameStore): HttpApp[IO] = HistoryRoutes(pg, pg).orNotFound
+  private def app(pg: PgGameStore): HttpApp[IO] = HistoryRoutes(pg).orNotFound
 
   private def get(app: HttpApp[IO], id: String): IO[org.http4s.Response[IO]] =
     app.run(Request[IO](Method.GET, Uri.unsafeFromString(s"/games/$id/history")))
 
-  private def snapshotFixture(
-      white: Principal,
-      black: Principal,
-      status: GameStatus,
-      pairingId: Option[String] = None,
-      partnerGameId: Option[String] = None
-  ): GameSnapshot =
+  private def snapshotFixture(white: Principal, black: Principal, status: GameStatus): GameSnapshot =
     GameSnapshot(
       version = 5L,
       dfen = EngineOps.InitialDfen,
@@ -58,15 +52,13 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
       lastRoll = List(2, 3, 6),
       turns = Vector(TurnRecord(1L, "w", List(1, 1, 4), List("e2e4"), "fen-after")),
       createdAtEpochMs = Some(1_782_000_000_000L),
-      rated = Some(true),
-      pairingId = pairingId,
-      partnerGameId = partnerGameId
+      rated = Some(true)
     )
 
   private def ended(result: GameResult = GameResult.Win(Side.White), termination: Termination = Termination.Resign) =
     GameStatus.Ended(GameOver(result, termination))
 
-  test("an unpaired finished game reveals its fairness block immediately, cached as immutable"):
+  test("a finished game reveals its fairness block immediately, cached as immutable"):
     withContainers { pg =>
       store(pg).use { db =>
         val white = Principal.Guest("hr-unpaired-white")
@@ -105,54 +97,6 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
               `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(365.days), CacheDirective("immutable"))
             )
           )
-      }
-    }
-
-  test("a CRN-paired game withholds seed/clientSeeds until the partner also concludes, then self-heals (#115)"):
-    withContainers { pg =>
-      store(pg).use { db =>
-        val pairingId = "33333333-3333-3333-3333-333333333333"
-        val whiteA    = Principal.Bot("hr-team", "hr-alpha")
-        val blackA    = Principal.Bot("hr-team", "hr-beta")
-        for
-          idA <- GameId.random
-          idB <- GameId.random
-          _   <- db.save(
-            idA,
-            snapshotFixture(
-              whiteA,
-              blackA,
-              ended(),
-              pairingId = Some(pairingId),
-              partnerGameId = Some(idB.value)
-            )
-          )
-          withheldResp <- get(app(db), idA.value)
-          withheldJson <- withheldResp.as[io.circe.Json]
-          // The partner (idB) hasn't been saved as ended yet — game_results has no row for it.
-          _ = assertEquals(withheldResp.status, Status.Ok)
-          _ = assertEquals(withheldJson.hcursor.downField("fairness").get[Option[String]]("seed").toOption, Some(None))
-          _ = assertEquals(
-            withheldJson.hcursor.downField("fairness").get[Option[String]]("commit").toOption.map(_.isDefined),
-            Some(true),
-            "commit is never gated — only the reveal is"
-          )
-          _ = assertEquals(
-            withheldResp.headers.get[`Cache-Control`],
-            Some(`Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(60.seconds)))
-          )
-          // Now the partner concludes too.
-          _ <- db.save(
-            idB,
-            snapshotFixture(blackA, whiteA, ended(), pairingId = Some(pairingId), partnerGameId = Some(idA.value))
-          )
-          revealedResp <- get(app(db), idA.value)
-          revealedJson <- revealedResp.as[io.circe.Json]
-        yield assertEquals(
-          revealedJson.hcursor.downField("fairness").get[String]("seed").toOption,
-          Some("ab12cd34"),
-          "the reveal must self-heal once the partner has also concluded, without any write to this game's own row"
-        )
       }
     }
 

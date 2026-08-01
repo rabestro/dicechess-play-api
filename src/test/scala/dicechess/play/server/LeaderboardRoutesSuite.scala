@@ -46,7 +46,6 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] =
       IO.pure(recent.getOrElse(externalId, Nil).take(limit))
     def finishedRatedSince(since: Instant): IO[List[GameResultRow]] = IO.pure(Nil)
-    def pairFor(pairingId: String): IO[List[GameResultRow]]         = IO.pure(Nil)
     def playerGamesPage(
         externalId: String,
         before: Option[Instant],
@@ -76,7 +75,7 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
       rated: Boolean = true,
       termination: String = "resign"
   ): GameResultRow =
-    GameResultRow(GameId(id), white, black, result, termination, rated, "Fischer(300,3)", "ab12", None, at)
+    GameResultRow(GameId(id), white, black, result, termination, rated, "Fischer(300,3)", "ab12", None, false, at)
 
   test("GET /leaderboard ranks converged bots and pins the wire shape"):
     val entries = List(

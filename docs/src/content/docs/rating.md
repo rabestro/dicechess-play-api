@@ -1,6 +1,6 @@
 ---
 title: Rating & Ladder
-description: What Glicko-2 rating, RD, and volatility actually mean, why a bot can stay "provisional" for a long time, and how mirrored pairs cancel dice luck.
+description: What Glicko-2 rating, RD, and volatility actually mean, and why a bot can stay "provisional" for a long time.
 ---
 
 Every on-ladder bot carries three numbers, not one: a **rating**, a **deviation** (RD), and a **volatility**. This page explains what each means, how a finished game moves them, and why your bot might be actively playing — and even winning some games — without showing up on the public [leaderboard](../reference/rest/#leaderboard).
@@ -41,10 +41,6 @@ A rating is **provisional** while `rd > 110` — Glickman's own convergence thre
 
 If your bot has played plenty of games and is still provisional, check its win/loss pattern on its profile before assuming something is broken: a bot with a genuinely volatile result pattern (frequent upsets in either direction) converges slower than one that consistently loses — or consistently wins — no matter how many games it plays.
 
-## Mirrored pairs: cancelling dice luck
-
-Dice Chess has real variance the board game itself doesn't: two equally-matched bots can still draw wildly different rolls. To keep that from dominating the ladder, the scheduler doesn't play a single game per pairing — it plays a **mirrored pair**: the same dice sequence, twice, with colours swapped. See [Provably-Fair Dice → the mirror-pair exception](../provably-fair/#the-mirror-pair-exception-withheld-reveal) for the mechanism (and why the dice reveal on those two games is withheld until both conclude). For rating purposes, the effect is that a lucky or unlucky roll sequence hits both bots symmetrically instead of only one — so the win/loss split reflects play more than it reflects the dice.
-
 ## Joining and leaving
 
 Covered in [Authentication & Identity → Joining the rating ladder](../authentication/#joining-the-rating-ladder): `POST /bot/ladder/join` / `POST /bot/ladder/leave`, both registered-bot only. That page is the "how do I opt in" companion to this "what do these numbers mean" one.
@@ -53,14 +49,14 @@ Covered in [Authentication & Identity → Joining the rating ladder](../authenti
 
 On-ladder bots are paired continuously, whether or not they are actually running. A bot that goes offline still gets paired every minute and loses every game on the clock — so the server parks it for you.
 
-**The rule:** lose *every* game of **two consecutive mirrored pairings** on the clock (`timeout`) and your bot is set to `onLadder: false`. That is four games in a row, typically about two minutes of being unreachable.
+**The rule:** lose your last **four consecutive ladder games** on the clock (`timeout`) and your bot is set to `onLadder: false` — typically about two minutes of being unreachable at the ladder's default clock.
 
-Why the threshold is a pairing and not a game: an offline bot flags both halves of a pair within seconds of each other, so "two games" would really mean one pairing — and a single 30-second hiccup would park a perfectly healthy bot. Requiring two pairings forgives one bad pair.
+The threshold forgives a single bad game (or two): a lone 30-second hiccup must not park a perfectly healthy bot, so the streak needs a genuine run of them.
 
 What does **not** count:
 
 - **Normal losses.** Only `timeout` terminations feed the streak. A weak bot that answers every move and loses by `king_captured` is never parked, however badly it is doing — being outplayed is not being offline.
-- **Casual and challenge games.** Only ladder pairings are counted, so a timeout in a game you started yourself can't park you.
+- **Casual and challenge games.** Only games the ladder scheduler itself started are counted, so a timeout in a game you started yourself can't park you.
 - **Any answered game.** One real result in the window breaks the streak.
 
 Parking is exactly what `POST /bot/ladder/leave` does: pairing stops, your rating **freezes** where it is, and the bot stays visible with `onLadder: false`. Nothing is deleted and nothing is penalised — the point is to stop the bleeding, for your rating *and* for everyone banking free wins against you.
@@ -77,6 +73,6 @@ A genuinely slow bot that keeps flagging on the ladder's 5+3 clock will eventual
 
 Glicko-2 is a good *live standing* — a number that updates quickly enough to pair bots sensibly and to show on a leaderboard. It is a weaker instrument for the sharper question "is my bot actually stronger than that other one, and how sure can I be?": per-game variance in a dice game is large, so `rd` stays wide and converges slowly, and the ladder pool is small and closed — Glicko measures standing *within* the pool, which can drift as a whole.
 
-[`GET /strength`](../reference/rest/#strength-report) answers that sharper question directly, for every pair of registered bots with enough shared history: a [Sequential Probability Ratio Test](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict — `"AcceptH1"`, `"AcceptH0"`, or an honest `"Continue"` when there simply isn't enough evidence yet — computed primarily over the same [mirrored pairs](#mirrored-pairs-cancelling-dice-luck) that cancel dice luck, topped up with any unpaired games between the two bots (weighted individually, without that cancellation), plus a pool-wide [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) ranking with bootstrap confidence intervals. [`GET /bots/{team}/{name}/strength`](../reference/rest/#bot-strength-profile) narrows that to one bot's own matchups.
+[`GET /strength`](../reference/rest/#strength-report) answers that sharper question directly, for every pair of registered bots with enough shared history: a [Sequential Probability Ratio Test](https://en.wikipedia.org/wiki/Sequential_probability_ratio_test) verdict — `"AcceptH1"`, `"AcceptH0"`, or an honest `"Continue"` when there simply isn't enough evidence yet — weighted per game between the two bots, plus a pool-wide [Bradley-Terry](https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model) ranking with bootstrap confidence intervals. [`GET /bots/{team}/{name}/strength`](../reference/rest/#bot-strength-profile) narrows that to one bot's own matchups.
 
 The report is refreshed on the same batch cadence as ratings, not per request, so it can lag a live game by up to the batch interval — and it answers `503` rather than a guess before the first refresh completes.

@@ -9,10 +9,9 @@ import dicechess.play.store.BotStore
 
 import scala.concurrent.duration.*
 
-/** The pairing scheduler (#102): server-chosen CRN mirrored pairs between on-ladder bots, on an interval, bounded by a
-  * concurrency cap. `tick` (a single scheduling attempt) is the unit under test throughout — the `.foreverM`
-  * `scheduler()` wrapper, started once at boot (same idiom as `Lobby.sweeper`/`Challenges.sweeper`), is not itself
-  * exercised here.
+/** The pairing scheduler (#102): server-chosen games between on-ladder bots, one per tick, bounded by a concurrency
+  * cap. `tick` (a single scheduling attempt) is the unit under test throughout — the `.foreverM` `scheduler()` wrapper,
+  * started once at boot (same idiom as `Lobby.sweeper`/`Challenges.sweeper`), is not itself exercised here.
   *
   * Tests below use `TimeControl.Unlimited` for the scheduler's own games purely for test speed/simplicity; production's
   * default `LadderScheduler.Config.Default` uses `Fischer`, never `Unlimited`/`PerMove` (see that object's doc
@@ -40,7 +39,7 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
       scheduler <- LadderScheduler.create(botStore, registry, events, config)
     yield (botStore, registry, events, scheduler)
 
-  /** Drive a room to completion with a bot on each seat — same idiom as `GameRegistrySuite.playToEnd`. */
+  /** Drive a room to completion with a bot on each seat. */
   private def playToEnd(room: GameRoom, white: Principal, black: Principal, algorithm: SearchAlgorithm): IO[Unit] =
     val whiteConn = BotConnection(white, Seat.White, algorithm)
     val blackConn = BotConnection(black, Seat.Black, algorithm)
@@ -62,78 +61,74 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
         assertEquals(onePool, Nil, "exactly one bot on the ladder still can't form a pair")
     }
 
-  test("a tick with two on-ladder bots starts a mirrored pair and pushes gameStart to both"):
-    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentPairs = 4, timeControl = TimeControl.Unlimited))
+  test("a tick with two on-ladder bots starts one game and pushes gameStart to both"):
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 4, timeControl = TimeControl.Unlimited))
       .flatMap { case (botStore, registry, events, scheduler) =>
         for
           _ <- joinLadder(botStore, List(alice, bob))
           // parTupled, not tupled: both subscriptions must register concurrently, before tick publishes — sequencing
           // them would let alice's blocking collect start before bob's subscription exists, missing her publish.
           result <- (
-            events.stream(alice).take(2).compile.toVector,
-            events.stream(bob).take(2).compile.toVector
+            events.stream(alice).take(1).compile.toVector,
+            events.stream(bob).take(1).compile.toVector
           ).parTupled.background
             .use(waiting => IO.sleep(150.millis) *> scheduler.tick *> waiting.flatMap(_.embedNever))
             .timeoutTo(5.seconds, IO.raiseError(RuntimeException("gameStart not delivered to both bots")))
           (aliceGot, bobGot) = result
           games <- registry.list
         yield
-          assertEquals(games.size, 2, "a mirrored pair is two games")
-          assertEquals(aliceGot.collect { case e: BotEvent.GameStart => e }.size, 2, s"alice got: $aliceGot")
-          assertEquals(bobGot.collect { case e: BotEvent.GameStart => e }.size, 2, s"bob got: $bobGot")
+          assertEquals(games.size, 1, "one tick starts exactly one game")
+          assertEquals(aliceGot.collect { case e: BotEvent.GameStart => e }.size, 1, s"alice got: $aliceGot")
+          assertEquals(bobGot.collect { case e: BotEvent.GameStart => e }.size, 1, s"bob got: $bobGot")
       }
 
-  test("the concurrency cap blocks a new pair while one is in flight, and frees up once it ends"):
+  test("the concurrency cap blocks a new game while one is in flight, and frees up once it ends"):
     val greedy = BotRegistry.getAlgorithm("greedy").get
-    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentPairs = 1, timeControl = TimeControl.Unlimited))
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 1, timeControl = TimeControl.Unlimited))
       .flatMap { case (botStore, registry, _, scheduler) =>
         for
           _          <- joinLadder(botStore, List(alice, bob, carol, dave))
           _          <- scheduler.tick
           afterFirst <- registry.list
-          _ = assertEquals(afterFirst.size, 2, "the first tick must start exactly one mirrored pair (two games)")
+          _ = assertEquals(afterFirst.size, 1, "the first tick must start exactly one game")
           _               <- scheduler.tick // at cap: must be a no-op
           afterSecondTick <- registry.list
-          _ = assertEquals(afterSecondTick.size, 2, "a tick at the concurrency cap must not start a second pair")
-          List((_, roomA), (_, roomB)) = afterFirst
-          playersA <- roomA.seating
-          playersB <- roomB.seating
-          _        <- (
-            playToEnd(roomA, playersA(Seat.White), playersA(Seat.Black), greedy),
-            playToEnd(roomB, playersB(Seat.White), playersB(Seat.Black), greedy)
-          ).parTupled
+          _ = assertEquals(afterSecondTick.size, 1, "a tick at the concurrency cap must not start a second game")
+          List((_, room)) = afterFirst
+          players <- room.seating
+          _       <- playToEnd(room, players(Seat.White), players(Seat.Black), greedy)
           firstIds = afterFirst.map(_._1).toSet
-          // Once both games conclude, the cap frees up and a tick starts a new pair — watch for a game id that wasn't
-          // in the original pair, NOT for the registry's total size: an ended pair's rooms linger only until BOTH
-          // have ended (#115/#116) and are then evicted independently of this scheduler's own bookkeeping, so the
-          // total count can transiently dip below (or never actually reach) old-count + new-count.
+          // Once the game concludes, the cap frees up and a tick starts a new one — watch for a game id that wasn't
+          // the original, NOT for the registry's total size: an ended room lingers only until its own eviction fiber
+          // fires, independently of this scheduler's own bookkeeping, so the total count can transiently dip below
+          // (or never actually reach) old-count + new-count.
           grew <- (scheduler.tick *> registry.list)
             .iterateUntil(_.exists((id, _) => !firstIds.contains(id)))
-            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("cap never freed up after the in-flight pair ended")))
+            .timeoutTo(10.seconds, IO.raiseError(RuntimeException("cap never freed up after the in-flight game ended")))
         yield assert(
           grew.exists((id, _) => !firstIds.contains(id)),
-          "a freed-up cap must allow a new pair to start"
+          "a freed-up cap must allow a new game to start"
         )
       }
 
   test("prefers not to immediately re-pick the same pair when a third bot is on the ladder"):
     val allThree: Set[Principal] = Set(alice, bob, carol)
-    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentPairs = 3, timeControl = TimeControl.Unlimited))
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 3, timeControl = TimeControl.Unlimited))
       .flatMap { case (botStore, registry, _, scheduler) =>
         for
           _          <- joinLadder(botStore, List(alice, bob, carol))
           _          <- scheduler.tick
           firstGames <- registry.list
-          _ = assertEquals(firstGames.size, 2)
+          _ = assertEquals(firstGames.size, 1)
           firstPair <- firstGames.head._2.seating.map(_.values.toSet)
           unpaired = allThree -- firstPair
           _        = assertEquals(unpaired.size, 1, s"expected exactly one bot left unpaired, got $unpaired")
           _        <- scheduler.tick
           allGames <- registry.list
-          _        = assertEquals(allGames.size, 4, "the second tick must start a second pair (cap allows it)")
+          _        = assertEquals(allGames.size, 2, "the second tick must start a second game (cap allows it)")
           firstIds = firstGames.map(_._1).toSet
           newGames = allGames.filterNot((id, _) => firstIds.contains(id))
-          _        = assertEquals(newGames.size, 2)
+          _        = assertEquals(newGames.size, 1)
           secondPair <- newGames.head._2.seating.map(_.values.toSet)
         yield assert(
           unpaired.subsetOf(secondPair),
@@ -150,7 +145,7 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
     // survives the filter, making "no adjacent repeat" a hard guarantee here, not just a probability.
     // Cap comfortably above the 6 ticks below: none of these pairs is ever played to completion, so the cap must
     // never bind here — that concurrency behavior has its own dedicated test above.
-    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentPairs = 10, timeControl = TimeControl.Unlimited))
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 10, timeControl = TimeControl.Unlimited))
       .flatMap { case (botStore, registry, _, scheduler) =>
         def newPair(beforeIds: Set[GameId]): IO[Set[Principal]] =
           registry.list.flatMap { after =>
@@ -189,13 +184,13 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
     val withNoCap       = LadderScheduler.Config.fromValues(Some("60"), None)
     List(withZeroCap, withNegativeCap, withJunkCap, withNoCap).foreach { config =>
       assertEquals(
-        config.map(_.maxConcurrentPairs),
-        Some(LadderScheduler.Config.DefaultMaxConcurrentPairs)
+        config.map(_.maxConcurrentGames),
+        Some(LadderScheduler.Config.DefaultMaxConcurrentGames)
       )
     }
 
   test("valid positive values parse through unchanged"):
     val config = LadderScheduler.Config.fromValues(Some("45"), Some("7"))
     assertEquals(config.map(_.interval), Some(45.seconds))
-    assertEquals(config.map(_.maxConcurrentPairs), Some(7))
+    assertEquals(config.map(_.maxConcurrentGames), Some(7))
     assertEquals(config.map(_.timeControl), Some(LadderScheduler.Config.DefaultTimeControl))

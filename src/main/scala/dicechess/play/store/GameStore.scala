@@ -65,14 +65,13 @@ final case class GameSnapshot(
     // pre-existing active game as corrupt on the next resume. Callers resolve this to a definite Boolean
     // (`GameRoom.restore`), defaulting a missing value to `false` — correct, since it predates the concept.
     rated: Option[Boolean] = None,
-    // Ties two CRN mirror games together (#101): same two participants, colours swapped, identical dice sequence.
-    // `None` for every non-ladder game — most games have no pair, so unlike `rated` there is no "resolve to a
-    // definite value" story; this stays `Option` all the way through (Session included), not just at rest.
-    pairingId: Option[String] = None,
-    // The specific partner game's id (#115) — lets `GameRegistry.resume` rebuild the "has my partner ended yet"
-    // reveal-eligibility check after a restart, when it can no longer rely on the in-memory closure built at
-    // creation. `pairingId` alone isn't enough for that: it's a shared correlation key, not a pointer.
-    partnerGameId: Option[String] = None
+    // Whether the ladder scheduler started this game (#190) — the only marker distinguishing that from a direct
+    // challenge, which is what keeps a casual timeout from ever tripping ladder auto-park. Same `Option` story as
+    // `rated` immediately above, for the same reason: a pre-existing row from before this field existed has no
+    // key at all, and a defaulted non-`Option` field fails to decode ("Missing required field") rather than
+    // falling back, which would discard every active game as corrupt on the next resume. Resolved to a definite
+    // `false` in `GameRoom.restore`, exactly like `rated`.
+    ladder: Option[Boolean] = None
 ):
   def ended: Boolean = status match
     case GameStatus.Ended(_) => true
@@ -362,14 +361,20 @@ final case class GameResultRow(
     rated: Boolean,
     timeControl: String,
     serverSeed: String,
+    // Historical: `None` for a game finished after #190. Kept, not backfilled — StrengthReport's pentanomial
+    // grouping still scores pre-existing CRN pairs correctly; a new row simply never joins a group.
     pairingId: Option[String],
+    // Whether the ladder scheduler started this game (#190) — the only marker distinguishing that from a direct
+    // rated challenge between the same two bots. `RatingBatch.shouldPark`'s auto-park streak (#150) filters on
+    // this so a casual/challenge timeout can never park a bot.
+    ladder: Boolean,
     finishedAt: java.time.Instant
 )
 
 /** Persistence seam for the queryable `game_results` projection (#98): the games table's own snapshot is opaque JSONB
   * (only `status` is indexed), so the ladder scheduler and rating batch need this to enumerate finished games by
-  * participant / result / rated / pairing without decoding JSON. One row per finished game, written once (in the same
-  * transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — with one
+  * participant / result / rated / ladder-origin without decoding JSON. One row per finished game, written once (in the
+  * same transaction as the terminal snapshot save, see `PgGameStore.save`) and never updated afterward — with one
   * bookkeeping exception, the `rating_applied_at` stamp (V6, see [[RatingStore]]) — Postgres only, since
   * `GameStore.noop`'s in-memory mode has nothing to project.
   */
@@ -390,9 +395,6 @@ trait GameResultsStore:
     * own scope.
     */
   def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]
-
-  /** The (up to two) games sharing this CRN pairing id (#101), for pentanomial scoring. */
-  def pairFor(pairingId: String): IO[List[GameResultRow]]
 
   /** A filtered, keyset-paginated page of `externalId`'s finished games (#173) — the general-purpose sibling of
     * `recentResultsFor`, which serves only the small fixed-size page a bot's profile glance needs and must stay

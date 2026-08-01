@@ -74,7 +74,8 @@ class CodecsSuite extends munit.FunSuite:
         Some(ClientSeeds("w", "b"))
       )
     )
-    // A CRN-paired game (#115) whose mirror partner hasn't concluded yet withholds the reveal entirely.
+    // `None` is a valid wire shape even though nothing ever actually withholds the reveal post-#190 — the type
+    // stays `Option` regardless (see the pinned-JSON test below for why), so decode must still accept it.
     roundtrip[GameEvent](GameEvent.GameEnded(10L, GameOver(GameResult.Draw, Termination.Aborted), None, None))
     roundtrip[GameEvent](GameEvent.Rejected(2L, Seat.Black, "nope"))
 
@@ -148,8 +149,8 @@ class CodecsSuite extends munit.FunSuite:
       ): GameEvent).asJson.noSpaces,
       """{"GameEnded":{"v":3,"over":{"result":{"Win":{"side":"White"}},"termination":"KingCaptured"},"seed":"ab12","clientSeeds":{"white":"w","black":"b"}}}"""
     )
-    // A CRN-paired game (#115) withholds the reveal (both null) until its mirror partner has also concluded — pin
-    // this shape too, so a future change can't silently drop the "still withheld" case back to always-revealing.
+    // `seed`/`clientSeeds` are `Option` on the wire even though nothing withholds them post-#190 — pin the `null`
+    // shape too, so a future change can't silently narrow the type and break any client still decoding defensively.
     assertEquals(
       (GameEvent.GameEnded(
         4L,

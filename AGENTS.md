@@ -67,9 +67,9 @@ Server env vars (all opt-in): `PLAY_DB_URL`/`PLAY_DB_USER`/`PLAY_DB_PASSWORD` (p
 unset = fully in-memory, restart drops everything), `INGEST_URL` (the FULL endpoint URL) +
 `INGEST_TOKEN` (outbox delivery to analytics), `PLAY_BOT_TOKENS` (`team|name|token` CSV),
 `PLAY_CORS_ORIGINS` (empty = allow any), `APP_VERSION` (surfaced at GET /version),
-`LADDER_INTERVAL_SECONDS` (+ optional `LADDER_MAX_CONCURRENT_PAIRS`, default `4`) — unset
+`LADDER_INTERVAL_SECONDS` (+ optional `LADDER_MAX_CONCURRENT_GAMES`, default `8`) — unset
 disables automatic ladder pairing entirely, `RATING_INTERVAL_SECONDS` (+ optional
-`RATING_BATCH_SIZE`, default `100`, and `LADDER_TIMEOUT_PARK_PAIRS`, default `2`) — unset
+`RATING_BATCH_SIZE`, default `100`, and `LADDER_TIMEOUT_PARK_GAMES`, default `4`) — unset
 disables Glicko-2 rating updates **and ladder auto-park** entirely,
 `WEBHOOK_TIMEOUT_SECONDS` — unset disables bot webhook push entirely (routes + dispatcher),
 `RETENTION_INTERVAL_SECONDS` (+ optional `RETENTION_DAYS`, default `30`, and
@@ -168,14 +168,21 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   moving to a second environment: all three were missed, independently, one at a time). Verify
   a new deployment with a live check — `GET /games` becomes non-empty and `/leaderboard` counts
   increase over a minute — not just `/health`.
+- `LADDER_MAX_CONCURRENT_GAMES` (#190) replaces `LADDER_MAX_CONCURRENT_PAIRS`, which counted CRN
+  mirror pairs (2 games each) — its new default (`8` games) matches the real capacity the old
+  default (`4` pairs) produced, so a deployment carrying the old var name over unrenamed keeps its
+  actual throughput unchanged rather than silently halving it.
 - Retention (#179) will not reclaim anything on a deployment whose games predate `game_archive`,
   and this looks like the feature not working: the pass refuses to prune an ended non-aborted
   snapshot that has no archive row, because that snapshot is then the only copy of the game's
   history. Run `mise run archive:backfill` (#199) first; the retained count is in the log line.
-- `LADDER_TIMEOUT_PARK_PAIRS` (#150) is a `LADDER_*` knob read by the **rating** batch, so it does
+- `LADDER_TIMEOUT_PARK_GAMES` (#150) is a `LADDER_*` knob read by the **rating** batch, so it does
   nothing unless `RATING_INTERVAL_SECONDS` is also set: with rating updates off, a dead bot is
   never auto-parked and keeps bleeding rating while inflating every opponent it is paired with.
-  The name follows the feature (the ladder), not the component that hosts the check.
+  The name follows the feature (the ladder), not the component that hosts the check. Renamed from
+  `LADDER_TIMEOUT_PARK_PAIRS` when #190 dropped CRN mirrored pairs — the new default (`4` games)
+  matches the real threshold the old default (`2` pairings, 2 games each) enforced, so a deployment
+  that hasn't renamed its env var sees no behaviour change.
 - README status banner, the "in-memory for now" callout, and the roadmap placement of the seek
   lobby are stale — durability and the lobby shipped. Trust the code and `docs/bot-api.md`.
 - The house bot that opposes quickstart users is deployed outside this repo (via

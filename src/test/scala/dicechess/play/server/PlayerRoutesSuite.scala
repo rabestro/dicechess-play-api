@@ -32,7 +32,6 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
   ): GameResultsStore = new GameResultsStore:
     def recentResultsFor(externalId: String, limit: Int): IO[List[GameResultRow]] = IO.pure(Nil)
     def finishedRatedSince(since: Instant): IO[List[GameResultRow]]               = IO.pure(Nil)
-    def pairFor(pairingId: String): IO[List[GameResultRow]]                       = IO.pure(Nil)
 
     def playerGamesPage(
         externalId: String,
@@ -81,7 +80,7 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
       timeControl: String = "Fischer(300,3)",
       finishedAt: Instant = at
   ): GameResultRow =
-    GameResultRow(GameId(id), white, black, result, termination, rated, timeControl, "ab12", None, finishedAt)
+    GameResultRow(GameId(id), white, black, result, termination, rated, timeControl, "ab12", None, false, finishedAt)
 
   private def get(path: String)(service: HttpApp[IO]) =
     service.run(Request[IO](Method.GET, Uri.unsafeFromString(path)))

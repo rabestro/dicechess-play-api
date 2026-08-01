@@ -166,10 +166,10 @@ components:
                 properties:
                   result: { description: '{"Win":{"side":"White"}} or {"Draw":{}}.' }
                   termination: { type: string, enum: [KingCaptured, Resign, Draw, Aborted, Timeout] }
-              seed: { type: [string, 'null'], description: Revealed server seed (null while a mirror-pair partner is unfinished). }
+              seed: { type: [string, 'null'], description: Revealed server seed (null only while the game is still active). }
               clientSeeds:
                 oneOf: [{ $ref: '#/components/schemas/ClientSeeds' }, { type: 'null' }]
-                description: The two revealed client seeds, or null while withheld.
+                description: The two revealed client seeds, null only while the game is still active.
     Rejected:
       name: Rejected
       title: The engine rejected submitted moves.
