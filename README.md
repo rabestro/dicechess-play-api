@@ -2,7 +2,7 @@
 
 [![CI Pipeline](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml/badge.svg)](https://github.com/rabestro/dicechess-play-api/actions/workflows/ci.yaml)
 [![Play Live](https://img.shields.io/badge/Play-Live-success)](https://play.jc.id.lv/)
-[![Bot API Docs](https://img.shields.io/badge/Docs-Bot%20API-orange)](https://jc.id.lv/dicechess-play-api/)
+[![Bot API Docs](https://img.shields.io/badge/Docs-Bot%20API-orange)](https://bots.jc.id.lv/)
 [![Leaderboard](https://img.shields.io/badge/Bots-Leaderboard-blue)](https://play.jc.id.lv/leaderboard)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-lightgrey)](./LICENSE)
 
@@ -65,7 +65,7 @@ connection modes: REST polling, an ndjson event stream, or a single serverless *
 reconnect-safe. Our own engine bots dogfood the exact same API and provide always-online
 opponents; anyone can register a bot, self-test it, and opt into the rating ladder.
 
-- **Docs:** <https://jc.id.lv/dicechess-play-api/> — quickstart, REST/stream/webhook
+- **Docs:** <https://bots.jc.id.lv/> — quickstart, REST/stream/webhook
   reference, DFEN, the legal-move tree, and the provably-fair verification procedure.
 - **Starters** (fork and run): [Python](https://github.com/rabestro/dicechess-bot-python),
   [TypeScript](https://github.com/rabestro/dicechess-bot-typescript) (both MIT, no engine),
@@ -80,7 +80,7 @@ Shipped and running in production:
   through the JVM engine); clients only send intents.
 - **Human vs human** over WebSocket, end-to-end.
 - **Bot API** — REST + ndjson event streams + webhooks; anonymous (ephemeral) and registered
-  (durable) tokens. Full reference at <https://jc.id.lv/dicechess-play-api/>.
+  (durable) tokens. Full reference at <https://bots.jc.id.lv/>.
 - **Durability** — Postgres `play` schema (Flyway `V1`–`V7`) with crash recovery; opt-in via
   `PLAY_DB_URL` (unset = in-memory dev mode, see [Running](#running)).
 - **Analytics hand-off** — finished games flow to
@@ -191,7 +191,7 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
 4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
 5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.
 
-**Endpoints:** `GET /health` · `GET /version` · the human game surface (`POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`) · public discovery (`GET /games`, `GET /leaderboard`, `GET /bots/{team}/{name}`) · and the full Bot API under `/bot/…` (identity, challenges, seeks, gameplay, streams, webhooks, ladder). The **complete, authoritative reference** — every route, payload, and the provably-fair procedure — is the docs site: **<https://jc.id.lv/dicechess-play-api/>**.
+**Endpoints:** `GET /health` · `GET /version` · the human game surface (`POST /games`, `GET /games/{id}`, `GET /games/{id}/ws?token=…`) · public discovery (`GET /games`, `GET /leaderboard`, `GET /bots/{team}/{name}`) · and the full Bot API under `/bot/…` (identity, challenges, seeks, gameplay, streams, webhooks, ladder). The **complete, authoritative reference** — every route, payload, and the provably-fair procedure — is the docs site: **<https://bots.jc.id.lv/>**.
 
 **Anonymous bots:** `POST /bot/anon?name=…` mints an ephemeral, **unranked** Bearer token bound to `bot:team:anon:<uuid>` — zero registration, so a third party can point a bot at the API and test in minutes (challenge a house bot, or self-play). Tokens are in-memory with a TTL (expired entries pruned), and minting is **per-IP rate-limited** (`429` + `Retry-After`; the client IP is read from the Cloudflare tunnel's `CF-Connecting-IP`). Registered, durable identities come from `POST /bot/register` (or static `PLAY_BOT_TOKENS`), and only they can hold webhooks and join the ladder.
 
