@@ -87,3 +87,21 @@ run = "npm run dev"
 description = "🏗️  Compile the documentation site to static HTML (docs/dist)"
 dir = "docs"
 run = "npm run build"
+
+# Contributor docs (contributor-docs/) — architecture, schema, conventions; GitHub Pages.
+# Separate site from docs/ above, which is the public Bot API reference on bots.jc.id.lv.
+
+[tasks."contrib-docs:install"]
+description = "📦 Install the contributor documentation site's npm dependencies"
+dir = "contributor-docs"
+run = "npm install"
+
+[tasks."contrib-docs:dev"]
+description = "📓 Start the local contributor documentation dev server"
+dir = "contributor-docs"
+run = "npm run dev"
+
+[tasks."contrib-docs:build"]
+description = "🏗️  Compile the contributor docs to static HTML (contributor-docs/dist)"
+dir = "contributor-docs"
+run = "npm run build"

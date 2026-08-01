@@ -1,5 +1,6 @@
-# Dependency hygiene for every surface in this repo: the Scala backend (sbt), the docs/
-# Astro + Starlight site (npm), and the GitHub Actions used across all workflows.
+# Dependency hygiene for every surface in this repo: the Scala backend (sbt), the two
+# Astro + Starlight sites (npm — docs/ for the public Bot API, contributor-docs/ for
+# contributor documentation), and the GitHub Actions used across all workflows.
 # One file only — GitHub reads .github/dependabot.yml, so this is the single source of
 # truth; a second dependabot.yaml is silently shadowed by this file and must not exist.
 version: 2
@@ -23,6 +24,26 @@ updates:
   # Docs site (Astro + Starlight)
   - package-ecosystem: "npm"
     directory: "/docs"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "documentation"
+    commit-message:
+      prefix: "chore(docs)"
+    groups:
+      # One PR for the routine minor/patch bumps; majors still come individually.
+      astro-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Contributor docs site (Astro + Starlight) — separate npm project from /docs
+  - package-ecosystem: "npm"
+    directory: "/contributor-docs"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

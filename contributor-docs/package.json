@@ -1,0 +1,20 @@
+{
+  "name": "dicechess-play-api-contributor-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.5",
+    "astro": "^7.1.4",
+    "astro-mermaid": "^2.1.0",
+    "mermaid": "^11.15.0",
+    "sharp": "^0.35.3"
+  }
+}
