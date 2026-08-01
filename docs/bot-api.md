@@ -8,7 +8,7 @@
 > pages, plus a new English **provably-fair dice verification** guide.
 
 The site is built from Markdown under [`docs/src/content/docs/`](./src/content/docs/) with
-Astro + Starlight and deployed to GitHub Pages on every change (see
+Astro + Starlight and deployed to an assets-only Cloudflare Worker on every docs change (see
 [`.github/workflows/deploy-docs.yaml`](../.github/workflows/deploy-docs.yaml)). Run it locally
 with `mise run docs:dev`.
 
