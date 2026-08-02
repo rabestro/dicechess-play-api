@@ -18,6 +18,14 @@ pre-commit:
       glob: "**.{scala,sbt}"
       run: scalafmt --test {staged_files}
 
+    # Workflow YAML must parse. A broken workflow does not fail CI — it silently stops
+    # running, so its checks disappear rather than turn red, and release-only workflows
+    # are not exercised by a pull request at all, so nothing would surface until a release.
+    # Ruby ships with macOS and the GitHub runners, so this costs milliseconds.
+    - name: workflow-yaml
+      glob: ".github/workflows/*.y*ml"
+      run: ruby -ryaml -e 'ARGV.each { |f| YAML.load_file(f) }' {staged_files}
+
 # Pre-push is a hermetic safety net, not a test gate: a full-project format check via
 # the native CLI (no Docker, no network). It catches what the per-commit hook can miss
 # (--no-verify commits, rebase/merge fallout). The full gate (tests + coverage) is
