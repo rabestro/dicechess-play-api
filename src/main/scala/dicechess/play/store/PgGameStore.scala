@@ -38,7 +38,8 @@ final class PgGameStore private (xa: Transactor[IO])
     with RatingStore
     with LeaderboardStore
     with BotCatalogStore
-    with WebhookStore:
+    with WebhookStore
+    with WebhookStatsStore:
   import PgGameStore.{BootTimeout, SaveTimeout}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and write its
@@ -450,6 +451,68 @@ final class PgGameStore private (xa: Transactor[IO])
       .transact(xa)
       .timeout(SaveTimeout)
       .map(_ == 1)
+
+  // ── WebhookStatsStore (#225) ─────────────────────────────────────────────────
+
+  /** One delivery folded into its histogram cell, PLUS — for a genuine fault (`DeliveryOutcome.isFailure`) — the bot's
+    * "last failure" columns. `hour` is truncated in SQL (`date_trunc`), not in Scala, so the truncation rule lives in
+    * exactly one place and `statsFor`'s own range read reasons about the same column the same way. Both writes are
+    * best-effort off the turn path: `Webhooks`'s drain loop is the only caller, and a failure here is dropped, never
+    * retried, never allowed to touch a game.
+    */
+  def recordDelivery(
+      team: String,
+      name: String,
+      outcome: DeliveryOutcome,
+      elapsed: FiniteDuration,
+      at: Instant
+  ): IO[Unit] =
+    val key             = DeliveryOutcome.key(outcome)
+    val bucket          = LatencyHistogram.bucketOf(elapsed)
+    val upsertHistogram =
+      sql"""INSERT INTO play.bot_webhook_stats (team, name, hour, outcome, latency_bucket, count)
+            VALUES ($team, $name, date_trunc('hour', $at::timestamptz), $key, $bucket, 1)
+            ON CONFLICT (team, name, hour, outcome, latency_bucket)
+            DO UPDATE SET count = play.bot_webhook_stats.count + 1""".update.run.void
+    val markLastFailure =
+      sql"""UPDATE play.bot_webhooks SET last_failure_at = $at, last_failure_reason = ${DeliveryOutcome.describe(
+          outcome
+        )}
+            WHERE team = $team AND name = $name""".update.run.void
+        .whenA(DeliveryOutcome.isFailure(outcome))
+    (upsertHistogram *> markLastFailure).transact(xa).timeout(SaveTimeout)
+
+  /** `GET /bot/webhook/stats`'s read: one query covers both windows (7 days is the wider one; the 24h window is
+    * re-aggregated from the same rows in Scala, in `DeliveryStatsWindow.aggregate` — no reason to hit Postgres twice
+    * for a subset of what the first query already fetched), plus the bot's last-failure columns.
+    */
+  def statsFor(team: String, name: String, now: Instant): IO[WebhookStats] =
+    val since7d  = now.minus(7, java.time.temporal.ChronoUnit.DAYS)
+    val since24h = now.minus(24, java.time.temporal.ChronoUnit.HOURS)
+    val rows     =
+      sql"""SELECT outcome, latency_bucket, hour, count FROM play.bot_webhook_stats
+            WHERE team = $team AND name = $name AND hour >= $since7d"""
+        .query[(String, Int, Instant, Long)]
+        .to[List]
+    val lastFailure =
+      sql"""SELECT last_failure_at, last_failure_reason FROM play.bot_webhooks
+            WHERE team = $team AND name = $name"""
+        .query[(Option[Instant], Option[String])]
+        .option
+    (rows, lastFailure).tupled
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map { case (all7d, failureRow) =>
+        val last24h = all7d.filter { case (_, _, hour, _) => !hour.isBefore(since24h) }
+        WebhookStats(
+          last24h = DeliveryStatsWindow.aggregate(last24h.map { case (o, b, _, c) => (o, b, c) }),
+          last7d = DeliveryStatsWindow.aggregate(all7d.map { case (o, b, _, c) => (o, b, c) }),
+          lastFailure = failureRow.flatMap {
+            case (Some(at), Some(reason)) => Some(LastFailure(at, reason))
+            case _                        => None
+          }
+        )
+      }
 
   /** Every live game, decoded row by row: one corrupt snapshot is logged and skipped, never aborting the batch — a
     * single bad row must not stop every other game from resuming.

@@ -74,6 +74,32 @@ succeeded (`verified_at`). Note the asymmetry with `bots`: the per-bot HMAC `sec
 in plaintext because the server must read it back to sign requests, whereas the bearer token is
 only ever compared as a hash. Deleting the bot cascades to its webhook.
 
+`last_failure_at`/`last_failure_reason` (V13, #225) are the one delivery a histogram alone can't
+answer: not "how often does my bot fail", but "is it still failing, and since when". Both
+nullable — a bot with a clean history, or no deliveries yet, has neither. Written only by a
+genuine fault (`DeliveryOutcome.isFailure`); a usable move or a clean decline never overwrites
+them. They live here rather than in a second one-row-per-bot table because `bot_webhooks` is
+already exactly that shape.
+
+### `bot_webhook_stats` — delivery telemetry (#225)
+
+A bucketed histogram, not a row per delivery: one row per `(team, name, hour, outcome,
+latency_bucket)`, upserted with `count = count + 1`. Bounded growth on purpose — at most a few
+dozen rows per bot per hour (the outcomes actually seen times ~14 latency buckets), which is why
+this needed no retention story of its own. `outcome` folds an HTTP status into the string itself
+(`http_503`) rather than a nullable side column, so the whole classification stays one `NOT NULL`
+text and fits cleanly into the primary key.
+
+Recording is fire-and-forget, off the turn-delivery path entirely: `Webhooks.deliverTurn`
+classifies the attempt and `tryOffer`s it to a bounded in-process queue; a separate drain loop
+does the actual upsert. A slow or failing write only ever costs a dropped data point, never a
+turn — this table's own INSERT latency is never on the same critical path a bot's clock is.
+
+`GET /bot/webhook/stats` reads this table (plus the two `bot_webhooks` columns above) and does
+its own aggregation in Scala (`WebhookStats.aggregate`, DB-free and unit-tested on its own) rather
+than in SQL — one query fetches the wider 7-day window, and the 24-hour window is a Scala-side
+filter over the same rows, so the read never has to hit Postgres twice.
+
 ### `game_results` — the queryable projection
 
 Finished games, decoded out of the opaque snapshot so the ladder scheduler, the rating batch,

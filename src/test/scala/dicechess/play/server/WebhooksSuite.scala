@@ -1,11 +1,12 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
 import com.comcast.ip4s.*
 import dicechess.engine.search.BotRegistry
 import dicechess.play.core.*
 import dicechess.play.game.BotConnection
-import dicechess.play.store.{BotWebhook, GameStore, WebhookStore}
+import dicechess.play.store.{BotWebhook, DeliveryOutcome, GameStore, WebhookStats, WebhookStatsStore, WebhookStore}
 import io.circe.Json
 import io.circe.parser.decode
 import io.circe.syntax.*
@@ -315,3 +316,109 @@ class WebhooksSuite extends munit.CatsEffectSuite:
     val config = Webhooks.Config(timeout = 120.seconds)
     assert(config.clientTimeout > config.timeout, "a client cut at or below the window would pre-empt post's timeout")
     assert(config.clientIdleTimeout > config.clientTimeout, "the connection is idle for as long as the bot thinks")
+
+  // ── delivery telemetry (#225) ────────────────────────────────────────────────
+
+  /** A `WebhookStatsStore` that captures every `recordDelivery` call instead of persisting anything — the seam these
+    * tests use to prove `deliverTurn` classifies and enqueues correctly, without a database.
+    */
+  private def capturingStats
+      : IO[(Ref[IO, List[(String, String, DeliveryOutcome, FiniteDuration)]], WebhookStatsStore)] =
+    Ref.of[IO, List[(String, String, DeliveryOutcome, FiniteDuration)]](Nil).map { calls =>
+      val store = new WebhookStatsStore:
+        def recordDelivery(
+            team: String,
+            name: String,
+            outcome: DeliveryOutcome,
+            elapsed: FiniteDuration,
+            at: Instant
+        ): IO[Unit] = calls.update(_ :+ (team, name, outcome, elapsed))
+        def statsFor(team: String, name: String, now: Instant): IO[WebhookStats] = IO.pure(WebhookStats.empty)
+      (calls, store)
+    }
+
+  test("a dead endpoint's delivery attempt is recorded as Unreachable telemetry, not silently lost"):
+    val dead = Client[IO](_ => cats.effect.Resource.eval(IO.raiseError(new java.net.ConnectException("refused"))))
+    for
+      registry            <- GameRegistry.create(store = GameStore.noop)
+      store               <- WebhookStore.inMemory
+      (calls, statsStore) <- capturingStats
+      silent = Principal.Bot("hooks", "silent-stats")
+      _ <- store.put(BotWebhook("hooks", "silent-stats", "https://gone.example/hook", "s" * 64, Instant.EPOCH))
+      opponent = Principal.Bot("acme", "greedy-stats")
+      made <- registry.create(silent, opponent, TimeControl.Unlimited)
+      (_, room) = made.toOption.get
+      _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
+      _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
+      // Black is driven, White is not (#176's gotcha): the opening roll misses a pawn/knight ~30% of the time, and
+      // with an idle Black and no clock (Unlimited) that would deadlock the room before White ever sees a turn.
+      driver = BotConnection(opponent, Seat.Black, BotRegistry.getAlgorithm("greedy").get)
+      recorded <- Webhooks.create(registry, store, dead, config, allowAll, statsStore).use { webhooks =>
+        (driver.run(room).background, webhooks.statsLoop.background).tupled.use { _ =>
+          webhooks.attachSweep *>
+            calls.get
+              .iterateUntil(_.nonEmpty)
+              .timeoutTo(15.seconds, IO.raiseError(new RuntimeException("delivery telemetry never arrived")))
+        }
+      }
+    yield
+      assert(recorded.forall { case (t, n, _, _) => t == "hooks" && n == "silent-stats" })
+      assert(
+        recorded.exists { case (_, _, outcome, _) => outcome == DeliveryOutcome.Unreachable },
+        s"expected an Unreachable record, got: $recorded"
+      )
+
+  /** Drives the game and the stats drain loop side by side, then polls the captured calls for a record matching `done`
+    * — shared by every telemetry test below so each stays focused on its own scenario setup.
+    */
+  private def awaitDelivery(
+      driver: BotConnection,
+      room: dicechess.play.game.GameRoom,
+      webhooks: Webhooks,
+      calls: Ref[IO, List[(String, String, DeliveryOutcome, FiniteDuration)]],
+      done: List[(String, String, DeliveryOutcome, FiniteDuration)] => Boolean
+  ): IO[List[(String, String, DeliveryOutcome, FiniteDuration)]] =
+    (driver.run(room).background, webhooks.statsLoop.background).tupled.use { _ =>
+      webhooks.attachSweep *>
+        calls.get
+          .iterateUntil(done)
+          .timeoutTo(15.seconds, IO.raiseError(new RuntimeException(s"expected telemetry never arrived: $calls")))
+    }
+
+  test("a successful delivery is recorded as Applied telemetry"):
+    for
+      registry         <- GameRegistry.create(store = GameStore.noop)
+      store            <- WebhookStore.inMemory
+      secrets          <- Ref.of[IO, List[String]](Nil)
+      delivered        <- Ref.of[IO, Int](0)
+      badSig           <- Ref.of[IO, Int](0)
+      calls_statsStore <- capturingStats
+      (calls, statsStore)       = calls_statsStore
+      webhookBot: Principal.Bot = Principal.Bot("hooks", "applied-stats")
+      opponent: Principal.Bot   = Principal.Bot("acme", "driven-stats")
+      resources                 = Webhooks.create(
+        registry,
+        store,
+        Client.fromHttpApp(botEndpoint(secrets, registry, delivered, badSig)),
+        config,
+        allowAll,
+        statsStore
+      )
+      recorded <- resources.use { webhooks =>
+        for
+          hook <- webhooks.register(webhookBot, "https://bots.example/hook").map(_.toOption.get)
+          _    <- secrets.set(List(hook.secret))
+          made <- registry.create(webhookBot, opponent, TimeControl.Unlimited)
+          room = made.toOption.get._2
+          _ <- room.submit(Seat.White, GameCommand.SubmitSeed(seed))
+          _ <- room.submit(Seat.Black, GameCommand.SubmitSeed(seed))
+          driver = BotConnection(opponent, Seat.Black, BotRegistry.getAlgorithm("greedy").get)
+          recorded <- awaitDelivery(driver, room, webhooks, calls, _.exists(_._3 == DeliveryOutcome.Applied))
+        yield recorded
+      }
+    yield assert(
+      recorded.exists { case (t, n, outcome, _) =>
+        t == "hooks" && n == "applied-stats" && outcome == DeliveryOutcome.Applied
+      },
+      s"expected an Applied record for hooks/applied-stats, got: $recorded"
+    )

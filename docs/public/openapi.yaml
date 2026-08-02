@@ -638,6 +638,24 @@ paths:
         '204': { description: Removed. }
         '404': { description: No webhook was registered. }
         '503': { description: Webhooks disabled on this server. }
+  /bot/webhook/stats:
+    get:
+      tags: [Webhooks]
+      summary: Delivery telemetry
+      description: >
+        Two windows (24h, 7d) of turn-delivery outcomes and latency percentiles, plus the most
+        recent genuine failure. Recorded off the turn path — never adds latency to a delivery, and
+        a stats-write failure never affects the game. NOT gated on webhooks being enabled: this
+        reads history, which can outlive the feature being toggled off. Registered bots only, and
+        needs persistence server-wide (404 without it, same as the leaderboard/catalog).
+      responses:
+        '200':
+          description: Aggregated delivery telemetry.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDeliveryStats' }
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+        '404': { description: Server runs without persistence. }
 components:
   securitySchemes:
     bearerAuth:
@@ -1074,6 +1092,44 @@ components:
           type: array
           items: { $ref: '#/components/schemas/PairwiseResult' }
       required: [team, name, pairwise]
+    DeliveryOutcomeCount:
+      type: object
+      properties:
+        outcome:
+          type: string
+          description: >
+            applied, declined, refused, garbled, oversized_body, http_<code>, timed_out, or
+            unreachable.
+        count: { type: integer, format: int64 }
+      required: [outcome, count]
+    DeliveryWindow:
+      type: object
+      properties:
+        totalDeliveries: { type: integer, format: int64 }
+        outcomes:
+          type: array
+          items: { $ref: '#/components/schemas/DeliveryOutcomeCount' }
+        p50Ms: { type: integer, nullable: true, description: Bucket-resolution approximation, not exact. }
+        p90Ms: { type: integer, nullable: true }
+        p99Ms: { type: integer, nullable: true }
+      required: [totalDeliveries, outcomes, p50Ms, p90Ms, p99Ms]
+    LastDeliveryFailure:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        reason: { type: string }
+      required: [at, reason]
+    WebhookDeliveryStats:
+      type: object
+      properties:
+        last24h: { $ref: '#/components/schemas/DeliveryWindow' }
+        last7d: { $ref: '#/components/schemas/DeliveryWindow' }
+        lastFailure:
+          oneOf:
+            - { $ref: '#/components/schemas/LastDeliveryFailure' }
+            - type: 'null'
+          description: None if the bot has never had a genuine delivery fault.
+      required: [last24h, last7d, lastFailure]
     Seat:
       type: string
       enum: [White, Black]
