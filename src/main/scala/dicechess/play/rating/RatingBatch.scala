@@ -95,7 +95,14 @@ final class RatingBatch private (
   private def refreshStrengthCache: IO[Unit] =
     resultsStore
       .finishedRatedSince(Instant.EPOCH) // the whole history, every time — a batch snapshot, not an incremental fold
-      .map(StrengthReport.build(_, strengthConfig))
+      // `IO.blocking`, even though nothing here blocks (#216). The fold is a single CPU-bound stretch with no
+      // suspension points, so on the compute pool it holds one worker start to finish — on the 2-OCPU production box
+      // that is HALF the pool, and cats-effect says so out loud once per rebuild ("Your CPU is probably starving").
+      // Off the pool, the work still competes for cores with everything else, which is unavoidable and fine; what
+      // stops is a game fiber waiting on a worker that will not yield for the length of a batch job. A dedicated
+      // single-thread pool would express the CPU-bound nature better, but it needs a `Resource` and therefore new
+      // lifecycle plumbing through `Main` for a job that runs four times an hour — not worth the surface.
+      .flatMap(rows => IO.blocking(StrengthReport.build(rows, strengthConfig)))
       .flatMap(strengthCache.set)
       .handleErrorWith(error =>
         refreshState.update(_.copy(pending = true)) *>
