@@ -101,13 +101,14 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
 
   test("GET /lobby/bots returns catalog cards, derives provisional from RD, and pins the wire shape"):
     val listings = List(
-      BotCatalogListing("acme", "alice", 1720.5, 85.0, Some("aggressive + book")),
-      BotCatalogListing("acme", "fresh", 1500.0, 350.0, None) // RD above the threshold: provisional, but still listed
+      BotCatalogListing("acme", "alice", 1720.5, 85.0, Some("aggressive + book"), maxConcurrentGames = 4),
+      // RD above the threshold: provisional, but still listed. A neither-busy declaration (1, no active games).
+      BotCatalogListing("acme", "fresh", 1500.0, 350.0, None, maxConcurrentGames = 1)
     )
     val expected = parse(
       """{"bots":[
-           {"team":"acme","name":"alice","rating":1720.5,"rd":85.0,"provisional":false,"description":"aggressive + book"},
-           {"team":"acme","name":"fresh","rating":1500.0,"rd":350.0,"provisional":true,"description":null}
+           {"team":"acme","name":"alice","rating":1720.5,"rd":85.0,"provisional":false,"description":"aggressive + book","available":true},
+           {"team":"acme","name":"fresh","rating":1500.0,"rd":350.0,"provisional":true,"description":null,"available":true}
          ]}"""
     ).toOption.get
     for
@@ -118,6 +119,23 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(resp.status, Status.Ok)
       assertEquals(body, expected, "the catalog shape is a contract — pin it")
+
+  test("GET /lobby/bots flags available:false for a bot at its declared capacity, true once room is left (#224)"):
+    val listings = List(
+      BotCatalogListing("acme", "alice", 1720.5, 85.0, None, maxConcurrentGames = 1),
+      BotCatalogListing("acme", "bob", 1600.0, 90.0, None, maxConcurrentGames = 2)
+    )
+    for
+      registry <- freshRegistry
+      // Both bots play one game each: alice's single slot is spent, bob still has one of his two free.
+      _      <- registry.create(Principal.Bot("acme", "alice"), Principal.Bot("filler", "one"))
+      _      <- registry.create(Principal.Bot("acme", "bob"), Principal.Bot("filler", "two"))
+      routes <- app(registry, listings)
+      resp   <- routes.orNotFound.run(request(Method.GET, "/lobby/bots"))
+      body   <- resp.as[BotCatalog]
+    yield
+      assertEquals(body.bots.find(_.name == "alice").map(_.available), Some(false))
+      assertEquals(body.bots.find(_.name == "bob").map(_.available), Some(true))
 
   test("GET /lobby/bots is an empty list when no bot is open to humans"):
     for
@@ -176,6 +194,64 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(outcome._1, Status.Ok)
       assertEquals(outcome._2, Wake(alive = false))
+
+  test(
+    "POST /lobby/bots/{team}/{name}/wake is busy:true without probing a bot at its declared capacity (#224)"
+  ):
+    for
+      registry <- freshRegistry
+      store    <- WebhookStore.inMemory
+      probes   <- cats.effect.Ref.of[IO, Int](0)
+      // The probe would answer alive:true if it ran at all — this test's whole point is that it must not run.
+      countingEndpoint = HttpApp[IO] { req =>
+        probes.update(_ + 1) *> req.bodyText.compile.string.flatMap { body =>
+          decode[WebhookVerification](body) match
+            case Right(v) => Ok(Json.obj("nonce" -> v.nonce.asJson))
+            case Left(_)  => BadRequest()
+        }
+      }
+      outcome <-
+        Webhooks.create(registry, store, Client.fromHttpApp(countingEndpoint), webhookConfig, allowAll).use { webhooks =>
+          for
+            _ <- webhooks.register(Principal.Bot("acme", "alice"), "https://bot.example/hook")
+            // `register` itself probes the endpoint once, for the ownership handshake — reset the counter after it,
+            // so what remains counts only calls the `wake` route makes.
+            _ <- probes.set(0)
+            // Declares one slot and immediately spends it — the bot is busy before the request ever arrives.
+            _      <- registry.create(Principal.Bot("acme", "alice"), Principal.Bot("filler", "one"))
+            routes <- app(
+              registry,
+              open = Set(("acme", "alice")),
+              webhooks = Some(webhooks),
+              declared = Map(("acme", "alice") -> 1)
+            )
+            resp      <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+            body      <- resp.as[Wake]
+            probeRuns <- probes.get
+          yield (resp.status, body, probeRuns)
+        }
+    yield
+      assertEquals(outcome._1, Status.Ok)
+      assertEquals(outcome._2, Wake(alive = false, busy = true))
+      assertEquals(outcome._3, 0, "a busy bot must never be woken — the whole point of checking capacity first")
+
+  test("POST /lobby/bots/{team}/{name}/wake ignores capacity for a bot with no declared row (static/anonymous, #224)"):
+    for
+      registry <- freshRegistry
+      store    <- WebhookStore.inMemory
+      outcome  <- Webhooks.create(registry, store, Client.fromHttpApp(echoingEndpoint), webhookConfig, allowAll).use {
+        webhooks =>
+          for
+            _ <- webhooks.register(Principal.Bot("acme", "alice"), "https://bot.example/hook")
+            // No entry in `declared`: seatPolicyOf answers None, same as a static/anonymous identity — unbounded.
+            routes <- app(registry, open = Set(("acme", "alice")), webhooks = Some(webhooks))
+            resp   <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+            body   <- resp.as[Wake]
+          yield (resp.status, body)
+      }
+    yield
+      assertEquals(outcome._1, Status.Ok)
+      assertEquals(outcome._2, Wake(alive = true, busy = false))
 
   test("POST /lobby/bots/{team}/{name}/wake is 429 once the rate limit is spent"):
     for

@@ -524,6 +524,8 @@ paths:
       description: >
         Bots open to human play (via POST /bot/open-to-humans), each with its rating summary and
         optional description. A provisional bot (RD > 110) is listed and flagged, not hidden.
+        available reflects the bot's declared concurrent-game limit as of this fetch — advisory,
+        since the catalog is fetched once per visit rather than polled.
       security: []
       responses:
         '200':
@@ -538,8 +540,10 @@ paths:
       summary: Wake a catalog bot (public)
       description: >
         Pings the bot's registered webhook to force a cold start and confirm it answers, before a
-        visitor commits to a game. 200 always for a catalog bot (alive covers "no webhook" and
-        "didn't answer" alike); 404 for a name outside the catalog; 503 if webhooks are disabled.
+        visitor commits to a game. If the bot is already at its declared concurrent-game limit, it
+        is NOT probed at all — the response is busy: true, alive: false. 200 always for a catalog
+        bot (alive covers "no webhook" and "didn't answer" alike); 404 for a name outside the
+        catalog; 503 if webhooks are disabled.
       security: []
       parameters:
         - { name: team, in: path, required: true, schema: { type: string } }
@@ -737,7 +741,13 @@ components:
         rd: { type: number }
         provisional: { type: boolean }
         description: { type: string }
-      required: [team, name, rating, rd, provisional]
+        available:
+          type: boolean
+          description: >
+            Below its declared concurrent-game limit as of this fetch. Advisory — the catalog is
+            fetched once per visit, not polled, so the bot's actual state can move before a click;
+            the wake probe and play-bot's 409 remain authoritative.
+      required: [team, name, rating, rd, provisional, available]
     BotCatalog:
       type: object
       properties:
@@ -749,7 +759,12 @@ components:
       type: object
       properties:
         alive: { type: boolean }
-      required: [alive]
+        busy:
+          type: boolean
+          description: >
+            The bot is at its declared concurrent-game limit and was NOT probed at all — a busy bot
+            is never woken, so alive is always false alongside busy: true.
+      required: [alive, busy]
     Side:
       type: string
       enum: [White, Black]

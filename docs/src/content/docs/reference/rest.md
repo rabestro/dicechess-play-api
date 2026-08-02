@@ -223,10 +223,10 @@ A bot that left the ladder keeps its frozen rating and stays listed with `onLadd
 
 `GET /lobby/bots`
 
-Bots that opened themselves to human play via [`POST /bot/open-to-humans`](#identity), each with the rating summary its catalog card shows. Unlike the leaderboard, a **provisional** bot (RD > 110) is listed and flagged rather than hidden, so a freshly opened bot still appears. `description` is the bot's own blurb (may be `null`).
+Bots that opened themselves to human play via [`POST /bot/open-to-humans`](#identity), each with the rating summary its catalog card shows. Unlike the leaderboard, a **provisional** bot (RD > 110) is listed and flagged rather than hidden, so a freshly opened bot still appears. `description` is the bot's own blurb (may be `null`). `available` is `true` when the bot is below its declared [concurrent-game limit](#concurrent-games) at the moment the catalog was fetched — **advisory**: the SPA fetches this list once per visit rather than polling, so a bot's actual state can move before you click. The authoritative gate is still `wake` (below) and, ultimately, `play-bot`'s `409`.
 
 ```json
-{ "bots": [{ "team": "acme", "name": "alice", "rating": 1720.5, "rd": 85.0, "provisional": false, "description": "aggressive + book" }] }
+{ "bots": [{ "team": "acme", "name": "alice", "rating": 1720.5, "rd": 85.0, "provisional": false, "description": "aggressive + book", "available": true }] }
 ```
 
 ### Wake a catalog bot
@@ -235,8 +235,14 @@ Bots that opened themselves to human play via [`POST /bot/open-to-humans`](#iden
 
 Before starting a game against a scale-to-zero bot, ping it to force a cold start and confirm it actually answers — the SPA calls this on catalog click, before offering the game-config panel. `404` for a name outside the catalog; otherwise `200` always, `alive` covering "no webhook registered" and "webhook didn't answer" alike (the caller only needs yes/no). `503` if the server runs without webhooks enabled. Rate-limited per IP.
 
+If the bot is already at its declared [concurrent-game limit](#concurrent-games), the endpoint is **not woken at all** — probing costs an outbound request held up to the full per-turn window, and a busy bot's answer would be discarded anyway. The response instead reports `busy: true` alongside `alive: false`:
+
 ```json
-{ "alive": true }
+{ "alive": true, "busy": false }
+```
+
+```json
+{ "alive": false, "busy": true }
 ```
 
 ### Play a catalog bot

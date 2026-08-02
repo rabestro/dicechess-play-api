@@ -220,10 +220,35 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
         yield
           assertEquals(
             listing.find(l => l.team == "cat2" && l.name == "shown"),
-            Some(BotCatalogListing("cat2", "shown", 1500.0, 350.0, Some("monte-carlo, 3-move book"))),
-            "a freshly registered open bot lists at the initial rating with its description"
+            Some(
+              BotCatalogListing(
+                "cat2",
+                "shown",
+                1500.0,
+                350.0,
+                Some("monte-carlo, 3-move book"),
+                maxConcurrentGames = BotSeatPolicy.DefaultMaxConcurrentGames
+              )
+            ),
+            "a freshly registered open bot lists at the initial rating, its description, and the default declared capacity"
           )
           assert(!listing.exists(_.name == "hidden"), s"a bot not open to humans must be absent, got $listing")
+      }
+    }
+
+  test("catalogBots carries a raised declared capacity (#189, #224)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _       <- db.register("cat2", "roomy", "hash-cat2-roomy")
+          _       <- db.openToHumans("cat2", "roomy", None)
+          _       <- db.setMaxConcurrentGames("cat2", "roomy", 5)
+          listing <- db.catalogBots
+        yield assertEquals(
+          listing.find(_.name == "roomy").map(_.maxConcurrentGames),
+          Some(5),
+          "the listing must reflect a capacity raised after registration, not just the default"
+        )
       }
     }
 

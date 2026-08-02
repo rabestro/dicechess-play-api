@@ -631,9 +631,19 @@ trait LeaderboardStore:
   def resultTallyFor(externalId: String): IO[ResultTally]
 
 /** One human-catalog card's data (ADR-0014, E2): a bot that opened itself to human games, with the rating summary its
-  * card shows. `provisional` is derived by the route from `rd`, not stored here.
+  * card shows. `provisional` is derived by the route from `rd`, not stored here; likewise `available` (#224) is derived
+  * by the route from `maxConcurrentGames` against the registry's live game count, not stored here —
+  * `maxConcurrentGames` is the declaration (#189), read off the same row so the route needs no second query per bot to
+  * derive it.
   */
-final case class BotCatalogListing(team: String, name: String, rating: Double, rd: Double, description: Option[String])
+final case class BotCatalogListing(
+    team: String,
+    name: String,
+    rating: Double,
+    rd: Double,
+    description: Option[String],
+    maxConcurrentGames: Int
+)
 
 /** Read seam for the human-facing bot catalog (ADR-0014) — Postgres only, like [[LeaderboardStore]]: it reads the
   * `bots` table (the rating and description columns), absent in the in-memory mode, so the catalog endpoint is simply

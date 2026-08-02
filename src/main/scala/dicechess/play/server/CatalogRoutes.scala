@@ -1,6 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
+import cats.syntax.all.*
 import dicechess.play.core.{Principal, Seat, Side, TimeControl}
 import dicechess.play.rating.Glicko2
 import dicechess.play.store.{BotCatalogListing, BotCatalogStore, BotStore}
@@ -17,6 +18,11 @@ import java.security.SecureRandom
 /** One catalog card: a bot a visitor can start a game against, plus the rating summary to show. `provisional` flags a
   * bot whose rating has not converged (RD above the threshold) — shown, not hidden, so a freshly opened bot still
   * appears (the opposite of the leaderboard's hide-until-converged policy).
+  *
+  * `available` (#224) is advisory, not authoritative: it is read once per catalog fetch (the SPA does not poll), so a
+  * bot's actual seating state can have moved by the time a visitor clicks — `wake`'s own capacity check, and ultimately
+  * `play-bot`'s 409, remain the real gate. It exists so a card can show "playing now" instead of inviting a click that
+  * is refused.
   */
 final case class CatalogBot(
     team: String,
@@ -24,14 +30,19 @@ final case class CatalogBot(
     rating: Double,
     rd: Double,
     provisional: Boolean,
-    description: Option[String]
+    description: Option[String],
+    available: Boolean
 ) derives Codec.AsObject
 
 /** The human-facing bot catalog. */
 final case class BotCatalog(bots: List[CatalogBot]) derives Codec.AsObject
 
-/** `POST /lobby/bots/{team}/{name}/wake` response: whether the bot's webhook answered the liveness probe. */
-final case class Wake(alive: Boolean) derives Codec.AsObject
+/** `POST /lobby/bots/{team}/{name}/wake` response. `alive` is whether the endpoint answered the liveness probe; `busy`
+  * (#224) is true when the bot is at its declared concurrent-game capacity (#189) — a state the route detects WITHOUT
+  * running the probe (a busy bot is never woken), so `alive` is always `false` alongside `busy: true`: there is nothing
+  * for a busy bot to have answered.
+  */
+final case class Wake(alive: Boolean, busy: Boolean = false) derives Codec.AsObject
 
 /** `POST /lobby/play-bot` body (ADR-0014, E4): start a guest-vs-bot game from the catalog. `guestId` is the SPA's
   * stable per-browser identity (a UUID — same convention `POST /lobby/seeks` uses for `creator`). `timeControl` is
@@ -68,7 +79,7 @@ object CatalogRoutes:
     val guard = SeatGuard(bots, registry)
     HttpRoutes.of[IO]:
       case GET -> Root / "lobby" / "bots" =>
-        catalog.catalogBots.flatMap(listings => Ok(BotCatalog(listings.map(card))))
+        catalog.catalogBots.flatMap(_.traverse(card(_, registry)).flatMap(cards => Ok(BotCatalog(cards))))
 
       // A visitor clicks a catalog card to start a game (ADR-0014): this wakes a scale-to-zero endpoint and reports
       // whether it answered, so the SPA knows whether to offer the game-config panel. 404 for a name outside the
@@ -76,6 +87,11 @@ object CatalogRoutes:
       // "webhook didn't answer" alike — the caller only needs yes/no. The rate limit (an in-memory check) gates
       // BEFORE the catalog-membership read (a database query, in Pg mode) — this endpoint is fully unauthenticated,
       // so the cheapest defense must run first, rather than letting anonymous spam reach the database at all.
+      //
+      // Declared capacity (#189) is checked BEFORE the probe (#224): a bot at its limit is never woken at all — an
+      // outbound POST held up to the full per-turn window would cold-start a scale-to-zero endpoint for nothing, when
+      // the in-memory game count plus one indexed read already answers the only question that matters. This runs
+      // whether or not webhooks are enabled on the server: busy is a per-bot fact, independent of that feature flag.
       case req @ POST -> Root / "lobby" / "bots" / team / name / "wake" =>
         wakeLimiter
           .attempt(BotRoutes.clientIp(req))
@@ -84,29 +100,38 @@ object CatalogRoutes:
               TooManyRequests("wake rate limit exceeded — retry later")
                 .map(_.putHeaders(`Retry-After`.unsafeFromLong(math.max(1L, retryAfter.toSeconds))))
             case Right(()) =>
+              val target: Principal.Bot = Principal.Bot(team, name)
               bots.openToHumansBots.flatMap { open =>
-                if !open.contains(Principal.Bot(team, name)) then NotFound()
+                if !open.contains(target) then NotFound()
                 else
-                  webhooks match
-                    case None          => ServiceUnavailable("webhooks are not enabled on this server")
-                    case Some(service) => service.wake(Principal.Bot(team, name)).flatMap(alive => Ok(Wake(alive)))
+                  guard.admits(target, SeatGuard.Purpose.Direct).flatMap {
+                    case false => Ok(Wake(alive = false, busy = true))
+                    case true  =>
+                      webhooks match
+                        case None          => ServiceUnavailable("webhooks are not enabled on this server")
+                        case Some(service) => service.wake(target).flatMap(alive => Ok(Wake(alive)))
+                  }
               }
 
       case req @ POST -> Root / "lobby" / "play-bot" =>
         playBot(req, bots, registry, guard, playBotLimiter)
 
   /** Derive the catalog card from a stored listing, flagging (not hiding) a not-yet-converged rating — the same RD
-    * threshold the leaderboard uses to hide provisional bots.
+    * threshold the leaderboard uses to hide provisional bots. `available` (#224) is one in-memory registry lookup
+    * against the capacity already carried on the listing — no second database query per card.
     */
-  private def card(listing: BotCatalogListing): CatalogBot =
-    CatalogBot(
-      team = listing.team,
-      name = listing.name,
-      rating = listing.rating,
-      rd = listing.rd,
-      provisional = listing.rd > Glicko2.ProvisionalDeviationThreshold,
-      description = listing.description
-    )
+  private def card(listing: BotCatalogListing, registry: GameRegistry): IO[CatalogBot] =
+    registry.activeGamesFor(Principal.Bot(listing.team, listing.name)).map { active =>
+      CatalogBot(
+        team = listing.team,
+        name = listing.name,
+        rating = listing.rating,
+        rd = listing.rd,
+        provisional = listing.rd > Glicko2.ProvisionalDeviationThreshold,
+        description = listing.description,
+        available = active < listing.maxConcurrentGames
+      )
+    }
 
   /** `POST /lobby/play-bot` (E4). Checks run cheapest-first — the ordering the E3 review established applies here too:
     * the per-IP rate limit before any registry/store read, the guest's own active-game count (in-memory) before catalog
