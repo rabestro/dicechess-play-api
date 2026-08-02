@@ -409,18 +409,20 @@ final class PgGameStore private (xa: Transactor[IO])
       .map(_.map(Principal.Bot(_, _)))
 
   /** Catalog cards for `GET /lobby/bots` (ADR-0014): the open-to-humans bots with their rating summary and blurb, best
-    * rating first. Reads only `bots`, so unlike the leaderboard it needs no `game_results` join.
+    * rating first. Reads only `bots`, so unlike the leaderboard it needs no `game_results` join. `max_concurrent_games`
+    * (#189) rides along in the same row so the route can derive `available` with a pure in-memory registry lookup per
+    * card, rather than a second query per bot (#224).
     */
   def catalogBots: IO[List[BotCatalogListing]] =
-    sql"""SELECT team, name, glicko_rating, glicko_rd, description
+    sql"""SELECT team, name, glicko_rating, glicko_rd, description, max_concurrent_games
           FROM play.bots WHERE open_to_humans = true
           ORDER BY glicko_rating DESC, team, name"""
-      .query[(String, String, Double, Double, Option[String])]
+      .query[(String, String, Double, Double, Option[String], Int)]
       .to[List]
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_.map { case (team, name, rating, rd, description) =>
-        BotCatalogListing(team, name, rating, rd, description)
+      .map(_.map { case (team, name, rating, rd, description, maxConcurrentGames) =>
+        BotCatalogListing(team, name, rating, rd, description, maxConcurrentGames)
       })
 
   // ── WebhookStore (F.2, #104) ────────────────────────────────────────────────
