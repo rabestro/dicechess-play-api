@@ -3,6 +3,7 @@ package dicechess.play
 import cats.effect.{IO, IOApp, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
+import dicechess.play.core.Principal
 import dicechess.play.server.{
   AnonMintLimiter,
   BotAuth,
@@ -27,7 +28,6 @@ import dicechess.play.server.{
   WebhookRoutes,
   Webhooks
 }
-import dicechess.play.core.Principal
 import dicechess.play.ingest.IngestDeliverer
 import dicechess.play.rating.{RatingBatch, StrengthCache, StrengthReport}
 import dicechess.play.store.{BotStore, GameStore, PgGameStore, Retention, WebhookStore}
