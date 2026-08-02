@@ -7,6 +7,11 @@ services:
     # released version (API_TAG=vX.Y.Z), unset defaults to :latest for dev/local.
     image: ghcr.io/rabestro/dicechess-play-api:${API_TAG:-latest}
     restart: always
+    # tini as PID 1 to reap orphans. The image's ENTRYPOINT execs the JVM, and the JVM does not
+    # reap children, so every healthcheck process reparented to it stays a zombie forever: 615 of
+    # them accumulated on the production host in ~17 hours of uptime, one per ten checks. Harmless
+    # until it isn't — the count only grows, and it makes `ps` on the host lie about what is running.
+    init: true
     env_file:
       - .env
     environment:
