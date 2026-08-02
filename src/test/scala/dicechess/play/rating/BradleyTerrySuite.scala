@@ -48,6 +48,34 @@ class BradleyTerrySuite extends munit.FunSuite:
     assertEquals(ranked.head.player, "a")
     assert(ranked.head.losVsNext.exists(_ > 0.95), s"expected decisive LOS, got ${ranked.head.losVsNext}")
 
+  /** A deliberately awkward corpus for the golden vector below: four players, uneven group sizes, and `dave` present in
+    * exactly ONE group — so a good share of resamples omit him entirely and exercise the "a bootstrap sample ranks only
+    * the players it actually contains" path, which a corpus where everyone appears everywhere would never reach.
+    */
+  private val goldenGroups: Seq[Seq[BradleyTerry.Game]] = Seq(
+    Seq(("alice", "bob", 1.0), ("bob", "alice", 0.0)),
+    Seq(("alice", "carol", 0.5)),
+    Seq(("bob", "carol", 1.0), ("carol", "bob", 0.5)),
+    Seq(("alice", "bob", 0.0)),
+    Seq(("carol", "dave", 1.0), ("dave", "carol", 0.0)),
+    Seq(("alice", "carol", 1.0))
+  )
+
+  test("the bootstrap is a fixed function of (corpus, iterations, seed) — golden vector"):
+    // Locked to the exact doubles the implementation produced when this was written. The point is not that these
+    // numbers are "right" — the surrounding tests cover the statistics — but that OPTIMISING the fit must not move
+    // them: the report is reproducible by seed, so any change in output is a change in the published ranking.
+    val expected = List(
+      ("alice", 134.39508571506718, -71.59493280482212, 332.4184545365102, Some(0.5979381443298969)),
+      ("bob", 61.064746775853656, -133.19303125947457, 223.98402138106349, Some(0.7448979591836735)),
+      ("carol", 3.438752686306725, -144.32867782314693, 160.77211715151589, Some(1.0)),
+      ("dave", -198.89858517722757, -323.90795132933715, -155.79970059805692, None)
+    )
+    val actual = BradleyTerry
+      .rankedWithBootstrap(goldenGroups, iterations = 100, seed = 2026L)
+      .map(r => (r.player, r.elo, r.ciLow, r.ciHigh, r.losVsNext))
+    assertEquals(actual, expected)
+
   test("empty and single-player inputs degrade gracefully"):
     assertEquals(BradleyTerry.ratings(Nil), Map.empty[String, Double])
     assertEquals(BradleyTerry.rankedWithBootstrap(Nil, iterations = 10, seed = 1L), Nil)
