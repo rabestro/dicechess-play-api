@@ -74,6 +74,11 @@ Indexes:
 | `owner_external_id` | `text` | yes | — | — |
 | `open_to_humans` | `boolean` | no | `false` | — |
 | `description` | `text` | yes | — | — |
+| `max_concurrent_games` | `integer` | no | `1` | — |
+
+Check constraints:
+
+- `CHECK (((max_concurrent_games >= 1) AND (max_concurrent_games <= 32)))`
 
 Indexes:
 

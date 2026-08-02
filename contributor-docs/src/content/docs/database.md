@@ -53,6 +53,20 @@ triple (`glicko_rating`, `glicko_rd`, `glicko_vol`, seeded at 1500 / 350 / 0.06)
 `on_ladder` flag, and the human-facing catalog opt-in (`open_to_humans`, `description`).
 Primary key is `(team, name)`.
 
+`max_concurrent_games` (V12) is the bot's own declaration of how many games it will hold at once
+— the counterpart of the per-turn window the server publishes. Its default of **1** is the whole
+point rather than an incidental choice: absence has to select the conservative policy, because
+the authors who most need the limit are the ones who never read about it, and because the
+alternative is what production actually did — one bot seated in three simultaneous games, losing
+them on time. Only registered bots have a row and therefore a limit; static (`PLAY_BOT_TOKENS`)
+and anonymous identities are unbounded, which is required for the house bot that faces every
+quickstart visitor at once.
+
+Nothing counts games *here*. Enforcement lives in `SeatGuard`, which derives the current count
+from live rooms in `GameRegistry` at the moment a game is seated: a persisted counter could leak
+a slot and lock a bot out of every future game, failing silently — strictly worse than the
+timeouts the column exists to prevent.
+
 ### `bot_webhooks` — verified callback registration
 
 Where the server POSTs on a bot's turn. A row exists only after the ownership handshake

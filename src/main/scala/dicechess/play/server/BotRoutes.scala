@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import dicechess.play.core.{Challenge, Clocks, GameCommand, GameId, GameStatus, Principal, Seat, TimeControl}
 import dicechess.play.game.GameRoom
+import dicechess.play.store.BotSeatPolicy
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import io.circe.{Codec, Encoder}
@@ -56,6 +57,31 @@ object SetOpenToHumans:
 
 /** The catalog opt-in state returned by `POST /bot/open-to-humans[/leave]` (ADR-0014). */
 final case class OpenToHumans(openToHumans: Boolean, description: Option[String]) derives Codec.AsObject
+
+/** `POST /bot/capacity` body (#189): how many games this bot is willing to hold at once. */
+final case class SetCapacity(maxConcurrentGames: Int) derives Codec.AsObject:
+  /** Range-check before the write — the `bots` table's own check constraint is a backstop, not the validation, and a
+    * constraint violation would surface as a 500 rather than the 400 this deserves.
+    */
+  def validate: Either[String, SetCapacity] =
+    if BotSeatPolicy.isDeclarable(maxConcurrentGames) then Right(this)
+    else
+      Left(
+        s"maxConcurrentGames must be between ${BotSeatPolicy.DefaultMaxConcurrentGames} " +
+          s"and ${BotSeatPolicy.MaxDeclarableConcurrentGames}"
+      )
+
+/** The declared-capacity state returned by `GET`/`POST /bot/capacity` (#189).
+  *
+  * `ladderAllowance` and `activeGames` are what make a low limit legible: without them a bot that is rarely paired
+  * cannot tell "I said one game at a time and I am playing it" apart from "the server is ignoring me".
+  */
+final case class Capacity(
+    maxConcurrentGames: Int,
+    openToHumans: Boolean,
+    ladderAllowance: Int,
+    activeGames: Int
+) derives Codec.AsObject
 
 /** A bot's open-seek offer: just the time control — the identity comes from the Bearer token. */
 final case class BotCreateSeek(timeControl: Option[TimeControl] = None) derives Codec.AsObject
@@ -194,6 +220,15 @@ object BotRoutes:
       case req @ POST -> Root / "bot" / "open-to-humans" / "leave" =>
         withBot(auth, req)(bot => closeToHumans(auth, bot))
 
+      // Declared capacity (#189): the bot's half of the load contract — how many games it is willing to hold at once,
+      // the counterpart of the per-turn window the server publishes. Enforced when a game is seated, never by holding
+      // back a delivery inside a running game (that would burn the bot's own clock). Registered bots only: a static or
+      // anonymous identity has no row to declare on, and stays unbounded.
+      case req @ GET -> Root / "bot" / "capacity" =>
+        withBot(auth, req)(bot => respondCapacity(auth.seatPolicyOf(bot), registry, bot))
+      case req @ POST -> Root / "bot" / "capacity" =>
+        withBot(auth, req)(bot => setCapacity(auth, registry, req, bot))
+
       case req @ GET -> Root / "bot" / "stream" / "event" =>
         withBot(auth, req): bot =>
           Ok(ndjson(events.stream(bot))).map(_.withContentType(`Content-Type`(ndjsonType)))
@@ -272,10 +307,12 @@ object BotRoutes:
           lobby
             .accept(id, bot)
             .flatMap:
-              case Right(m)                           => Created(BotGame(m.gameId))
-              case Left(Lobby.Rejected.NotFound)      => NotFound()
-              case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
-              case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
+              case Right(m)                          => Created(BotGame(m.gameId))
+              case Left(Lobby.Rejected.NotFound)     => NotFound()
+              case Left(Lobby.Rejected.AlreadyTaken) => Conflict()
+              case Left(Lobby.Rejected.OwnSeek)      => BadRequest("cannot accept your own seek")
+              case Left(Lobby.Rejected.Busy)         =>
+                Conflict("a side is at its concurrent-game limit — the seek is still open")
               case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case req @ POST -> Root / "bot" / "challenge" / id / "accept" =>
@@ -283,9 +320,12 @@ object BotRoutes:
           challenges
             .accept(bot, id)
             .flatMap:
-              case Right(gameId)                         => Created(BotGame(gameId))
-              case Left(Challenges.Rejected.NotFound)    => NotFound()
-              case Left(Challenges.Rejected.NotYours)    => Forbidden()
+              case Right(gameId)                      => Created(BotGame(gameId))
+              case Left(Challenges.Rejected.NotFound) => NotFound()
+              case Left(Challenges.Rejected.NotYours) => Forbidden()
+              // Still pending: accept it again once a game finishes, or let it expire (#189).
+              case Left(Challenges.Rejected.Busy) =>
+                Conflict("a side is at its concurrent-game limit — the challenge is still pending")
               case Left(Challenges.Rejected.Failed(why)) => InternalServerError(why)
 
       case req @ POST -> Root / "bot" / "challenge" / id / "decline" =>
@@ -293,9 +333,11 @@ object BotRoutes:
           challenges
             .decline(bot, id)
             .flatMap:
-              case Right(())                             => Ok()
-              case Left(Challenges.Rejected.NotFound)    => NotFound()
-              case Left(Challenges.Rejected.NotYours)    => Forbidden()
+              case Right(())                          => Ok()
+              case Left(Challenges.Rejected.NotFound) => NotFound()
+              case Left(Challenges.Rejected.NotYours) => Forbidden()
+              // Unreachable: declining seats nobody, so the capacity check never runs on this path.
+              case Left(Challenges.Rejected.Busy)        => InternalServerError("capacity refusal on decline")
               case Left(Challenges.Rejected.Failed(why)) => InternalServerError(why)
 
       case req @ GET -> Root / "bot" / "game" / "stream" / id =>
@@ -386,6 +428,42 @@ object BotRoutes:
   /** `POST /bot/open-to-humans/leave` — opt out, leaving the description intact. */
   private def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
     respondCatalog(auth.closeToHumans(bot))
+
+  /** `POST /bot/capacity` — declare the limit. A required body, unlike `open-to-humans`: there is no sensible "empty
+    * body" reading of a number, and silently re-applying the default would be indistinguishable from a typo.
+    */
+  private def setCapacity(
+      auth: BotAuth,
+      registry: GameRegistry,
+      req: Request[IO],
+      bot: Principal.Bot
+  ): IO[Response[IO]] =
+    req
+      .attemptAs[SetCapacity]
+      .value
+      .flatMap:
+        case Left(failure) => BadRequest(failure.message)
+        case Right(body)   =>
+          body.validate match
+            case Left(message) => BadRequest(message)
+            case Right(valid)  =>
+              respondCapacity(auth.setMaxConcurrentGames(bot, valid.maxConcurrentGames), registry, bot)
+
+  /** Shared reply for both capacity routes: the declaration, what the ladder may take of it, and how much is in use
+    * right now — or 403 for a non-registered caller (no row to declare on). The active count is read after the policy
+    * so a fresh declaration is reported against a current count, not a stale one.
+    */
+  private def respondCapacity(
+      policy: IO[Option[BotSeatPolicy]],
+      registry: GameRegistry,
+      bot: Principal.Bot
+  ): IO[Response[IO]] =
+    policy.flatMap:
+      case None    => Forbidden("only a registered bot can declare a concurrent-game limit")
+      case Some(p) =>
+        registry
+          .activeGamesFor(bot)
+          .flatMap(active => Ok(Capacity(p.maxConcurrentGames, p.openToHumans, p.ladderAllowance, active)))
 
   /** Shared reply: the resulting catalog state as `OpenToHumans`, or 403 for a non-registered caller (no row to flag).
     */

@@ -22,7 +22,8 @@ final class Lobby private (
     nextId: Ref[IO, Long],
     ttl: FiniteDuration,
     botTtl: FiniteDuration,
-    maxOpenSeeksPerBot: Int
+    maxOpenSeeksPerBot: Int,
+    admitBoth: (Principal, Principal) => IO[Boolean]
 ):
   import Lobby.*
 
@@ -58,8 +59,19 @@ final class Lobby private (
 
   /** Accept an open seek: seat a game (assign creator and accepter randomly to White/Black) and return the accepter's
     * game + seat token.
+    *
+    * Declared capacity (#189) is checked before the seek is claimed, so a `Busy` accept leaves the offer open for
+    * someone else instead of consuming it — the same reasoning as `Challenges.accept`.
     */
   def accept(id: String, accepter: Principal): IO[Either[Rejected, Match]] =
+    seeks.get.map(resolve(_, id, accepter)).flatMap {
+      case Left(rejected)      => IO.pure(Left(rejected))
+      case Right((creator, _)) =>
+        admitBoth(creator, accepter).ifM(seat(id, accepter), IO.pure(Left(Rejected.Busy)))
+    }
+
+  /** Claim the seek (so two accepters can't both seat a game) and start the game. */
+  private def seat(id: String, accepter: Principal): IO[Either[Rejected, Match]] =
     (claim(id, accepter), randomBoolean).flatMapN {
       case (Left(rejected), _)               => IO.pure(Left(rejected))
       case (Right((creator, tc)), swapColor) =>
@@ -110,14 +122,26 @@ final class Lobby private (
     */
   private def claim(id: String, accepter: Principal): IO[Either[Rejected, (Principal, TimeControl)]] =
     seeks.modify: current =>
-      current.get(id) match
-        case None                             => (current, Left(Rejected.NotFound))
-        case Some(e) if e.creator == accepter => (current, Left(Rejected.OwnSeek))
-        case Some(e)                          =>
-          e.state match
-            case EntryState.Open =>
-              (current.updated(id, e.copy(state = EntryState.Claimed)), Right((e.creator, e.seek.timeControl)))
-            case _ => (current, Left(Rejected.AlreadyTaken))
+      resolve(current, id, accepter) match
+        case right @ Right(_) =>
+          (current.updatedWith(id)(_.map(_.copy(state = EntryState.Claimed))), right)
+        case left => (current, left)
+
+  /** Whether `accepter` may take seek `id` in this snapshot — shared by the read-only pre-check and the atomic
+    * [[claim]], so the two can never disagree about what counts as taken or as one's own seek.
+    */
+  private def resolve(
+      current: Map[String, Entry],
+      id: String,
+      accepter: Principal
+  ): Either[Rejected, (Principal, TimeControl)] =
+    current.get(id) match
+      case None                             => Left(Rejected.NotFound)
+      case Some(e) if e.creator == accepter => Left(Rejected.OwnSeek)
+      case Some(e)                          =>
+        e.state match
+          case EntryState.Open => Right((e.creator, e.seek.timeControl))
+          case _               => Left(Rejected.AlreadyTaken)
 
 object Lobby:
 
@@ -152,7 +176,13 @@ object Lobby:
     case NotFound
     case AlreadyTaken
     case OwnSeek // the creator itself tried to accept
+    case Busy    // a side is at its declared concurrent-game capacity (#189); the seek stays open
     case Failed(reason: String)
+
+  /** Capacity check for a proposed pairing — same function-shaped seam, and same permissive default, as
+    * `Challenges.AdmitAny`.
+    */
+  val AdmitAny: (Principal, Principal) => IO[Boolean] = (_, _) => IO.pure(true)
 
   private enum EntryState:
     case Open
@@ -171,10 +201,11 @@ object Lobby:
       registry: GameRegistry,
       ttl: FiniteDuration = DefaultTtl,
       botTtl: FiniteDuration = DefaultBotTtl,
-      maxOpenSeeksPerBot: Int = DefaultMaxOpenSeeksPerBot
+      maxOpenSeeksPerBot: Int = DefaultMaxOpenSeeksPerBot,
+      admitBoth: (Principal, Principal) => IO[Boolean] = AdmitAny
   ): IO[Lobby] =
     (Ref.of[IO, Map[String, Entry]](Map.empty), Ref.of[IO, Long](0L))
-      .mapN((seeks, nextId) => new Lobby(seeks, registry, nextId, ttl, botTtl, maxOpenSeeksPerBot))
+      .mapN((seeks, nextId) => new Lobby(seeks, registry, nextId, ttl, botTtl, maxOpenSeeksPerBot, admitBoth))
 
   private def randomSecret: IO[String] = IO:
     val bytes = new Array[Byte](16)

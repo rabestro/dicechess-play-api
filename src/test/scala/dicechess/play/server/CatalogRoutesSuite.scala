@@ -8,6 +8,7 @@ import dicechess.play.store.{
   BotCatalogState,
   BotCatalogStore,
   BotRating,
+  BotSeatPolicy,
   BotStore,
   GameStore,
   WebhookStore
@@ -39,17 +40,28 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
 
   private val guestA = "11111111-1111-1111-1111-111111111111"
 
-  private def stubBots(open: Set[(String, String)]): BotStore = new BotStore:
-    def register(team: String, name: String, tokenHash: String): IO[Boolean]              = IO.pure(false)
-    def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                        = IO.pure(None)
-    def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]             = IO.pure(false)
-    def ratingOf(team: String, name: String): IO[Option[BotRating]]                       = IO.pure(None)
-    def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]] = IO.pure(None)
-    def onLadderBots: IO[List[Principal.Bot]]                                             = IO.pure(Nil)
-    def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
-      IO.pure(None)
-    def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] = IO.pure(None)
-    def openToHumansBots: IO[List[Principal.Bot]] = IO.pure(open.toList.map(Principal.Bot(_, _)))
+  /** `declared` holds the capacities of registered bots (#189). A bot absent from it has no row and is therefore
+    * unbounded — which is what every pre-#189 test in this file relies on.
+    */
+  private def stubBots(open: Set[(String, String)], declared: Map[(String, String), Int]): BotStore =
+    new BotStore:
+      def register(team: String, name: String, tokenHash: String): IO[Boolean]                     = IO.pure(false)
+      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                               = IO.pure(None)
+      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                    = IO.pure(false)
+      def ratingOf(team: String, name: String): IO[Option[BotRating]]                              = IO.pure(None)
+      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]        = IO.pure(None)
+      def onLadderCandidates: IO[List[BotSeatPolicy]]                                              = IO.pure(Nil)
+      def setMaxConcurrentGames(team: String, name: String, limit: Int): IO[Option[BotSeatPolicy]] = IO.pure(None)
+      def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]                      =
+        IO.pure(
+          declared
+            .get((team, name))
+            .map(BotSeatPolicy(Principal.Bot(team, name), _, openToHumans = open.contains((team, name))))
+        )
+      def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
+        IO.pure(None)
+      def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] = IO.pure(None)
+      def openToHumansBots: IO[List[Principal.Bot]] = IO.pure(open.toList.map(Principal.Bot(_, _)))
 
   private def stubCatalog(listings: List[BotCatalogListing]): BotCatalogStore = new BotCatalogStore:
     def catalogBots: IO[List[BotCatalogListing]] = IO.pure(listings)
@@ -62,12 +74,15 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
       open: Set[(String, String)] = Set.empty,
       webhooks: Option[Webhooks] = None,
       wakeLimiter: Option[AnonMintLimiter] = None,
-      playBotLimiter: Option[AnonMintLimiter] = None
+      playBotLimiter: Option[AnonMintLimiter] = None,
+      declared: Map[(String, String), Int] = Map.empty
   ): IO[HttpRoutes[IO]] =
     (
       wakeLimiter.fold(AnonMintLimiter.create())(IO.pure),
       playBotLimiter.fold(AnonMintLimiter.create())(IO.pure)
-    ).mapN((wake, playBot) => CatalogRoutes(stubCatalog(listings), stubBots(open), webhooks, registry, wake, playBot))
+    ).mapN((wake, playBot) =>
+      CatalogRoutes(stubCatalog(listings), stubBots(open, declared), webhooks, registry, wake, playBot)
+    )
 
   private def freshRegistry: IO[GameRegistry] = GameRegistry.create(store = GameStore.noop)
 
@@ -262,6 +277,40 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(first, Status.Created)
       assertEquals(second, Status.Conflict)
+
+  test("POST /lobby/play-bot is 409 once the bot is at its declared capacity — an answer, not a silent board (#189)"):
+    val guestB = "22222222-2222-2222-2222-222222222222"
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")), declared = Map(("acme", "alice") -> 1))
+      first    <- routes.orNotFound.run(playBotBody(guestId = guestA)).map(_.status)
+      // A different guest, so the refusal can only be the bot's own limit, not the one-game-per-guest rule.
+      second <- routes.orNotFound.run(playBotBody(guestId = guestB)).map(_.status)
+    yield
+      assertEquals(first, Status.Created)
+      assertEquals(second, Status.Conflict)
+
+  test("POST /lobby/play-bot still seats a second visitor when the bot declared room for both (#189)"):
+    val guestB = "22222222-2222-2222-2222-222222222222"
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")), declared = Map(("acme", "alice") -> 2))
+      first    <- routes.orNotFound.run(playBotBody(guestId = guestA)).map(_.status)
+      second   <- routes.orNotFound.run(playBotBody(guestId = guestB)).map(_.status)
+    yield
+      assertEquals(first, Status.Created)
+      assertEquals(second, Status.Created)
+
+  test("POST /lobby/play-bot is 404, not 409, for a name outside the catalog even while another bot is full (#189)"):
+    for
+      registry <- freshRegistry
+      routes   <- app(registry, open = Set(("acme", "alice")), declared = Map(("acme", "alice") -> 1))
+      _        <- routes.orNotFound.run(playBotBody(guestId = guestA)).map(_.status)
+      // Catalog membership is checked before capacity, so an unknown name must not leak whether anyone is busy.
+      unknown <- routes.orNotFound
+        .run(playBotBody(guestId = "22222222-2222-2222-2222-222222222222", name = "ghost"))
+        .map(_.status)
+    yield assertEquals(unknown, Status.NotFound)
 
   test("POST /lobby/play-bot is 429 once the rate limit is spent"):
     for

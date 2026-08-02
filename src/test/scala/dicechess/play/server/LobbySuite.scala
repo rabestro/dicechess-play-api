@@ -10,6 +10,10 @@ class LobbySuite extends munit.CatsEffectSuite:
 
   private def lobby: IO[Lobby] = GameRegistry.create().flatMap(Lobby.create(_))
 
+  /** A lobby whose seating capacity check is scripted (#189). */
+  private def lobbyWith(admitBoth: (Principal, Principal) => IO[Boolean]): IO[Lobby] =
+    GameRegistry.create().flatMap(Lobby.create(_, admitBoth = admitBoth))
+
   private val alice  = Principal.Guest("alice")
   private val bob    = Principal.Guest("bob")
   private val botFoo = Principal.Bot("acme", "foo")
@@ -183,3 +187,33 @@ class LobbySuite extends munit.CatsEffectSuite:
       results.foreach { case (_, reported, bobSeat) =>
         assertEquals(reported, bobSeat, "SeekMatch.seat must match the accepter's actual room seat")
       }
+
+  test("an accept refused for capacity leaves the seek open for the next taker (#189)"):
+    // Refuses exactly once, then admits — the retry must match the same seek, which only works if the refusal left
+    // it Open rather than consuming it into Claimed.
+    IO.ref(true).flatMap { refuse =>
+      for
+        l          <- lobbyWith((_, _) => refuse.getAndSet(false).map(!_))
+        (seek, _)  <- mustCreate(l, botFoo, TimeControl.Fischer(300, 3))
+        busy       <- l.accept(seek.id, alice)
+        stillOpen  <- l.list.map(_.map(_.id))
+        retry      <- l.accept(seek.id, alice)
+        afterMatch <- l.list
+      yield
+        assertEquals(busy, Left(Lobby.Rejected.Busy): Either[Lobby.Rejected, Lobby.Match])
+        assertEquals(stillOpen, List(seek.id), "a busy refusal must not consume the offer")
+        assert(retry.isRight, s"the same seek must be acceptable once capacity frees up: $retry")
+        assertEquals(afterMatch, Nil, "a matched seek is no longer open")
+    }
+
+  test("a capacity refusal does not mask the identity checks that run before it (#189)"):
+    for
+      l         <- lobbyWith((_, _) => IO.pure(false))
+      (seek, _) <- mustCreate(l, botFoo, TimeControl.Fischer(300, 3))
+      busy      <- l.accept(seek.id, alice)
+      unknown   <- l.accept("seek-nope", alice)
+      ownSeek   <- l.accept(seek.id, botFoo)
+    yield
+      assertEquals(busy, Left(Lobby.Rejected.Busy): Either[Lobby.Rejected, Lobby.Match])
+      assertEquals(unknown, Left(Lobby.Rejected.NotFound): Either[Lobby.Rejected, Lobby.Match])
+      assertEquals(ownSeek, Left(Lobby.Rejected.OwnSeek): Either[Lobby.Rejected, Lobby.Match])

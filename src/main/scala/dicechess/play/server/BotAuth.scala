@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import dicechess.play.core.Principal
-import dicechess.play.store.{BotCatalogState, BotRating, BotStore}
+import dicechess.play.store.{BotCatalogState, BotRating, BotSeatPolicy, BotStore}
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.{MessageDigest, SecureRandom}
@@ -103,6 +103,18 @@ final class BotAuth private (
     */
   def closeToHumans(bot: Principal.Bot): IO[Option[BotCatalogState]] =
     store.closeToHumans(bot.team, bot.name)
+
+  /** The registered bot's declared seating capacity (#189). `None` for a static or anonymous caller — those have no row
+    * to declare on and are unbounded, the same "not a registered identity" meaning as everywhere else here.
+    */
+  def seatPolicyOf(bot: Principal.Bot): IO[Option[BotSeatPolicy]] =
+    store.seatPolicyOf(bot.team, bot.name)
+
+  /** Declare how many games this bot will hold at once. The caller has already range-checked the value against
+    * [[BotSeatPolicy.isDeclarable]]; `None` when the caller is not a registered identity.
+    */
+  def setMaxConcurrentGames(bot: Principal.Bot, maxConcurrentGames: Int): IO[Option[BotSeatPolicy]] =
+    store.setMaxConcurrentGames(bot.team, bot.name, maxConcurrentGames)
 
   /** Mint an ephemeral, unranked anonymous bot — `bot:team:anon:<uuid>`. An optional display label becomes a readable,
     * collision-proof prefix (the uuid suffix guarantees uniqueness and the slug keeps the externalId colon-free).

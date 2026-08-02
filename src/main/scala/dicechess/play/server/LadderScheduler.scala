@@ -19,28 +19,38 @@ import scala.concurrent.duration.*
   * dropped that CRN mirroring — see the issue for why): the anti-repeat state already tracks each bot's most recent
   * opponent, so alternating colours over successive picks is a natural extension if it's ever worth adding; today each
   * tick starts exactly one game with whichever seats `GameRegistry.create` assigns.
+  *
+  * `config.maxConcurrentGames` is a **server-wide** ceiling on scheduler-started games. It says nothing about any one
+  * bot, which is how a single bot came to be seated in three simultaneous games in production and lost them on time
+  * (#188). The per-bot half of that is each candidate's own declared capacity (#189), applied by [[SeatGuard]] below.
   */
 final class LadderScheduler private (
     botStore: BotStore,
     registry: GameRegistry,
     events: BotEvents,
+    guard: SeatGuard,
     inFlight: Ref[IO, Int],
     lastPairedWith: Ref[IO, Map[Principal.Bot, Principal.Bot]],
     config: LadderScheduler.Config
 ):
 
-  /** One scheduling tick: if under the concurrency cap and at least two bots are on the ladder, start one game. A no-op
-    * — not an error — when there's nothing to do yet, whether too few bots are on the ladder or the cap is already
-    * spent.
+  /** One scheduling tick: if under the concurrency cap and at least two *available* bots are on the ladder, start one
+    * game. A no-op — not an error — when there's nothing to do yet, whether too few bots are on the ladder, all of them
+    * are at their declared capacity, or the server-wide cap is already spent.
+    *
+    * The capacity filter runs before pairing rather than as a veto after it, so a tick where one candidate is busy
+    * still starts a game between two that are free, instead of picking a doomed pair and doing nothing.
     */
   def tick: IO[Unit] =
     inFlight.get.flatMap: running =>
       if running >= config.maxConcurrentGames then IO.unit
       else
-        botStore.onLadderBots.flatMap: pool =>
-          pickPair(pool).flatMap:
-            case None               => IO.unit
-            case Some((botA, botB)) => startPair(botA, botB)
+        botStore.onLadderCandidates
+          .flatMap(guard.availableForLadder)
+          .flatMap: pool =>
+            pickPair(pool).flatMap:
+              case None               => IO.unit
+              case Some((botA, botB)) => startPair(botA, botB)
 
   private def pickPair(pool: List[Principal.Bot]): IO[Option[(Principal.Bot, Principal.Bot)]] =
     if pool.size < 2 then IO.pure(None)
@@ -140,5 +150,7 @@ object LadderScheduler:
   ): IO[LadderScheduler] =
     (Ref.of[IO, Int](0), Ref.of[IO, Map[Principal.Bot, Principal.Bot]](Map.empty))
       .mapN((inFlight, lastPairedWith) =>
-        new LadderScheduler(botStore, registry, events, inFlight, lastPairedWith, config)
+        // The guard is built here rather than passed in: it is derived entirely from the two collaborators the
+        // scheduler already holds, so there is nothing for a caller to decide.
+        new LadderScheduler(botStore, registry, events, SeatGuard(botStore, registry), inFlight, lastPairedWith, config)
       )

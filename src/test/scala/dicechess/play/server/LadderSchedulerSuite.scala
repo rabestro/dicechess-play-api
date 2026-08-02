@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import dicechess.engine.search.{BotRegistry, SearchAlgorithm}
 import dicechess.play.core.*
 import dicechess.play.game.{BotConnection, GameRoom}
-import dicechess.play.store.BotStore
+import dicechess.play.store.{BotSeatPolicy, BotStore}
 
 import scala.concurrent.duration.*
 
@@ -24,9 +24,21 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
   private val carol: Principal.Bot = Principal.Bot("acme", "carol")
   private val dave: Principal.Bot  = Principal.Bot("acme", "dave")
 
-  private def joinLadder(botStore: BotStore, bots: List[Principal.Bot]): IO[Unit] =
+  /** Registration gives a bot the conservative declared capacity — one game at a time (#189) — so a test that wants a
+    * bot in several simultaneous games has to say so, exactly as a real bot author would. `openToHumans` puts the bot
+    * in the human catalog too, which reserves part of that declaration away from the ladder.
+    */
+  private def joinLadder(
+      botStore: BotStore,
+      bots: List[Principal.Bot],
+      maxConcurrentGames: Int = BotSeatPolicy.DefaultMaxConcurrentGames,
+      openToHumans: Boolean = false
+  ): IO[Unit] =
     bots.traverse_(bot =>
-      botStore.register(bot.team, bot.name, s"hash-${bot.name}") *> botStore.setOnLadder(bot.team, bot.name, true)
+      botStore.register(bot.team, bot.name, s"hash-${bot.name}") *>
+        botStore.setOnLadder(bot.team, bot.name, true) *>
+        botStore.setMaxConcurrentGames(bot.team, bot.name, maxConcurrentGames) *>
+        botStore.openToHumans(bot.team, bot.name, None).whenA(openToHumans).void
     )
 
   private def harness(
@@ -116,7 +128,8 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
     harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 3, timeControl = TimeControl.Unlimited))
       .flatMap { case (botStore, registry, _, scheduler) =>
         for
-          _          <- joinLadder(botStore, List(alice, bob, carol))
+          // Two concurrent games over three bots means one of them plays both, so the declaration has to allow it.
+          _          <- joinLadder(botStore, List(alice, bob, carol), maxConcurrentGames = 2)
           _          <- scheduler.tick
           firstGames <- registry.list
           _ = assertEquals(firstGames.size, 1)
@@ -155,7 +168,9 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
           }
 
         for
-          _     <- joinLadder(botStore, List(alice, bob, carol))
+          // Six ticks and nothing ever finishes, so each of the three bots accumulates games: the declared capacity
+          // has to clear the ceiling too, or the pool would empty out and later ticks would start nothing.
+          _     <- joinLadder(botStore, List(alice, bob, carol), maxConcurrentGames = 10)
           pairs <- (1 to 6).toList.foldLeftM(List.empty[Set[Principal]]) { (acc, _) =>
             for
               before <- registry.list.map(_.map(_._1).toSet)
@@ -167,6 +182,68 @@ class LadderSchedulerSuite extends munit.CatsEffectSuite:
           val repeats = pairs.sliding(2).count(w => w.size == 2 && w.head == w(1))
           assertEquals(repeats, 0, s"a pair repeated on two adjacent ticks: $pairs")
       }
+
+  // ── Declared per-bot capacity (#189) ─────────────────────────────────────────
+
+  test("a bot already at its declared capacity is skipped, and a free pair is paired instead (#189)"):
+    // The server-wide cap is deliberately wide open here: whatever bounds the second tick must be the bots' own
+    // declarations, not the scheduler's ceiling — that ceiling has its own test above.
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 10, timeControl = TimeControl.Unlimited))
+      .flatMap { case (botStore, registry, _, scheduler) =>
+        for
+          _          <- joinLadder(botStore, List(alice, bob, carol, dave))
+          _          <- scheduler.tick
+          firstGames <- registry.list
+          _ = assertEquals(firstGames.size, 1)
+          firstPair <- firstGames.head._2.seating.map(_.values.toSet)
+          _         <- scheduler.tick
+          allGames  <- registry.list
+          _        = assertEquals(allGames.size, 2, "two bots are busy, but the other two are free to be paired")
+          firstIds = firstGames.map(_._1).toSet
+          secondPair <- allGames.filterNot((id, _) => firstIds.contains(id)).head._2.seating.map(_.values.toSet)
+        yield assertEquals(
+          firstPair.intersect(secondPair),
+          Set.empty[Principal],
+          s"a bot declared for one game at a time must not appear in both pairs: $firstPair then $secondPair"
+        )
+      }
+
+  test("with every on-ladder bot at its declared capacity, further ticks are a no-op (#189)"):
+    harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 10, timeControl = TimeControl.Unlimited))
+      .flatMap { case (botStore, registry, _, scheduler) =>
+        for
+          _     <- joinLadder(botStore, List(alice, bob))
+          _     <- scheduler.tick
+          _     <- scheduler.tick
+          _     <- scheduler.tick
+          games <- registry.list
+        yield assertEquals(
+          games.size,
+          1,
+          "both bots declared one game at a time, so the ladder has nobody left to pair — even well under its own cap"
+        )
+      }
+
+  test("an open-to-humans bot keeps a slot for a person: the ladder only spends limit - 1 (#189)"):
+    // Same four bots and the same declaration of 2 in both halves; the only difference is the catalog opt-in, so any
+    // difference in how many games the ladder starts is the reservation and nothing else.
+    def gamesAfterThreeTicks(openToHumans: Boolean): IO[Int] =
+      harness(LadderScheduler.Config(interval = 1.hour, maxConcurrentGames = 10, timeControl = TimeControl.Unlimited))
+        .flatMap { case (botStore, registry, _, scheduler) =>
+          joinLadder(botStore, List(alice, bob, carol, dave), maxConcurrentGames = 2, openToHumans = openToHumans) *>
+            List.fill(3)(scheduler.tick).sequence_ *>
+            registry.list.map(_.size)
+        }
+
+    (gamesAfterThreeTicks(openToHumans = false), gamesAfterThreeTicks(openToHumans = true)).mapN {
+      (closed, openToHumans) =>
+        assertEquals(closed, 3, "a declaration of 2 that nobody else can claim lets the ladder fill both slots")
+        assertEquals(
+          openToHumans,
+          2,
+          "in the catalog, each bot gives the ladder only one of its two slots, so the pool is exhausted a game sooner"
+        )
+    }
 
   // ── Config.fromValues: env-var validation (#117 review) ──────────────────────
 

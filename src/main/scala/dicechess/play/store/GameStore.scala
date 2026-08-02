@@ -198,6 +198,41 @@ object BotRating:
   */
 final case class BotCatalogState(openToHumans: Boolean, description: Option[String])
 
+/** A registered bot's declared seating capacity (#189), together with the one policy flag that changes how that
+  * capacity may be spent. Read as a unit because every decision needs both: how many games the author says the bot can
+  * hold, and whether a human might turn up wanting one of those slots.
+  */
+final case class BotSeatPolicy(bot: Principal.Bot, maxConcurrentGames: Int, openToHumans: Boolean):
+
+  /** How much of the declared capacity the **ladder** may occupy. A bot that is also open to humans keeps one slot
+    * free, so a scheduler running every minute cannot make it permanently unplayable by a person — a regression the
+    * ladder would otherwise introduce the moment per-bot limits exist.
+    *
+    * At `maxConcurrentGames = 1` there is nothing to reserve: the floor of 1 lets the ladder take the only slot, and
+    * the human path answers "this bot is busy" instead. An explicit refusal is the better half of that trade; a
+    * reservation here would instead mean a bot that declared 1 never plays a rated game again.
+    */
+  def ladderAllowance: Int = if openToHumans then math.max(1, maxConcurrentGames - 1) else maxConcurrentGames
+
+object BotSeatPolicy:
+
+  /** What a bot holds until it says otherwise. Deliberately not "unlimited": the whole point of #189 is that silence
+    * must select the conservative policy, since the authors who most need the limit are the ones who never read about
+    * it. Raising it is one call to `POST /bot/capacity`.
+    */
+  val DefaultMaxConcurrentGames: Int = 1
+
+  /** Sanity rail on a self-declared number, matching the `bots_max_concurrent_games_range` check in V12 — it stops one
+    * row from claiming the whole ladder, and it is not an opinion about what hardware can do.
+    */
+  val MaxDeclarableConcurrentGames: Int = 32
+
+  /** Whether a declared value is within the range the `bots` table will accept. Callers must check BEFORE writing: the
+    * store surfaces an out-of-range value as a constraint violation, not as a `None`.
+    */
+  def isDeclarable(maxConcurrentGames: Int): Boolean =
+    maxConcurrentGames >= DefaultMaxConcurrentGames && maxConcurrentGames <= MaxDeclarableConcurrentGames
+
 /** Persistence seam for durable self-service bot identities (#70). Only token *hashes* cross this boundary — hashing
   * (and token minting) is the caller's job, so the store stays a dumb map from hash to identity.
   */
@@ -221,8 +256,24 @@ trait BotStore:
     */
   def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]
 
-  /** Every registered bot currently opted into the rating ladder — the pairing scheduler's candidate pool (#102). */
-  def onLadderBots: IO[List[Principal.Bot]]
+  /** Every registered bot currently opted into the rating ladder, each with its declared seating capacity — the pairing
+    * scheduler's candidate pool (#102), read in one query because the scheduler needs the capacity of every candidate
+    * before it can pick a pair (#189).
+    */
+  def onLadderCandidates: IO[List[BotSeatPolicy]]
+
+  /** The registered bot's declared seating capacity, or `None` if no such registered identity exists — which is how
+    * every caller distinguishes a registered bot from a static (`PLAY_BOT_TOKENS`) or anonymous one. Those have no row
+    * and so no declaration: they are unbounded, and must stay that way (the house bot opposes every quickstart visitor
+    * at once).
+    */
+  def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]
+
+  /** Declare how many games this bot is willing to hold at once, returning its resulting policy. `None` if no such
+    * registered identity, same as the other policy writes. The caller must have checked [[BotSeatPolicy.isDeclarable]]
+    * first — an out-of-range value violates the table's check constraint.
+    */
+  def setMaxConcurrentGames(team: String, name: String, maxConcurrentGames: Int): IO[Option[BotSeatPolicy]]
 
   /** Open a registered bot to human catalog games, replacing its catalog description in the same write (ADR-0014).
     * `None` if no such registered identity; otherwise the resulting state, read back atomically.
@@ -239,15 +290,17 @@ trait BotStore:
 
 object BotStore:
   /** In-memory mode (no `PLAY_DB_URL`): registration works for the process's lifetime — durability, like game
-    * persistence, is what the database adds. Two refs: identity by token hash (as before), and rating state keyed by
-    * `(team, name)` so it survives a token rotation (which changes the hash but not the identity).
+    * persistence, is what the database adds. Four refs: identity by token hash (as before), and rating, catalog and
+    * declared-capacity state keyed by `(team, name)` so each survives a token rotation (which changes the hash but not
+    * the identity).
     */
   def inMemory: IO[BotStore] =
     (
       cats.effect.Ref.of[IO, Map[String, Principal.Bot]](Map.empty),
       cats.effect.Ref.of[IO, Map[(String, String), BotRating]](Map.empty),
-      cats.effect.Ref.of[IO, Map[(String, String), (Boolean, Option[String])]](Map.empty)
-    ).mapN { (byHash, ratings, catalog) =>
+      cats.effect.Ref.of[IO, Map[(String, String), (Boolean, Option[String])]](Map.empty),
+      cats.effect.Ref.of[IO, Map[(String, String), Int]](Map.empty)
+    ).mapN { (byHash, ratings, catalog, capacities) =>
       new BotStore:
         def register(team: String, name: String, tokenHash: String): IO[Boolean] =
           byHash
@@ -257,7 +310,10 @@ object BotStore:
             }
             .flatTap { claimed =>
               (ratings.update(_.updated((team, name), BotRating.initial)) *>
-                catalog.update(_.updated((team, name), (false, None)))).whenA(claimed)
+                catalog.update(_.updated((team, name), (false, None))) *>
+                capacities.update(
+                  _.updated((team, name), BotSeatPolicy.DefaultMaxConcurrentGames)
+                )).whenA(claimed)
             }
 
         def authenticate(tokenHash: String): IO[Option[Principal.Bot]] = byHash.get.map(_.get(tokenHash))
@@ -281,8 +337,37 @@ object BotStore:
               case None => (current, None)
           }
 
-        def onLadderBots: IO[List[Principal.Bot]] =
-          ratings.get.map(_.toList.collect { case ((team, name), r) if r.onLadder => Principal.Bot(team, name) })
+        def onLadderCandidates: IO[List[BotSeatPolicy]] =
+          (ratings.get, capacities.get, catalog.get).mapN { (rated, caps, cat) =>
+            rated.toList.collect { case (key, r) if r.onLadder => seatPolicy(key, caps, cat) }
+          }
+
+        def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]] =
+          (capacities.get, catalog.get).mapN { (caps, cat) =>
+            Option.when(caps.contains((team, name)))(seatPolicy((team, name), caps, cat))
+          }
+
+        def setMaxConcurrentGames(team: String, name: String, limit: Int): IO[Option[BotSeatPolicy]] =
+          capacities
+            .modify { current =>
+              if current.contains((team, name)) then (current.updated((team, name), limit), true)
+              else (current, false)
+            }
+            .flatMap(declared => if declared then seatPolicyOf(team, name) else IO.pure(None))
+
+        /** Assemble a policy from the two refs that hold its parts. The capacity fallback is dead in practice —
+          * `register` seeds every key — and exists so a policy is still well-formed if a future write path forgets to.
+          */
+        private def seatPolicy(
+            key: (String, String),
+            caps: Map[(String, String), Int],
+            cat: Map[(String, String), (Boolean, Option[String])]
+        ): BotSeatPolicy =
+          BotSeatPolicy(
+            Principal.Bot(key._1, key._2),
+            caps.getOrElse(key, BotSeatPolicy.DefaultMaxConcurrentGames),
+            cat.get(key).exists(_._1)
+          )
 
         def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
           catalog.modify { current =>

@@ -1,7 +1,6 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import cats.syntax.all.*
 import dicechess.play.core.{Principal, Seat, Side, TimeControl}
 import dicechess.play.rating.Glicko2
 import dicechess.play.store.{BotCatalogListing, BotCatalogStore, BotStore}
@@ -65,6 +64,8 @@ object CatalogRoutes:
       wakeLimiter: AnonMintLimiter,
       playBotLimiter: AnonMintLimiter
   ): HttpRoutes[IO] =
+    // Built once, not per request: it is a pure view over the two collaborators already threaded here.
+    val guard = SeatGuard(bots, registry)
     HttpRoutes.of[IO]:
       case GET -> Root / "lobby" / "bots" =>
         catalog.catalogBots.flatMap(listings => Ok(BotCatalog(listings.map(card))))
@@ -92,7 +93,7 @@ object CatalogRoutes:
               }
 
       case req @ POST -> Root / "lobby" / "play-bot" =>
-        playBot(req, bots, registry, playBotLimiter)
+        playBot(req, bots, registry, guard, playBotLimiter)
 
   /** Derive the catalog card from a stored listing, flagging (not hiding) a not-yet-converged rating — the same RD
     * threshold the leaderboard uses to hide provisional bots.
@@ -119,6 +120,7 @@ object CatalogRoutes:
       req: Request[IO],
       bots: BotStore,
       registry: GameRegistry,
+      guard: SeatGuard,
       limiter: AnonMintLimiter
   ): IO[Response[IO]] =
     limiter
@@ -139,35 +141,53 @@ object CatalogRoutes:
                   case Right(guest) =>
                     if body.timeControl == TimeControl.Unlimited then
                       BadRequest("a catalog game must have a time control")
-                    else startAgainstBot(guest, body, bots, registry)
+                    else startAgainstBot(guest, body, bots, registry, guard)
 
-  /** Guest identity and time control are already validated; from here: the 1-active-game gate, catalog membership, seat
-    * assignment, and the actual `registry.create`.
+  /** Guest identity and time control are already validated; from here: the 1-active-game gate, catalog membership, the
+    * bot's own declared capacity, seat assignment, and the actual `registry.create`.
+    *
+    * The bot's capacity is checked after catalog membership so an unknown name still reads as 404 rather than leaking
+    * whether some unrelated identity happens to be busy.
     */
   private def startAgainstBot(
       guest: Principal.Guest,
       body: PlayBot,
       bots: BotStore,
-      registry: GameRegistry
+      registry: GameRegistry,
+      guard: SeatGuard
   ): IO[Response[IO]] =
-    registry.gamesFor(guest).flatMap(_.traverse((_, room) => room.hasEnded)).map(_.exists(!_)).flatMap {
-      case true  => Conflict("you already have an active game — finish it before starting another")
-      case false =>
+    registry.activeGamesFor(guest).flatMap {
+      case active if active > 0 => Conflict("you already have an active game — finish it before starting another")
+      case _                    =>
         val target: Principal.Bot = Principal.Bot(body.team, body.name)
         bots.openToHumansBots.flatMap { open =>
           if !open.contains(target) then NotFound()
           else
-            seatAssignment(body.preferredColor, guest, target).flatMap { (white, black, guestSeat) =>
-              registry
-                .create(white, black, body.timeControl, requestedRated = false)
-                .flatMap:
-                  case Left(error)           => BadRequest(error)
-                  case Right((gameId, room)) =>
-                    room.joinTokens.get(guestSeat) match
-                      case Some(token) => Created(SeekMatch(gameId.value, token, guestSeat))
-                      case None        => InternalServerError("missing seat token")
+            // An explicit refusal, not a silent board (#189): a bot that declared one game at a time and is playing it
+            // must say so, or a visitor is left staring at a position nobody will answer.
+            guard.admits(target, SeatGuard.Purpose.Direct).flatMap {
+              case false => Conflict("that bot is busy — it is at its concurrent-game limit; try another or retry soon")
+              case true  => seatGame(guest, body, target, registry)
             }
         }
+    }
+
+  /** Assign seats and create the room; the guest gets back its own seat token. */
+  private def seatGame(
+      guest: Principal.Guest,
+      body: PlayBot,
+      target: Principal.Bot,
+      registry: GameRegistry
+  ): IO[Response[IO]] =
+    seatAssignment(body.preferredColor, guest, target).flatMap { (white, black, guestSeat) =>
+      registry
+        .create(white, black, body.timeControl, requestedRated = false)
+        .flatMap:
+          case Left(error)           => BadRequest(error)
+          case Right((gameId, room)) =>
+            room.joinTokens.get(guestSeat) match
+              case Some(token) => Created(SeekMatch(gameId.value, token, guestSeat))
+              case None        => InternalServerError("missing seat token")
     }
 
   /** `(white, black, guestSeat)`: the guest's chosen side if given, otherwise a coin flip — the ADR's "random by

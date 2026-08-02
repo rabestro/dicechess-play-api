@@ -3,6 +3,7 @@ package dicechess.play
 import cats.effect.{IO, IOApp, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
+import dicechess.play.core.Principal
 import dicechess.play.server.{
   AnonMintLimiter,
   BotAuth,
@@ -22,6 +23,7 @@ import dicechess.play.server.{
   LobbyRoutes,
   PlayerRoutes,
   PlayRoutes,
+  SeatGuard,
   StrengthRoutes,
   WebhookRoutes,
   Webhooks
@@ -102,14 +104,19 @@ object Main extends IOApp.Simple:
       botAuth  <- BotAuth.fromEnv(botStore)
       // Admin/env catalog roster (ADR-0014): open configured bots to human games at startup — the path for a bot that
       // can't self-flag via POST /bot/open-to-humans (e.g. a lost token). Persistence-only, like the catalog it feeds.
-      _          <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyFromEnv(pg).void)
-      botEvents  <- BotEvents.create
-      challenges <- Challenges.create(botEvents, registry)
+      _         <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyFromEnv(pg).void)
+      botEvents <- BotEvents.create
+      // Declared per-bot capacity (#189). Both accept paths take the same `Direct` allowance — the full declaration,
+      // not the ladder's reserved share: a bot accepting a challenge or holding an open seek chose that game itself,
+      // and the reservation exists to protect exactly these seats from being eaten by the scheduler.
+      seatGuard = SeatGuard(botStore, registry)
+      admitBoth = (one: Principal, other: Principal) => seatGuard.admitsBoth(one, other, SeatGuard.Purpose.Direct)
+      challenges <- Challenges.create(botEvents, registry, admitBoth = admitBoth)
       mintLimit  <- AnonMintLimiter.create()
       // Registration is rarer than anon minting by nature (one durable identity per team, not one per test session),
       // so it gets its own, much stricter per-IP budget.
       registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
-      lobby         <- Lobby.create(registry)
+      lobby         <- Lobby.create(registry, admitBoth = admitBoth)
       cors          <- Cors.fromEnv
       _             <- warnLegacyLadderVars
       // The ladder scheduler is opt-in by env (LADDER_INTERVAL_SECONDS) — same "absence disables" idiom as

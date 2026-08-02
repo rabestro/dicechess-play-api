@@ -13,12 +13,13 @@ class ChallengesSuite extends munit.CatsEffectSuite:
 
   private def harness(
       ttl: FiniteDuration = Challenges.DefaultTtl,
-      maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot
+      maxPendingPerBot: Int = Challenges.DefaultMaxPendingPerBot,
+      admitBoth: (Principal, Principal) => IO[Boolean] = Challenges.AdmitAny
   ): IO[(BotEvents, Challenges)] =
     for
       events     <- BotEvents.create
       registry   <- GameRegistry.create()
-      challenges <- Challenges.create(events, registry, ttl, maxPendingPerBot)
+      challenges <- Challenges.create(events, registry, ttl, maxPendingPerBot, admitBoth)
     yield (events, challenges)
 
   /** Create a challenge that the test expects to be admitted, unwrapping the hygiene envelope. */
@@ -180,3 +181,36 @@ class ChallengesSuite extends munit.CatsEffectSuite:
                 assertEquals(declined, BotEvent.ChallengeDeclined(ch.id))
                 assertEquals(notFound, Left(Challenges.Rejected.NotFound): Either[Challenges.Rejected, String])
       .timeoutTo(5.seconds, IO.raiseError(RuntimeException("expiry was not delivered")))
+
+  test("an accept refused for capacity leaves the challenge pending, so it can be taken once a game ends (#189)"):
+    // A gate that refuses exactly once, then admits: the retry must succeed against the SAME challenge id, which is
+    // only possible if the first refusal did not consume it.
+    IO.ref(true).flatMap { refuse =>
+      harness(admitBoth = (_, _) => refuse.getAndSet(false).map(!_))
+        .flatMap: (_, challenges) =>
+          for
+            ch      <- mustCreate(challenges, alice, bob)
+            busy    <- challenges.accept(bob, ch.id)
+            stillIn <- challenges.listFor(bob).map(_._1.map(_.id))
+            retry   <- challenges.accept(bob, ch.id)
+            gone    <- challenges.listFor(bob).map(_._1)
+          yield
+            assertEquals(busy, Left(Challenges.Rejected.Busy): Either[Challenges.Rejected, String])
+            assertEquals(stillIn, List(ch.id), "a busy refusal must not consume the challenge")
+            assert(retry.isRight, s"the same challenge must be acceptable once capacity frees up: $retry")
+            assertEquals(gone, Nil, "the successful accept claims it")
+    }
+
+  test("a capacity refusal is distinguishable from an unknown or someone else's challenge (#189)"):
+    harness(admitBoth = (_, _) => IO.pure(false))
+      .flatMap: (_, challenges) =>
+        for
+          ch      <- mustCreate(challenges, alice, bob)
+          busy    <- challenges.accept(bob, ch.id)
+          unknown <- challenges.accept(bob, "challenge-nope")
+          notMine <- challenges.accept(carol, ch.id)
+        yield
+          assertEquals(busy, Left(Challenges.Rejected.Busy): Either[Challenges.Rejected, String])
+          // Identity checks run first: a stranger learns nothing about anyone's capacity.
+          assertEquals(unknown, Left(Challenges.Rejected.NotFound): Either[Challenges.Rejected, String])
+          assertEquals(notMine, Left(Challenges.Rejected.NotYours): Either[Challenges.Rejected, String])

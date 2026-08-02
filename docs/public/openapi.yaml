@@ -172,6 +172,43 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OpenToHumansState' }
         '403': { $ref: '#/components/responses/RegisteredOnly' }
+  /bot/capacity:
+    get:
+      tags: [Identity]
+      summary: Read the declared concurrent-game capacity
+      description: >
+        How many games the server may seat this bot in at once, how much of that the rating ladder
+        may take, and how many games are in flight right now. Registered bots only — anonymous and
+        server-configured house bots have no declaration and are unbounded.
+      responses:
+        '200':
+          description: Declared capacity and current usage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capacity' }
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
+    post:
+      tags: [Identity]
+      summary: Declare the concurrent-game capacity
+      description: >
+        Sets how many games this bot is willing to hold at once; a registered bot starts at 1.
+        Enforced when a game is seated, never by delaying a turn inside a running game. At the
+        limit the ladder skips the bot until a game ends, and the human/challenge/seek paths
+        answer 409 without consuming the offer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetCapacity' }
+      responses:
+        '200':
+          description: Declared capacity and current usage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capacity' }
+        '400':
+          description: maxConcurrentGames outside 1..32, or a malformed body.
+        '403': { $ref: '#/components/responses/RegisteredOnly' }
   /bot/challenge:
     post:
       tags: [Challenges]
@@ -214,6 +251,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/GameCreated' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: A side is at its concurrent-game limit. The challenge stays pending — retry after a game ends. }
   /bot/challenge/{id}/decline:
     post:
       tags: [Challenges]
@@ -267,7 +305,7 @@ paths:
               schema: { $ref: '#/components/schemas/GameCreated' }
         '400': { description: Accepting your own seek. }
         '404': { description: No such open seek. }
-        '409': { description: Someone claimed it first. }
+        '409': { description: Someone claimed it first, or a side is at its concurrent-game limit (the seek stays open). }
   /bot/game/{id}/seed:
     post:
       tags: [Gameplay]
@@ -538,7 +576,7 @@ paths:
               schema: { $ref: '#/components/schemas/PlayBotMatch' }
         '400': { description: Bad body, invalid guestId, or an unlimited time control. }
         '404': { description: No such name in the catalog. }
-        '409': { description: The guest already has an unfinished catalog game. }
+        '409': { description: The guest already has an unfinished catalog game, or the bot is at its concurrent-game limit. }
         '429': { description: Rate limit exceeded. }
   /bot/webhook:
     post:
@@ -669,6 +707,27 @@ components:
         openToHumans: { type: boolean }
         description: { type: string }
       required: [openToHumans]
+    SetCapacity:
+      type: object
+      properties:
+        maxConcurrentGames:
+          type: integer
+          minimum: 1
+          maximum: 32
+          description: 'Games this bot will hold at once. A registered bot starts at 1.'
+      required: [maxConcurrentGames]
+    Capacity:
+      type: object
+      properties:
+        maxConcurrentGames: { type: integer, description: 'The declaration itself.' }
+        openToHumans: { type: boolean, description: 'Whether the bot is in the human catalog.' }
+        ladderAllowance:
+          type: integer
+          description: >
+            How much of the declaration the rating ladder may occupy. For a catalog bot this is
+            maxConcurrentGames - 1 (one slot is kept free for a person), with a floor of 1.
+        activeGames: { type: integer, description: 'Games in flight right now.' }
+      required: [maxConcurrentGames, openToHumans, ladderAllowance, activeGames]
     CatalogBot:
       type: object
       properties:
