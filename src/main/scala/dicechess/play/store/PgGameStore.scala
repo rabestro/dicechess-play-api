@@ -16,7 +16,9 @@ import io.circe.Json
 import io.circe.syntax.*
 import org.flywaydb.core.Flyway
 
+import java.sql.SQLException
 import java.time.Instant
+import java.util.UUID
 import scala.concurrent.duration.*
 
 /** Postgres-backed store. Deployed against a **dedicated `play` database** (analytics is an aggregator with its own
@@ -39,8 +41,9 @@ final class PgGameStore private (xa: Transactor[IO])
     with LeaderboardStore
     with BotCatalogStore
     with WebhookStore
-    with WebhookStatsStore:
-  import PgGameStore.{BootTimeout, SaveTimeout}
+    with WebhookStatsStore
+    with UserStore:
+  import PgGameStore.{BootTimeout, ForeignKeyViolation, NicknameRetries, SaveTimeout, UniqueViolation}
 
   /** Upsert the snapshot — and, in the SAME transaction, enqueue the finished game's analytics payload and write its
     * `game_results` and `game_archive` (#177) rows: the snapshot write and all three handoffs are atomic, so a crash
@@ -778,6 +781,112 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(ResultTally(_, _, _))
 
+  // ── UserStore (#232) ────────────────────────────────────────────────────────
+
+  /** See [[UserStore.upsertOnLogin]]. The find-or-create runs in one transaction; the two ways it can hit a unique
+    * violation are both resolved by retrying the WHOLE transaction rather than handling them inline (a violation aborts
+    * the transaction, so nothing useful can run after it anyway): a nickname collision retries with the next candidate,
+    * and a lost race on the `(provider, subject)` primary key retries into the winner's identity via the initial find.
+    */
+  def upsertOnLogin(
+      provider: String,
+      subject: String,
+      email: Option[String],
+      freshNickname: IO[String]
+  ): IO[UserAccount] =
+    def attempt(remaining: Int): IO[UserAccount] =
+      (freshNickname, IO(UUID.randomUUID().toString)).flatMapN { (nickname, newId) =>
+        signIn(provider, subject, email, newId, nickname)
+          .transact(xa)
+          .timeout(SaveTimeout)
+          .recoverWith {
+            case e: SQLException if e.getSQLState == UniqueViolation && remaining > 1 => attempt(remaining - 1)
+          }
+      }
+    attempt(NicknameRetries)
+
+  private def signIn(
+      provider: String,
+      subject: String,
+      email: Option[String],
+      newId: String,
+      nickname: String
+  ): ConnectionIO[UserAccount] =
+    for
+      existing <- sql"""SELECT user_id::text FROM play.user_identities
+                        WHERE provider = $provider AND subject = $subject""".query[String].option
+      userId <- existing match
+        case Some(id) =>
+          // COALESCE keeps a previously-known email when the provider omits it on a later login,
+          // instead of blanking the owner's own profile view.
+          sql"""UPDATE play.users SET last_login_at = now() WHERE id = $id::uuid""".update.run *>
+            sql"""UPDATE play.user_identities SET email = COALESCE($email, email)
+                  WHERE provider = $provider AND subject = $subject""".update.run.as(id)
+        case None =>
+          sql"""INSERT INTO play.users (id, nickname, last_login_at)
+                VALUES ($newId::uuid, $nickname, now())""".update.run *>
+            sql"""INSERT INTO play.user_identities (provider, subject, user_id, email)
+                  VALUES ($provider, $subject, $newId::uuid, $email)""".update.run.as(newId)
+      user <- userRow(userId)
+    yield user
+
+  /** `.unique` on purpose: within `signIn`'s own transaction the row it just touched cannot be absent, so a miss here
+    * is a genuine invariant break worth raising, not an `Option` for callers to shrug at.
+    */
+  private def userRow(id: String): ConnectionIO[UserAccount] =
+    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
+          FROM play.users WHERE id = $id::uuid"""
+      .query[(String, String, Instant, Option[Instant], Boolean)]
+      .unique
+      .map(UserAccount.apply.tupled)
+
+  def userById(id: String): IO[Option[UserAccount]] =
+    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
+          FROM play.users WHERE id = $id::uuid"""
+      .query[(String, String, Instant, Option[Instant], Boolean)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(UserAccount.apply.tupled))
+
+  def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
+    sql"""UPDATE play.users SET nickname = $nickname WHERE id = $userId::uuid""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(rows => if rows == 0 then NicknameUpdate.UserNotFound else NicknameUpdate.Updated)
+      .recover { case e: SQLException if e.getSQLState == UniqueViolation => NicknameUpdate.Taken }
+
+  /** See [[UserStore.linkGuest]]. The no-op `DO UPDATE` is deliberate — unlike `DO NOTHING` it returns (and locks) the
+    * existing row, so one statement answers both "claimed it" and "who already had it" without a second, racy SELECT.
+    * The claim being keyed on `guest_id` alone is what makes `ClaimedByAnother` terminal.
+    */
+  def linkGuest(userId: String, guestId: String): IO[GuestLink] =
+    sql"""INSERT INTO play.user_guest_links (guest_id, user_id)
+          VALUES ($guestId::uuid, $userId::uuid)
+          ON CONFLICT (guest_id) DO UPDATE SET guest_id = EXCLUDED.guest_id
+          RETURNING user_id::text"""
+      .query[String]
+      .unique
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(owner => if owner == userId then GuestLink.Linked else GuestLink.ClaimedByAnother)
+      .recover { case e: SQLException if e.getSQLState == ForeignKeyViolation => GuestLink.UserNotFound }
+
+  def guestsOf(userId: String): IO[List[String]] =
+    sql"""SELECT guest_id::text FROM play.user_guest_links
+          WHERE user_id = $userId::uuid
+          ORDER BY linked_at, guest_id"""
+      .query[String]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+
+  def deleteUser(userId: String): IO[Boolean] =
+    sql"""DELETE FROM play.users WHERE id = $userId::uuid""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ > 0)
+
 object PgGameStore:
 
   /** The `game_results` fields derivable from a snapshot alone — everything except `finished_at`, which the INSERT
@@ -868,6 +977,19 @@ object PgGameStore:
 
   /** Bound on the boot-time resume scan (one query for all live games). */
   private val BootTimeout: FiniteDuration = 30.seconds
+
+  /** SQLSTATE values the user-account writes branch on (#232). Named string constants rather than doobie's `sqlstate`
+    * catalogue because the recovery runs at the `IO` level, after `transact` — a unique violation aborts the
+    * transaction, so nothing useful can be handled inside `ConnectionIO` anyway.
+    */
+  private val UniqueViolation: String     = "23505"
+  private val ForeignKeyViolation: String = "23503"
+
+  /** How many nickname candidates `upsertOnLogin` burns through before giving up and surfacing the violation. Distinct
+    * candidates make repeat collisions geometrically unlikely; a run of five means the generator itself is broken (or
+    * an identity race is livelocking, which the retry-into-find path prevents), and THAT should fail loudly.
+    */
+  private val NicknameRetries: Int = 5
 
   /** Bound on one backfill batch's query/insert (#199). Generous compared with `SaveTimeout`: this is an offline
     * maintenance run scanning a large table, and unlike a live snapshot write there is no game waiting on it — a

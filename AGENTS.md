@@ -39,7 +39,7 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
   `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
   `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
-  V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry).
+  V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry, V14 user accounts).
 - `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics, plus a
   second deliverer instance draining browser reports from `client_reports` (#212).
 - `wire/Codecs.scala` — Circe codecs; the wire contract.
