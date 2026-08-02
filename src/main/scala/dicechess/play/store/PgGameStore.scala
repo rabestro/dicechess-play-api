@@ -830,24 +830,25 @@ final class PgGameStore private (xa: Transactor[IO])
       user <- userRow(userId)
     yield user
 
+  /** The one projection both account reads share — a single site to extend when `users` grows a column, so the SELECT
+    * list and the read tuple cannot drift apart between `.unique` and `.option` call sites.
+    */
+  private def selectUser(id: String): Query0[UserAccount] =
+    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
+          FROM play.users WHERE id = $id::uuid"""
+      .query[(String, String, Instant, Option[Instant], Boolean)]
+      .map(UserAccount.apply.tupled)
+
   /** `.unique` on purpose: within `signIn`'s own transaction the row it just touched cannot be absent, so a miss here
     * is a genuine invariant break worth raising, not an `Option` for callers to shrug at.
     */
   private def userRow(id: String): ConnectionIO[UserAccount] =
-    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
-          FROM play.users WHERE id = $id::uuid"""
-      .query[(String, String, Instant, Option[Instant], Boolean)]
-      .unique
-      .map(UserAccount.apply.tupled)
+    selectUser(id).unique
 
   def userById(id: String): IO[Option[UserAccount]] =
-    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
-          FROM play.users WHERE id = $id::uuid"""
-      .query[(String, String, Instant, Option[Instant], Boolean)]
-      .option
+    selectUser(id).option
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_.map(UserAccount.apply.tupled))
 
   def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
     sql"""UPDATE play.users SET nickname = $nickname WHERE id = $userId::uuid""".update.run

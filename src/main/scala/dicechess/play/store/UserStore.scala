@@ -31,6 +31,12 @@ enum GuestLink:
 
 /** Persistence seam for player accounts. Like the catalog and leaderboard this is a Postgres-only feature: without
   * `PLAY_DB_URL` the auth surface is simply never mounted, so no in-memory implementation exists.
+  *
+  * Id contract: every `userId`/`guestId` parameter must already be a valid UUID string — the implementation casts with
+  * `::uuid` and does not re-validate. Routes own that boundary, same as everywhere else in this server: `userId` comes
+  * from a session token this server signed, and a client-presented `guestId` must pass `Principal.guest` (the
+  * `HistoryRoutes` precedent) before it reaches this seam, so a garbage id answers 4xx there instead of surfacing here
+  * as a raw SQL cast error.
   */
 trait UserStore:
 

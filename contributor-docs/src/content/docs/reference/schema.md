@@ -43,10 +43,11 @@ erDiagram
     users ||--o{ user_identities : ""
 ```
 
-Only foreign keys appear as edges. Three tables carry no foreign key on purpose —
-`game_results` and `game_archive` must outlive the snapshots they describe, and
+Only foreign keys appear as edges. Four tables carry no foreign key on purpose —
+`game_results` and `game_archive` must outlive the snapshots they describe,
 `client_reports` holds browser-submitted reports for games that never had a
-`games` row on this server (kept separate from authoritative game data by design).
+`games` row on this server (kept separate from authoritative game data by design),
+and `users` is the root of the account graph the other two user tables reference.
 
 ## Tables
 

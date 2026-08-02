@@ -1237,16 +1237,27 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
 
   test("first login creates an account with a fresh nickname; repeat login reuses the same account"):
     withContainers { pg =>
-      store(pg).use { db =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val storedEmail =
+          sql"""SELECT email FROM play.user_identities
+                WHERE provider = 'google' AND subject = 'sub-login-1'"""
+            .query[Option[String]]
+            .unique
+            .transact(xa)
         for
-          first  <- db.upsertOnLogin("google", "sub-login-1", Some("first@example.com"), IO.pure("LoginNick1"))
-          again  <- db.upsertOnLogin("google", "sub-login-1", None, IO.pure("NeverUsed2"))
-          loaded <- db.userById(first.id)
+          first     <- db.upsertOnLogin("google", "sub-login-1", Some("first@example.com"), IO.pure("LoginNick1"))
+          again     <- db.upsertOnLogin("google", "sub-login-1", None, IO.pure("NeverUsed2"))
+          kept      <- storedEmail
+          _         <- db.upsertOnLogin("google", "sub-login-1", Some("renamed@example.com"), IO.pure("NeverUsed3"))
+          refreshed <- storedEmail
+          loaded    <- db.userById(first.id)
         yield
           assertEquals(first.nickname, "LoginNick1")
           assertEquals(again.id, first.id)
           assertEquals(again.nickname, "LoginNick1", "a repeat login must not rename the account")
           assert(again.lastLoginAt.nonEmpty, "repeat login must stamp last_login_at")
+          assertEquals(kept, Some("first@example.com"), "a login without an email must not blank the stored one")
+          assertEquals(refreshed, Some("renamed@example.com"), "a login with a new email refreshes the stored one")
           assert(loaded.exists(_.isActive), "accounts start active")
       }
     }
@@ -1274,13 +1285,14 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           renamed <- db.updateNickname(b.id, "NickHolderB2")
           missing <- db.updateNickname(UUID.randomUUID().toString, "GhostNick")
           loaded  <- db.userById(b.id)
+          holderA <- db.userById(a.id)
         yield
           assertEquals(taken, NicknameUpdate.Taken)
           assertEquals(recased, NicknameUpdate.Updated, "re-casing your own nickname must not self-collide")
           assertEquals(renamed, NicknameUpdate.Updated)
           assertEquals(missing, NicknameUpdate.UserNotFound)
           assertEquals(loaded.map(_.nickname), Some("NickHolderB2"))
-          assertEquals(a.nickname, "NickHolderA")
+          assertEquals(holderA.map(_.nickname), Some("NickHolderA"), "the rejected rename left account A untouched")
       }
     }
 
