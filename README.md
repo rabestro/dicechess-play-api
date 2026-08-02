@@ -179,7 +179,9 @@ IMAGE=dicechess-play-api scripts/smoke-test.sh   # boots the image, asserts it s
 
 CI publishes a multi-arch image to `ghcr.io/rabestro/dicechess-play-api` on every push to `main` (build → smoke → push). Deploy on the homelab with `docker-compose.yaml` — set `PLAY_BOT_TOKENS` (and pin `API_TAG=vX.Y.Z`) in `.env`; the API listens on host port `8040`.
 
-The browser play-site calls the API cross-origin, so CORS is enabled. By default any origin may read it (safe here — the API uses no cookies; tokens travel explicitly, so there are no ambient credentials to leak). Set `PLAY_CORS_ORIGINS` to a comma-separated allow-list of full origins (e.g. `https://play.jc.id.lv,http://localhost:5173`) to restrict it.
+The browser play-site calls the API cross-origin, so CORS is enabled. By default any origin may read it, without credentials. Set `PLAY_CORS_ORIGINS` to a comma-separated allow-list of full origins (e.g. `https://play.jc.id.lv,http://localhost:5173`) to restrict it — a non-empty list also enables credentialed CORS, which the account session cookie (ADR-0017) requires; the allow-all default stays deliberately credential-less.
+
+Google sign-in (`/auth/*`, #233) is opt-in and all-or-nothing: it mounts only when persistence plus `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, and `PLAY_SESSION_SECRET` are all set (`PLAY_FRONTEND_URL` defaults to the production SPA). A partial Google configuration warns loudly at boot instead of half-enabling.
 
 ### Public deploy via Cloudflare Tunnel
 
@@ -192,6 +194,11 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
    API_TAG=latest                 # or a pinned vX.Y.Z
    PLAY_CORS_ORIGINS=https://play.jc.id.lv,https://dicechess-play.pages.dev
    CF_TUNNEL_TOKEN=eyJ...         # account-scoped — never commit
+   # Google sign-in (ADR-0017) — all four required to enable /auth/*:
+   # GOOGLE_CLIENT_ID=...
+   # GOOGLE_CLIENT_SECRET=...    # never commit
+   # GOOGLE_REDIRECT_URI=https://play-api.jc.id.lv/auth/callback
+   # PLAY_SESSION_SECRET=...     # e.g. openssl rand -base64 48 — never commit
    # PLAY_BOT_TOKENS=team|name|token
    # PLAY_OPEN_TO_HUMANS=gcp|expectimax-onnx-3|ONNX expectimax v3, with book   # ;-separated; opens bots to the human catalog
    ```

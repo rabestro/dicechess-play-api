@@ -60,8 +60,25 @@ in their queues undelivered. Boot warns on stderr, and nothing else complains.
 | `RETENTION_DAYS` | Optional, default `30`. |
 | `RETENTION_BATCH_SIZE` | Optional, default `1000`. |
 | `PLAY_BOT_TOKENS` | Statically configured bots, as `team\|name\|token` CSV. |
-| `PLAY_CORS_ORIGINS` | Allowed origins; empty allows any. |
+| `PLAY_CORS_ORIGINS` | Allowed origins; empty allows any (credential-less). A non-empty list also enables credentialed CORS — required once sign-in is on. |
 | `APP_VERSION` | Surfaced at `GET /version`. Set by the CD workflow from the git tag. |
+
+## Player accounts (Google sign-in)
+
+All-or-nothing (ADR-0017, #233): the `/auth/*` routes mount only when persistence **and** every
+required variable below are present. A *partial* Google configuration logs a loud warning at
+boot — someone clearly tried to enable sign-in — instead of the usual silent absence.
+
+| Variable | Effect |
+| --- | --- |
+| `GOOGLE_CLIENT_ID` | The OAuth client (Google Cloud console). Required. |
+| `GOOGLE_CLIENT_SECRET` | Its secret. Required. |
+| `GOOGLE_REDIRECT_URI` | Must match the console entry, e.g. `https://play-api.jc.id.lv/auth/callback`. Required. |
+| `PLAY_SESSION_SECRET` | HMAC key for session JWTs (e.g. `openssl rand -base64 48`). Required; no fallback on purpose. |
+| `PLAY_FRONTEND_URL` | Where login/callback send the browser back. Default `https://play.jc.id.lv`; local dev sets `http://localhost:5173`. |
+
+With sign-in enabled, `PLAY_CORS_ORIGINS` must be a real allow-list: the empty allow-all mode
+stays credential-less by design, so the SPA's credentialed fetches would fail against it.
 
 :::caution[Retention looks broken on an unbackfilled deployment]
 The prune refuses to remove an ended, non-aborted snapshot that has no `game_archive` row —
