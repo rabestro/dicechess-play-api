@@ -21,7 +21,7 @@ That signature always means auth, never a broken build.
 
 ## Toolchain
 
-Tools are pinned in `mise.toml`: Java temurin-25, native scalafmt, lefthook, betterleaks, gh,
+Tools are pinned in `mise.toml`: Java temurin-25, native scalafmt, lefthook, betterleaks, actionlint, gh,
 jq. Install everything and register the Git hooks with:
 
 ```bash

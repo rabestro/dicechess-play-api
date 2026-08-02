@@ -18,6 +18,21 @@ pre-commit:
       glob: "**.{scala,sbt}"
       run: scalafmt --test {staged_files}
 
+    # Workflow YAML must parse. A broken workflow does not fail CI — it silently stops
+    # running, so its checks disappear rather than turn red, and release-only workflows
+    # are not exercised by a pull request at all, so nothing would surface until a release.
+    # Ruby ships with macOS and the GitHub runners, so this costs milliseconds.
+
+    # actionlint (pinned in mise.toml, so every contributor has it) rather than an ad-hoc
+    # YAML parse: it rejects the same invalid indentation *and* catches duplicate keys,
+    # which a plain YAML load accepts silently.
+    # `-shellcheck=` disables the optional shell lint of `run:` bodies: actionlint picks
+    # shellcheck up from PATH if present, and a mise shim with no version installed makes it
+    # abort with a fatal error. Keeping it off means this job needs actionlint and nothing else.
+    - name: workflow-yaml
+      glob: ".github/workflows/*.y*ml"
+      run: actionlint -shellcheck= {staged_files}
+
 # Pre-push is a hermetic safety net, not a test gate: a full-project format check via
 # the native CLI (no Docker, no network). It catches what the per-commit hook can miss
 # (--no-verify commits, rebase/merge fallout). The full gate (tests + coverage) is
