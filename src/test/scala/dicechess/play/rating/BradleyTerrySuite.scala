@@ -62,19 +62,32 @@ class BradleyTerrySuite extends munit.FunSuite:
   )
 
   test("the bootstrap is a fixed function of (corpus, iterations, seed) — golden vector"):
-    // Locked to the exact doubles the implementation produced when this was written. The point is not that these
-    // numbers are "right" — the surrounding tests cover the statistics — but that OPTIMISING the fit must not move
-    // them: the report is reproducible by seed, so any change in output is a change in the published ranking.
+    // Recorded from the implementation as it stood when this was written. The point is not that these numbers are
+    // "right" — the surrounding tests cover the statistics — but that OPTIMISING the fit must not move them: the
+    // report is reproducible by seed, so a changed number is a changed published ranking.
+    //
+    // Compared with a tolerance rather than `==`, and the tolerance is the interesting part. On one JVM the values
+    // ARE bit-exact, which is what makes this a useful regression guard. Across platforms they are not: `Math.log`,
+    // `Math.exp`, and `Math.log10` are permitted 1 ulp of error and use different intrinsics per architecture, so an
+    // aarch64 dev machine and an x86-64 CI runner disagree in the last digit or two (observed: 1e-14 on values of
+    // magnitude 300 — this test failed exactly that way on its first CI run). 1e-9 is orders of magnitude above that
+    // noise and orders of magnitude below any structural change: dropping the per-resample player subsetting, or
+    // reordering the accumulation, moves whole Elo points, and LOS moves in steps of 1/iterations.
     val expected = List(
       ("alice", 134.39508571506718, -71.59493280482212, 332.4184545365102, Some(0.5979381443298969)),
       ("bob", 61.064746775853656, -133.19303125947457, 223.98402138106349, Some(0.7448979591836735)),
       ("carol", 3.438752686306725, -144.32867782314693, 160.77211715151589, Some(1.0)),
       ("dave", -198.89858517722757, -323.90795132933715, -155.79970059805692, None)
     )
-    val actual = BradleyTerry
-      .rankedWithBootstrap(goldenGroups, iterations = 100, seed = 2026L)
-      .map(r => (r.player, r.elo, r.ciLow, r.ciHigh, r.losVsNext))
-    assertEquals(actual, expected)
+    val actual = BradleyTerry.rankedWithBootstrap(goldenGroups, iterations = 100, seed = 2026L)
+    assertEquals(actual.map(_.player), expected.map(_._1), "the ranking order itself must not move")
+    actual.zip(expected).foreach { case (row, (player, elo, ciLow, ciHigh, los)) =>
+      assertEqualsDouble(row.elo, elo, 1e-9, s"$player elo")
+      assertEqualsDouble(row.ciLow, ciLow, 1e-9, s"$player ciLow")
+      assertEqualsDouble(row.ciHigh, ciHigh, 1e-9, s"$player ciHigh")
+      assertEquals(row.losVsNext.isDefined, los.isDefined, s"$player losVsNext presence")
+      row.losVsNext.zip(los).foreach((got, want) => assertEqualsDouble(got, want, 1e-9, s"$player losVsNext"))
+    }
 
   test("empty and single-player inputs degrade gracefully"):
     assertEquals(BradleyTerry.ratings(Nil), Map.empty[String, Double])

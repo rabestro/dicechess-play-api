@@ -17,9 +17,11 @@ package dicechess.play.rating
   * report, so anything it redoes per call is multiplied by four figures: player discovery (`flatMap.distinct.sorted`
   * over two `String`s per game), the `String -> Int` index, and a freshly materialised resample of the whole corpus
   * used to cost far more than the numerical fit they fed. Names are resolved once, a resample is a draw of group
-  * indices, and the accumulation reads primitive arrays. The output is unchanged down to the last bit — deliberately,
-  * since the report is reproducible by seed and `BradleyTerrySuite`'s golden vector pins it — which is why the
-  * summation ORDER below is preserved everywhere it was not obviously irrelevant.
+  * indices, and the accumulation reads primitive arrays. The output is unchanged down to the last bit for a given JVM —
+  * deliberately, since the report is reproducible by seed — which is why the summation ORDER below is preserved
+  * everywhere it was not obviously irrelevant. (Across ARCHITECTURES the last digit or two moves no matter what this
+  * code does: `Math.log`/`exp`/`log10` are 1-ulp-tolerant and intrinsic-dependent, so an aarch64 machine and an x86-64
+  * CI runner disagree at 1e-14. `BradleyTerrySuite`'s golden vector therefore compares within 1e-9, not exactly.)
   */
 object BradleyTerry:
 
