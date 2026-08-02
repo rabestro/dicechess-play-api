@@ -167,6 +167,9 @@ rebuild-per-tick behaviour.
   never lands in a layer — never convert it to a build-arg.
 - `JAVA_OPTS` in Dockerfile/compose carries Java 25 flags cats-effect needs
   (`warnOnNonMainThreadDetected=false`, `--sun-misc-unsafe-memory-access=allow`) — keep them.
+- `init: true` on the `api` service is load-bearing, not boilerplate: the ENTRYPOINT execs the JVM,
+  so PID 1 in the container is `java`, which never reaps orphans. Without tini every healthcheck
+  process reparented to it becomes a permanent zombie (615 on the production host in ~17 h).
 - `ThisBuild/version` is frozen at `0.1.0-SNAPSHOT`; real versions come exclusively from git
   tags via the CD workflow (`APP_VERSION` build-arg → GET /version). Do not bump it.
 - `PLAY_DB_URL` set without `INGEST_URL`/`INGEST_TOKEN`: finished games and browser reports
