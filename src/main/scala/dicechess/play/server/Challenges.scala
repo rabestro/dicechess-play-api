@@ -18,7 +18,8 @@ final class Challenges private (
     registry: GameRegistry,
     nextId: Ref[IO, Long],
     ttl: FiniteDuration,
-    maxPendingPerBot: Int
+    maxPendingPerBot: Int,
+    admitBoth: (Principal, Principal) => IO[Boolean]
 ):
   import Challenges.*
 
@@ -54,8 +55,23 @@ final class Challenges private (
       val all = current.values.toList.sortBy(_.createdAt).map(_.challenge)
       (all.filter(_.target == principal), all.filter(_.challenger == principal))
 
-  /** The challenged bot accepts: seat a game (challenger = White, target = Black) and tell both bots its id. */
+  /** The challenged bot accepts: seat a game (challenger = White, target = Black) and tell both bots its id.
+    *
+    * Declared capacity (#189) is checked before the entry is claimed, not after: a `Busy` accept must leave the
+    * challenge pending so it can be taken once a game finishes, whereas claiming first would consume it to say no.
+    */
   def accept(by: Principal, id: String): IO[Either[Rejected, String]] =
+    pending.get.map(resolve(_, by, id)).flatMap {
+      case Left(rejected)   => IO.pure(Left(rejected))
+      case Right(challenge) =>
+        admitBoth(challenge.challenger, challenge.target).ifM(
+          seat(by, id),
+          IO.pure(Left(Rejected.Busy))
+        )
+    }
+
+  /** Claim the entry (so two accepts can't both seat a game) and start the game. */
+  private def seat(by: Principal, id: String): IO[Either[Rejected, String]] =
     claim(by, id).flatMap {
       case Left(rejected)   => IO.pure(Left(rejected))
       case Right(challenge) =>
@@ -94,11 +110,19 @@ final class Challenges private (
   /** Atomically remove a pending challenge if `by` is its target — so two accepts can't both seat a game. */
   private def claim(by: Principal, id: String): IO[Either[Rejected, Challenge]] =
     pending.modify { current =>
-      current.get(id) match
-        case None                                        => (current, Left(Rejected.NotFound))
-        case Some(entry) if entry.challenge.target != by => (current, Left(Rejected.NotYours))
-        case Some(entry)                                 => (current.removed(id), Right(entry.challenge))
+      resolve(current, by, id) match
+        case right @ Right(_) => (current.removed(id), right)
+        case left             => (current, left)
     }
+
+  /** Whether `by` may act on challenge `id` in this snapshot of the map — shared by the read-only pre-check and the
+    * atomic [[claim]], so the two can never disagree about what counts as not-found or not-yours.
+    */
+  private def resolve(current: Map[String, Entry], by: Principal, id: String): Either[Rejected, Challenge] =
+    current.get(id) match
+      case None                                        => Left(Rejected.NotFound)
+      case Some(entry) if entry.challenge.target != by => Left(Rejected.NotYours)
+      case Some(entry)                                 => Right(entry.challenge)
 
 object Challenges:
 
@@ -127,15 +151,24 @@ object Challenges:
 
   /** Why an accept/decline was refused. */
   enum Rejected:
-    case NotFound               // no pending challenge with that id
-    case NotYours               // the caller is not the challenged bot
+    case NotFound // no pending challenge with that id
+    case NotYours // the caller is not the challenged bot
+    case Busy     // a side is at its declared concurrent-game capacity (#189); the challenge stays pending
     case Failed(reason: String) // the game could not be seated
+
+  /** Capacity check for a proposed pairing. A plain function rather than a [[SeatGuard]] dependency, matching how
+    * `GameRoom.create` takes `persist`: it keeps this class about the challenge lifecycle, and lets every existing test
+    * build one without a bot store. The default admits everyone, so an unwired `Challenges` behaves as it did before
+    * per-bot capacity existed.
+    */
+  val AdmitAny: (Principal, Principal) => IO[Boolean] = (_, _) => IO.pure(true)
 
   def create(
       events: BotEvents,
       registry: GameRegistry,
       ttl: FiniteDuration = DefaultTtl,
-      maxPendingPerBot: Int = DefaultMaxPendingPerBot
+      maxPendingPerBot: Int = DefaultMaxPendingPerBot,
+      admitBoth: (Principal, Principal) => IO[Boolean] = AdmitAny
   ): IO[Challenges] =
     (Ref.of[IO, Map[String, Entry]](Map.empty), Ref.of[IO, Long](0L))
-      .mapN(new Challenges(_, events, registry, _, ttl, maxPendingPerBot))
+      .mapN(new Challenges(_, events, registry, _, ttl, maxPendingPerBot, admitBoth))

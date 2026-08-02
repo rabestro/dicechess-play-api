@@ -122,24 +122,55 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
-  test("onLadderBots lists only registered bots currently opted in (#102)"):
+  test(
+    "onLadderCandidates lists only registered bots currently opted in, each with its declared capacity (#102, #189)"
+  ):
     withContainers { pg =>
       store(pg).use { db =>
         // A dedicated team/hash namespace: this suite shares one database across all tests (TestContainerForAll,
         // no per-test reset), so a name or token hash reused from another test in this file would collide on the
-        // token_hash unique constraint — and a plain equality assertion on onLadderBots would be fragile against
-        // whatever else in the file happens to be on_ladder. Both are avoided here.
+        // token_hash unique constraint — and a plain equality assertion on the candidate list would be fragile
+        // against whatever else in the file happens to be on_ladder. Both are avoided here.
         for
           _        <- db.register("ladder-suite", "on-bot", "hash-ladder-on")
           _        <- db.register("ladder-suite", "off-bot", "hash-ladder-off")
           _        <- db.setOnLadder("ladder-suite", "on-bot", true)
-          onLadder <- db.onLadderBots
+          _        <- db.setMaxConcurrentGames("ladder-suite", "on-bot", 3)
+          onLadder <- db.onLadderCandidates
         yield
-          assert(onLadder.contains(Principal.Bot("ladder-suite", "on-bot")), s"expected on-bot in $onLadder")
-          assert(
-            !onLadder.contains(Principal.Bot("ladder-suite", "off-bot")),
-            s"expected off-bot absent from $onLadder"
+          val bots = onLadder.map(_.bot)
+          assert(bots.contains(Principal.Bot("ladder-suite", "on-bot")), s"expected on-bot in $bots")
+          assert(!bots.contains(Principal.Bot("ladder-suite", "off-bot")), s"expected off-bot absent from $bots")
+          assertEquals(
+            onLadder.find(_.bot == Principal.Bot("ladder-suite", "on-bot")).map(_.maxConcurrentGames),
+            Some(3),
+            "the candidate pool must carry each bot's declared capacity, not a default"
           )
+      }
+    }
+
+  test("declared capacity: registration defaults to 1, a declaration round-trips, unregistered -> None (#189)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _       <- db.register("capacity-suite", "bot", "hash-capacity")
+          initial <- db.seatPolicyOf("capacity-suite", "bot")
+          raised  <- db.setMaxConcurrentGames("capacity-suite", "bot", 4)
+          reread  <- db.seatPolicyOf("capacity-suite", "bot")
+          // Opening to humans must shape the ladder's share of the SAME declaration, not the declaration itself.
+          _       <- db.openToHumans("capacity-suite", "bot", None)
+          opened  <- db.seatPolicyOf("capacity-suite", "bot")
+          ghost   <- db.setMaxConcurrentGames("capacity-suite", "nobody", 2)
+          unknown <- db.seatPolicyOf("capacity-suite", "nobody")
+        yield
+          assertEquals(initial.map(_.maxConcurrentGames), Some(BotSeatPolicy.DefaultMaxConcurrentGames))
+          assertEquals(initial.map(_.ladderAllowance), Some(1))
+          assertEquals(raised.map(_.maxConcurrentGames), Some(4))
+          assertEquals(reread, raised, "the RETURNING result must match a fresh read")
+          assertEquals(opened.map(_.maxConcurrentGames), Some(4))
+          assertEquals(opened.map(_.ladderAllowance), Some(3), "an open-to-humans bot keeps one slot for a person")
+          assertEquals(ghost, None, "declaring for an unregistered identity must report None")
+          assertEquals(unknown, None)
       }
     }
 

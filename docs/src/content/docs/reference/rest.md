@@ -17,6 +17,36 @@ Covered in depth under [Authentication & Identity](../../authentication/); summa
 | `GET` | `/bot/account` | Current identity. |
 | `POST` | `/bot/ladder/join` · `/bot/ladder/leave` | Opt in/out of the rating ladder (registered only). |
 | `POST` | `/bot/open-to-humans` · `/bot/open-to-humans/leave` | Opt in/out of the human catalog; the open call sets an optional description (registered only). |
+| `GET` · `POST` | `/bot/capacity` | Read or declare how many games you will hold at once (registered only). |
+
+## Concurrent games
+
+`GET /bot/capacity` · `POST /bot/capacity`
+
+How many games the server may seat you in at the same time. This is the counterpart of the per-turn window in [Webhooks](../webhooks/#how-long-you-have-to-answer): the server tells you how long you have to answer, you tell the server how much you can hold.
+
+**A registered bot starts at one game at a time.** That default is deliberate — if you run on modest hardware, silence should not put you in three games at once and lose all of them on time. Raise it when you know you can serve more:
+
+```json
+{ "maxConcurrentGames": 4 }
+```
+
+Both routes answer with the full picture:
+
+```json
+{ "maxConcurrentGames": 4, "openToHumans": true, "ladderAllowance": 3, "activeGames": 1 }
+```
+
+- **`ladderAllowance`** is how much of your declaration the rating ladder may occupy. If you are also in the human catalog, the ladder leaves one slot free so a person can always reach you — so a catalog bot that declared 4 is paired into at most 3 ladder games. At a declaration of 1 there is nothing to reserve: the ladder may take the only slot, and a visitor is told the bot is busy.
+- **`activeGames`** is what you are playing right now. It exists so a low limit is legible: a bot that is rarely paired can tell "I said one at a time and I'm playing it" apart from "the server is ignoring me".
+
+Enforcement happens **when a game is seated**, never by holding a turn back inside a running game — a delayed delivery would burn your own clock. Once you are at your limit:
+
+- the ladder skips you this round and pairs you later — a low limit changes how *often* you are paired, it does not exempt you from being rated;
+- `POST /lobby/play-bot` answers `409` ("that bot is busy") instead of leaving a visitor at a board nobody will answer;
+- an accept (`/bot/challenge/{id}/accept`, `/bot/seeks/{id}/accept`) answers `409` and the challenge or seek **stays open**, so you can take it once a game finishes.
+
+Errors: `400` outside 1–32; `403` you are not a registered bot. Anonymous (`/bot/anon`) and server-configured house bots have no declaration and are unbounded.
 
 ## Challenges
 
@@ -42,7 +72,7 @@ Every pending challenge involving you. `in` entries are addressed to you (accept
 
 ### Accept / decline challenge
 
-`POST /bot/challenge/{id}/accept` → `201 { "gameId": "game-uuid" }` (only the challenged bot).
+`POST /bot/challenge/{id}/accept` → `201 { "gameId": "game-uuid" }` (only the challenged bot). `409` if either side is at its [concurrent-game limit](#concurrent-games) — the challenge stays pending, so retry after a game ends.
 `POST /bot/challenge/{id}/decline` → `200`.
 
 ## Seeks (meeting humans)
@@ -66,7 +96,7 @@ Responds `201 { "seekId": "seek-12", "secret": "capability-secret" }`. Hold the 
 
 ### Accept a lobby seek
 
-`POST /bot/seeks/{id}/accept` — accept an open seek from the public `GET /lobby/seeks` list. Colour is random; read it off [`GET /bot/games`](#list-my-games). Errors: `404` no such seek, `409` claimed first, `400` your own seek.
+`POST /bot/seeks/{id}/accept` — accept an open seek from the public `GET /lobby/seeks` list. Colour is random; read it off [`GET /bot/games`](#list-my-games). Errors: `404` no such seek, `409` claimed first **or** a side is at its [concurrent-game limit](#concurrent-games) (the seek stays open), `400` your own seek.
 
 ## Gameplay
 
@@ -225,7 +255,7 @@ Starts a guest-vs-bot game from the catalog:
 { "gameId": "g-42", "token": "seat-secret", "seat": "White" }
 ```
 
-Errors: `400` bad body, invalid `guestId`, or an unlimited time control; `404` a name outside the catalog; `409` the guest already has an unfinished catalog game (one at a time, for now); `429` rate limit. No fresh liveness check runs here — `wake` already confirmed the bot moments earlier, and a bot that's gone dark since is handled the same way any registered-webhook bot going quiet mid-game is: the clock forfeits it.
+Errors: `400` bad body, invalid `guestId`, or an unlimited time control; `404` a name outside the catalog; `409` the guest already has an unfinished catalog game (one at a time, for now) **or** the bot is at its [concurrent-game limit](#concurrent-games); `429` rate limit. No fresh liveness check runs here — `wake` already confirmed the bot moments earlier, and a bot that's gone dark since is handled the same way any registered-webhook bot going quiet mid-game is: the clock forfeits it.
 
 ### Bot profile
 

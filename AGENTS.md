@@ -35,9 +35,11 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
 - `server/` — http4s routes and services: `HealthRoutes` (/health, /version), `PlayRoutes`
   (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*),
   `IngestRoutes` (/ingest/games, browser report intake), plus
-  `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `BotEvents`, `AnonMintLimiter`, `Cors`.
+  `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `BotEvents`, `AnonMintLimiter`, `SeatGuard`,
+  `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
-  `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports).
+  `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
+  V12 per-bot `max_concurrent_games`).
 - `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics, plus a
   second deliverer instance draining browser reports from `client_reports` (#212).
 - `wire/Codecs.scala` — Circe codecs; the wire contract.
@@ -185,6 +187,15 @@ is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
   default must rename the var AND double the value — `LADDER_MAX_CONCURRENT_PAIRS=2` meant 4 games
   but now silently yields 8. `Main.warnLegacyLadderVars` logs a loud line at boot for each old name
   still present, precisely so this isn't discovered from behaviour.
+- `LADDER_MAX_CONCURRENT_GAMES` is a **server-wide** ceiling and says nothing about any one bot; the
+  per-bot limit is `bots.max_concurrent_games` (#189), which **defaults to 1** and is not configurable
+  by env at all. Deploying V12 therefore slows the existing ladder down on purpose: with N on-ladder
+  bots that never raised their limit, at most `floor(N / 2)` games run at once no matter how high the
+  server cap is. That is the intended trade (honest clocks over throughput) — the fix for a bot that
+  can genuinely do more is `POST /bot/capacity`, not raising the server cap. A bot in the human catalog
+  additionally gives the ladder only `limit - 1` of its slots (floor 1), so a catalog bot at the default
+  is paired *and* reachable by a person only one at a time. Static (`PLAY_BOT_TOKENS`) and anonymous
+  bots have no row and stay unbounded.
 - Retention (#179) will not reclaim anything on a deployment whose games predate `game_archive`,
   and this looks like the feature not working: the pass refuses to prune an ended non-aborted
   snapshot that has no archive row, because that snapshot is then the only copy of the game's

@@ -96,4 +96,14 @@ Note the shape of the failure when your platform is the binding term: it answers
 
 If your bot wants long thinking time and its platform will not give it, the fix is not a bigger timeout — it is a different [connection mode](../../connection-modes/#how-long-you-may-think). Poll and stream bots hold no inbound request while they think, so none of the ceilings above apply to them.
 
+### How many games you can hold
+
+The window above is one half of a contract; your capacity is the other. Webhook delivery inverts the usual model — the server pushes and you must answer — so the only place to say "one game at a time" is your own declaration:
+
+```text
+POST /bot/capacity   { "maxConcurrentGames": 2 }
+```
+
+A registered bot starts at **one**, and the limit is applied when a game is seated, never by queuing a turn inside a game you are already playing (that would spend your clock while you wait). If your function is billed or throttled per concurrent invocation, this is the knob that keeps three simultaneous games from turning into three time losses. See [Concurrent games](../rest/#concurrent-games) for the full response shape and what a refused seat looks like on each path.
+
 A webhook bot on the [rating ladder](../../authentication/#joining-the-rating-ladder) is fully passive: the scheduler starts the games and the webhook delivers the turns — the function needs no other integration. (Webhook bots do not contribute a client dice seed today; the [provably-fair scheme](../../provably-fair/) covers them with the participant-bound fallback, and the seed endpoint stays available to hybrid bots that also hold streams.)

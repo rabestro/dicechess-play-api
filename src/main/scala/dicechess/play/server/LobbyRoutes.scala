@@ -88,10 +88,12 @@ object LobbyRoutes:
                   lobby
                     .accept(id, accepter)
                     .flatMap:
-                      case Right(m)                           => Created(SeekMatch(m.gameId, m.token, m.seat))
-                      case Left(Lobby.Rejected.NotFound)      => NotFound()
-                      case Left(Lobby.Rejected.AlreadyTaken)  => Conflict()
-                      case Left(Lobby.Rejected.OwnSeek)       => BadRequest("cannot accept your own seek")
+                      case Right(m)                          => Created(SeekMatch(m.gameId, m.token, m.seat))
+                      case Left(Lobby.Rejected.NotFound)     => NotFound()
+                      case Left(Lobby.Rejected.AlreadyTaken) => Conflict()
+                      case Left(Lobby.Rejected.OwnSeek)      => BadRequest("cannot accept your own seek")
+                      // The seek stays open — the bot that posted it is simply full right now (#189).
+                      case Left(Lobby.Rejected.Busy)          => Conflict("that bot is at its concurrent-game limit")
                       case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case DELETE -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>

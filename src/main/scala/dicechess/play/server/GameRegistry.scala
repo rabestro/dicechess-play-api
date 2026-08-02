@@ -34,6 +34,21 @@ final class GameRegistry private (
     (byPlayer.get.map(_.getOrElse(principal, Set.empty)), rooms.get).mapN: (ids, all) =>
       ids.toList.sortBy(_.value).flatMap(id => all.get(id).map(id -> _))
 
+  /** How many games `principal` is actually playing right now — the only capacity count in the server (#189).
+    *
+    * It is **derived**, never accumulated: a separate counter can leak a slot when a game dies in an unexpected way,
+    * and a leaked slot locks a bot out of every future game while failing silently, which is worse than the timeouts
+    * per-bot capacity exists to prevent. Here there is nothing to repair — the index is rebuilt from live rooms and a
+    * room deregisters itself when its result resolves, so a wrong count cannot outlive the room that caused it.
+    *
+    * A just-ended room can linger until the registry evicts it, hence the `hasEnded` filter (the same one
+    * `GET /bot/games` applies). The one shape that does hold a slot is a genuinely unfinished game — a clockless room
+    * with an idle seat can deadlock forever (see the testing notes on idle seats). That is not a miscount, it is a real
+    * stuck game, and every path that seats bots automatically imposes a clock.
+    */
+  def activeGamesFor(principal: Principal): IO[Int] =
+    gamesFor(principal).flatMap(_.traverse((_, room) => room.hasEnded)).map(_.count(!_))
+
   /** Create and start a room for two players. Dice come from a fresh commit-reveal source whose server seed is
     * committed before any client connects; each player then folds in its own post-commit seed (see GameRoom's gate).
     * Errors (e.g. a bad initial position) are returned as a Left, never thrown.

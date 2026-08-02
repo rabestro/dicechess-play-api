@@ -14,6 +14,7 @@ import dicechess.play.core.{
   Seek,
   TimeControl
 }
+import dicechess.play.store.BotSeatPolicy
 import dicechess.play.wire.Codecs.given
 import fs2.Stream
 import org.http4s.circe.CirceEntityCodec.given
@@ -211,6 +212,61 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
         assertEquals(tooLong, Status.BadRequest)
         assertEquals(anonNo, Status.Forbidden)
         assertEquals(staticNo, Status.Forbidden)
+
+  test("GET/POST /bot/capacity: registration declares 1, a declaration round-trips, out of range 400, anon/static 403"):
+    app.flatMap: service =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        initial <- service.run(request(Method.GET, uri"/bot/capacity", Some(created.token))).flatMap(_.as[Capacity])
+        raised  <- service
+          .run(request(Method.POST, uri"/bot/capacity", Some(created.token)).withEntity(SetCapacity(4)))
+          .flatMap(_.as[Capacity])
+        reread <- service.run(request(Method.GET, uri"/bot/capacity", Some(created.token))).flatMap(_.as[Capacity])
+        // Opening to humans must not change the declaration, only the ladder's share of it.
+        _         <- service.run(request(Method.POST, uri"/bot/open-to-humans", Some(created.token)))
+        inCatalog <- service.run(request(Method.GET, uri"/bot/capacity", Some(created.token))).flatMap(_.as[Capacity])
+        tooLow    <- service
+          .run(request(Method.POST, uri"/bot/capacity", Some(created.token)).withEntity(SetCapacity(0)))
+          .map(_.status)
+        tooHigh <- service
+          .run(
+            request(Method.POST, uri"/bot/capacity", Some(created.token))
+              .withEntity(SetCapacity(BotSeatPolicy.MaxDeclarableConcurrentGames + 1))
+          )
+          .map(_.status)
+        badBody <- service
+          .run(request(Method.POST, uri"/bot/capacity", Some(created.token)).withEntity(io.circe.Json.obj()))
+          .map(_.status)
+        anon     <- service.run(Request[IO](Method.POST, uri"/bot/anon")).flatMap(_.as[AnonBot])
+        anonNo   <- service.run(request(Method.GET, uri"/bot/capacity", Some(anon.token))).map(_.status)
+        staticNo <- service.run(request(Method.GET, uri"/bot/capacity", Some("tok-alice"))).map(_.status)
+      yield
+        assertEquals(
+          initial,
+          Capacity(BotSeatPolicy.DefaultMaxConcurrentGames, openToHumans = false, ladderAllowance = 1, activeGames = 0)
+        )
+        assertEquals(raised, Capacity(4, openToHumans = false, ladderAllowance = 4, activeGames = 0))
+        assertEquals(reread, raised, "the write's own answer must match a fresh read")
+        assertEquals(inCatalog, Capacity(4, openToHumans = true, ladderAllowance = 3, activeGames = 0))
+        assertEquals(tooLow, Status.BadRequest)
+        assertEquals(tooHigh, Status.BadRequest)
+        assertEquals(badBody, Status.BadRequest)
+        // Neither has a row to declare on, and both stay unbounded — the house bot must face every visitor at once.
+        assertEquals(anonNo, Status.Forbidden)
+        assertEquals(staticNo, Status.Forbidden)
+
+  test("GET /bot/capacity reports the games in flight, so a low limit is legible rather than looking ignored (#189)"):
+    AnonMintLimiter.create(limit = 100).flatMap(appWith(_)).flatMap { (service, registry) =>
+      for
+        created <- service
+          .run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("dragons", "smaug")))
+          .flatMap(_.as[BotRegistered])
+        _        <- registry.create(Principal.Bot("dragons", "smaug"), Principal.Bot("acme", "alice"))
+        inFlight <- service.run(request(Method.GET, uri"/bot/capacity", Some(created.token))).flatMap(_.as[Capacity])
+      yield assertEquals(inFlight.activeGames, 1)
+    }
 
   test("an unknown / no Bearer token is unauthorized"):
     app.flatMap: service =>

@@ -27,7 +27,9 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]       = IO.pure(false)
     def ratingOf(team: String, name: String): IO[Option[BotRating]]                 = IO.pure(known.get((team, name)))
     def setOnLadder(team: String, name: String, on: Boolean): IO[Option[BotRating]] = IO.pure(None)
-    def onLadderBots: IO[List[Principal.Bot]]                                       = IO.pure(Nil)
+    def onLadderCandidates: IO[List[BotSeatPolicy]]                                 = IO.pure(Nil)
+    def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]         = IO.pure(None)
+    def setMaxConcurrentGames(team: String, name: String, n: Int): IO[Option[BotSeatPolicy]] = IO.pure(None)
     def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
       IO.pure(None)
     def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] = IO.pure(None)

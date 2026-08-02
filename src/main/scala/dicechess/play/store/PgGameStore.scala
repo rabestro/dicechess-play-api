@@ -344,13 +344,39 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
 
-  def onLadderBots: IO[List[Principal.Bot]] =
-    sql"""SELECT team, name FROM play.bots WHERE on_ladder = true"""
-      .query[(String, String)]
+  /** The scheduler's whole candidate read in one query (#189): being on the ladder, the declared capacity, and the
+    * catalog flag that reserves part of it all come off the same row, so there is no reason to make it three.
+    */
+  def onLadderCandidates: IO[List[BotSeatPolicy]] =
+    sql"""SELECT team, name, max_concurrent_games, open_to_humans
+          FROM play.bots WHERE on_ladder = true"""
+      .query[(String, String, Int, Boolean)]
       .to[List]
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_.map(Principal.Bot(_, _)))
+      .map(_.map { case (team, name, limit, open) => BotSeatPolicy(Principal.Bot(team, name), limit, open) })
+
+  def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]] =
+    sql"""SELECT max_concurrent_games, open_to_humans
+          FROM play.bots WHERE team = $team AND name = $name"""
+      .query[(Int, Boolean)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (limit, open) => BotSeatPolicy(Principal.Bot(team, name), limit, open) })
+
+  /** `RETURNING` in the same statement, same no-stale-window reasoning as `setOnLadder`. The value is range-checked by
+    * the caller and again by `bots_max_concurrent_games_range`; the constraint is the backstop, not the validation.
+    */
+  def setMaxConcurrentGames(team: String, name: String, maxConcurrentGames: Int): IO[Option[BotSeatPolicy]] =
+    sql"""UPDATE play.bots SET max_concurrent_games = $maxConcurrentGames
+          WHERE team = $team AND name = $name
+          RETURNING max_concurrent_games, open_to_humans"""
+      .query[(Int, Boolean)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (limit, open) => BotSeatPolicy(Principal.Bot(team, name), limit, open) })
 
   /** `RETURNING` in the same statement (same no-stale-window reasoning as `setOnLadder`): open the bot and set its
     * description in one write, then read the persisted state back. `None` if no such registered identity.
