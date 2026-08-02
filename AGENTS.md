@@ -85,6 +85,11 @@ ended snapshots and delivered outbox rows are kept forever.
 (#181) — tuning knobs for the `/strength` SPRT/Bradley-Terry report, each falling back to its own
 default rather than disabling anything; the report itself is refreshed by the rating batch, so it
 is only ever populated while `RATING_INTERVAL_SECONDS` is also set.
+`STRENGTH_REFRESH_INTERVAL_SECONDS` (#215, default `900`) — the floor between two rebuilds of that
+report, read by the rating batch like `LADDER_TIMEOUT_PARK_GAMES`. A rebuild folds every rated game
+ever played `STRENGTH_BOOTSTRAP_ITERATIONS` times, so it must NOT track the batch poll: doing so
+pegged a cats-effect worker for a third of all wall-clock time in production. `0` restores the old
+rebuild-per-tick behaviour.
 
 ## Quality gates — Definition of Done
 

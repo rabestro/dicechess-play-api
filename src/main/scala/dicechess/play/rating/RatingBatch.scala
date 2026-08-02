@@ -1,6 +1,6 @@
 package dicechess.play.rating
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.effect.std.Console
 import cats.syntax.all.*
 import dicechess.play.core.{Principal, Termination}
@@ -37,28 +37,44 @@ import scala.concurrent.duration.*
   * re-evaluated from scratch on the bot's next timeout loss, which an actually-offline bot supplies within a minute.
   *
   * '''The [[StrengthCache]] refresh (#181)''' also rides along here rather than on its own timer or the `/strength`
-  * request path — see `tick`'s doc.
+  * request path, but on its own much slower cadence (#215) — see `tick`'s doc.
+  *
+  * Constructed through [[RatingBatch.create]] because that refresh cadence is stateful: the batch remembers when it
+  * last rebuilt the report and whether games have landed since.
   */
-final class RatingBatch(
+final class RatingBatch private (
     botStore: BotStore,
     ratingStore: RatingStore,
     resultsStore: GameResultsStore,
     config: RatingBatch.Config,
     strengthCache: StrengthCache,
-    strengthConfig: StrengthReport.Config = StrengthReport.Config()
+    strengthConfig: StrengthReport.Config,
+    refreshState: Ref[IO, RatingBatch.RefreshState]
 ):
 
   /** One batch tick: drain the queue page by page until a short page says it is drained, then refresh the cached
-    * [[StrengthReport]] if this drain applied at least one game, or if the cache has never been warmed (a fresh boot).
-    * The refresh piggybacks on this tick's own "did new rated games land" check instead of adding a second one:
-    * `StrengthReport.build` folds the full `game_results` history and its Bradley-Terry ranking runs a four-figure
-    * bootstrap, both far too expensive for the request path of an unauthenticated route.
+    * [[StrengthReport]] if one is due.
+    *
+    * The refresh rides this fiber rather than one of its own — a second fiber rebuilding the same cache would need its
+    * own single-writer argument, and this one already visits every finished rated game. What it does NOT ride is this
+    * tick's cadence. `StrengthReport.build` folds the full `game_results` history and its Bradley-Terry ranking runs a
+    * four-figure bootstrap; on a live ladder "did new rated games land" is true on essentially every tick, so gating
+    * the rebuild on that alone rebuilt a sixty-thousand-game corpus every `RATING_INTERVAL_SECONDS` because one or two
+    * games had been added to it — a compute-bound job holding a cats-effect worker for a third of all wall-clock time,
+    * measured in production (#215). `strengthRefreshInterval` is the real gate now; `appliedAny` only marks the report
+    * dirty, and a tick that applies nothing still refreshes a dirty report once the interval has passed, so the last
+    * games before an idle stretch are never stranded outside the report.
+    *
+    * A cold cache is exempt: a fresh boot warms it on the first tick regardless of the interval, since until then
+    * `/strength` has nothing at all to answer with.
     */
   def tick: IO[Unit] =
     for
       appliedAny <- drainQueue
-      stillCold  <- strengthCache.get.map(_.isEmpty)
-      _          <- refreshStrengthCache.whenA(appliedAny || stillCold)
+      cold       <- strengthCache.get.map(_.isEmpty)
+      now        <- IO.monotonic
+      due        <- refreshState.modify(RatingBatch.planRefresh(appliedAny, cold, now, config.strengthRefreshInterval))
+      _          <- refreshStrengthCache.whenA(due)
     yield ()
 
   private def drainQueue: IO[Boolean] =
@@ -70,7 +86,11 @@ final class RatingBatch(
 
   /** Deliberately non-fatal, the same spirit as `parkIfStreakReached`: a failure here must never re-abort a tick that
     * already committed its rating writes, and retrying immediately buys nothing a fresh full-history fold at the next
-    * interval doesn't already give for free.
+    * due refresh doesn't already give for free.
+    *
+    * Failure does re-arm the dirty flag `planRefresh` just cleared, though. Without that, a refresh that failed would
+    * leave the cache stale until the NEXT game happened to land — the games it was rebuilding for would have been
+    * marked delivered by a rebuild that never produced anything.
     */
   private def refreshStrengthCache: IO[Unit] =
     resultsStore
@@ -78,7 +98,8 @@ final class RatingBatch(
       .map(StrengthReport.build(_, strengthConfig))
       .flatMap(strengthCache.set)
       .handleErrorWith(error =>
-        Console[IO].errorln(s"[play][rating] strength report refresh failed, keeping the last cached one: $error")
+        refreshState.update(_.copy(pending = true)) *>
+          Console[IO].errorln(s"[play][rating] strength report refresh failed, keeping the last cached one: $error")
       )
 
   /** Background loop; start once at boot. Unlike the in-memory sweepers (`Lobby`/`Challenges`), a tick here does real
@@ -158,6 +179,47 @@ final class RatingBatch(
 
 object RatingBatch:
 
+  /** The only way to build one: the strength refresh cadence needs a `Ref`, so construction is effectful. Named
+    * `create` like `StrengthCache.create` rather than `apply`, so a call site cannot read as a bare constructor.
+    */
+  def create(
+      botStore: BotStore,
+      ratingStore: RatingStore,
+      resultsStore: GameResultsStore,
+      config: Config,
+      strengthCache: StrengthCache,
+      strengthConfig: StrengthReport.Config = StrengthReport.Config()
+  ): IO[RatingBatch] =
+    Ref
+      .of[IO, RefreshState](RefreshState.Initial)
+      .map(new RatingBatch(botStore, ratingStore, resultsStore, config, strengthCache, strengthConfig, _))
+
+  /** What the strength refresh has to remember between ticks (#215): when it last rebuilt the report, and whether rated
+    * games have landed since. `pending` outlives the tick that set it precisely so a burst of games followed by an idle
+    * stretch still gets folded in, instead of waiting for a game that may not come for hours.
+    */
+  final private[rating] case class RefreshState(lastRefreshAt: Option[FiniteDuration], pending: Boolean)
+
+  private[rating] object RefreshState:
+    val Initial: RefreshState = RefreshState(None, pending = false)
+
+  /** The refresh decision as a pure `Ref.modify` step: `(next state, refresh now?)`.
+    *
+    * `now` is monotonic, so the elapsed comparison is immune to wall-clock jumps. A cold cache refreshes
+    * unconditionally — see `tick` — and still stamps `lastRefreshAt`, so a boot that lands mid-interval does not
+    * immediately rebuild a second time.
+    */
+  private[rating] def planRefresh(
+      appliedAny: Boolean,
+      cold: Boolean,
+      now: FiniteDuration,
+      interval: FiniteDuration
+  )(state: RefreshState): (RefreshState, Boolean) =
+    val pending = state.pending || appliedAny
+    val due     = state.lastRefreshAt.forall(now - _ >= interval)
+    if cold || (pending && due) then (RefreshState(Some(now), pending = false), true)
+    else (state.copy(pending = pending), false)
+
   /** The stored `termination` value that counts towards a park streak, taken from the same mapping that WROTE the
     * column (`PgGameStore.finishedGameOf`) rather than spelled out again here: a literal would let the two drift, and
     * the failure mode of that drift is silent — auto-park would simply stop firing, with nothing logged anywhere.
@@ -205,12 +267,14 @@ object RatingBatch:
 
   /** `interval` between queue polls; `batchSize` is the page size of one poll (the tick keeps paging until a short
     * page, so the backlog after downtime still drains in one tick); `ladderTimeoutParkGames` is the auto-park threshold
-    * (#150), counted in consecutive fully-timed-out ladder games.
+    * (#150), counted in consecutive fully-timed-out ladder games; `strengthRefreshInterval` is the floor between two
+    * [[StrengthReport]] rebuilds (#215).
     */
   final case class Config(
       interval: FiniteDuration,
       batchSize: Int,
-      ladderTimeoutParkGames: Int
+      ladderTimeoutParkGames: Int,
+      strengthRefreshInterval: FiniteDuration
   )
 
   object Config:
@@ -218,7 +282,16 @@ object RatingBatch:
     val DefaultBatchSize: Int           = 100
     // Matches the real threshold the previous `ladderTimeoutParkPairs=2` (2 games per pairing) enforced (#190).
     val DefaultLadderTimeoutParkGames: Int = 4
-    val Default: Config                    = Config(DefaultInterval, DefaultBatchSize, DefaultLadderTimeoutParkGames)
+
+    /** Two orders of magnitude slower than the queue poll, and deliberately so: the report is a batch snapshot of the
+      * whole corpus, nothing reads it more than a few times an hour, and every rebuild costs a full pass over every
+      * rated game ever played times the bootstrap iteration count. Fifteen minutes of staleness is invisible to
+      * `/strength`; the rebuild it replaces was visible in production as periodic fiber starvation (#215).
+      */
+    val DefaultStrengthRefreshInterval: FiniteDuration = 15.minutes
+
+    val Default: Config =
+      Config(DefaultInterval, DefaultBatchSize, DefaultLadderTimeoutParkGames, DefaultStrengthRefreshInterval)
 
     /** Parse from explicit optional raw values (also used by tests — same split, and the same strictly-positive
       * validation, as `LadderScheduler.Config.fromValues`): a non-positive interval would busy-spin the loop, a
@@ -229,7 +302,8 @@ object RatingBatch:
     def fromValues(
         intervalSecondsRaw: Option[String],
         batchSizeRaw: Option[String],
-        ladderTimeoutParkGamesRaw: Option[String]
+        ladderTimeoutParkGamesRaw: Option[String],
+        strengthRefreshSecondsRaw: Option[String] = None
     ): Option[Config] =
       intervalSecondsRaw.filter(_.nonEmpty).flatMap(_.toIntOption).filter(_ > 0).map { seconds =>
         val size      = batchSizeRaw.flatMap(_.toIntOption).filter(_ > 0).getOrElse(DefaultBatchSize)
@@ -237,7 +311,14 @@ object RatingBatch:
           .flatMap(_.toIntOption)
           .filter(_ > 0)
           .getOrElse(DefaultLadderTimeoutParkGames)
-        Config(seconds.seconds, size, parkGames)
+        // Zero is accepted here, unlike every other knob: it means "rebuild on every tick that applied something",
+        // which is exactly the pre-#215 behaviour and the only way to ask for it back.
+        val strengthRefresh = strengthRefreshSecondsRaw
+          .flatMap(_.toIntOption)
+          .filter(_ >= 0)
+          .map(_.seconds)
+          .getOrElse(DefaultStrengthRefreshInterval)
+        Config(seconds.seconds, size, parkGames, strengthRefresh)
       }
 
   /** Opt-in by env, same "absence disables" idiom as `LADDER_INTERVAL_SECONDS`: with `RATING_INTERVAL_SECONDS` unset,
@@ -255,7 +336,11 @@ object RatingBatch:
     Config.fromValues(
       sys.env.get("RATING_INTERVAL_SECONDS"),
       sys.env.get("RATING_BATCH_SIZE"),
-      sys.env.get("LADDER_TIMEOUT_PARK_GAMES")
+      sys.env.get("LADDER_TIMEOUT_PARK_GAMES"),
+      // A `STRENGTH_*` name on a `RATING_*` config, the mirror image of `LADDER_TIMEOUT_PARK_GAMES` above and for the
+      // same reason: the knob is named for the feature it governs, not for the batch that happens to host it. It
+      // inherits that var's coupling too — with `RATING_INTERVAL_SECONDS` unset there is no batch, so no report.
+      sys.env.get("STRENGTH_REFRESH_INTERVAL_SECONDS")
     )
 
   /** White-POV stored result → (whiteScore, blackScore) in Glicko terms; `None` for any out-of-vocabulary value. */
