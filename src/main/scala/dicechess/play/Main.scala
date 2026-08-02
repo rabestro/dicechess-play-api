@@ -6,6 +6,8 @@ import com.comcast.ip4s.*
 import dicechess.play.core.Principal
 import dicechess.play.server.{
   AnonMintLimiter,
+  AuthRoutes,
+  AuthSession,
   BotAuth,
   BotEvents,
   BotRoutes,
@@ -13,6 +15,7 @@ import dicechess.play.server.{
   CatalogRoutes,
   Challenges,
   Cors,
+  GoogleAuth,
   GameRegistry,
   HealthRoutes,
   HistoryRoutes,
@@ -118,6 +121,11 @@ object Main extends IOApp.Simple:
       registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
       lobby         <- Lobby.create(registry, admitBoth = admitBoth)
       cors          <- Cors.fromEnv
+      // Google sign-in config (#233, ADR-0017). Read here, applied where the routes mount below: the feature needs
+      // BOTH halves (Google client + session secret) and persistence — anything less leaves the auth surface unmounted.
+      googleConfig  <- GoogleAuth.configFromEnv
+      sessionSecret <- AuthSession.secretFromEnv
+      frontendUrl   <- AuthSession.frontendUrlFromEnv
       _             <- warnLegacyLadderVars
       // The ladder scheduler is opt-in by env (LADDER_INTERVAL_SECONDS) — same "absence disables" idiom as
       // persistence/ingest above. Unset, the ladder never starts games on its own even if bots are on_ladder.
@@ -245,6 +253,14 @@ object Main extends IOApp.Simple:
           // Browser report intake (#212) writes client_reports — DB-only seam once more: without persistence there
           // is no queue to accept into, so the SPA's POST gets a 404 and its outbox simply retries later.
           val ingest = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => IngestRoutes(pg, ingestLimit))
+          // Google sign-in (#233, ADR-0017): needs persistence (users live in Postgres) AND the full auth config —
+          // Google client + session secret. Anything less and the routes are simply not mounted (404), the same
+          // absence-disables idiom as everything above; GoogleAuth.configFromEnv warns on a PARTIAL Google config.
+          val auth = (pgStore, googleConfig, sessionSecret)
+            .mapN { (pg, gc, secret) =>
+              AuthRoutes(AuthSession(pg, secret), GoogleAuth.live(gc), pg, frontendUrl)
+            }
+            .getOrElse(org.http4s.HttpRoutes.empty[IO])
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -252,7 +268,7 @@ object Main extends IOApp.Simple:
             .withHttpWebSocketApp(wsb =>
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
-                  catalog <+> playerGames <+> strength <+> history <+> ingest <+>
+                  catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+>
                   WebhookRoutes(botAuth, webhookService, webhookLimit, pgStore) <+>
                   BotRoutes(
                     botAuth,

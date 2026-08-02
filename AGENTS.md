@@ -34,9 +34,9 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
   (the only engine wrapper), `PlayerConnection` (transport-agnostic player handle).
 - `server/` — http4s routes and services: `HealthRoutes` (/health, /version), `PlayRoutes`
   (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*),
-  `IngestRoutes` (/ingest/games, browser report intake), plus
-  `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `BotEvents`, `AnonMintLimiter`, `SeatGuard`,
-  `Cors`.
+  `IngestRoutes` (/ingest/games, browser report intake), `AuthRoutes` (/auth/*, Google sign-in,
+  #233), plus `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `AuthSession`, `GoogleAuth`,
+  `BotEvents`, `AnonMintLimiter`, `SeatGuard`, `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
   `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
   V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry, V14 user accounts).
@@ -92,6 +92,12 @@ report, read by the rating batch like `LADDER_TIMEOUT_PARK_GAMES`. A rebuild fol
 ever played `STRENGTH_BOOTSTRAP_ITERATIONS` times, so it must NOT track the batch poll: doing so
 pegged a cats-effect worker for a third of all wall-clock time in production. `0` restores the old
 rebuild-per-tick behaviour.
+Google sign-in (#233, ADR-0017): `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` +
+`GOOGLE_REDIRECT_URI` + `PLAY_SESSION_SECRET` (all four required, plus persistence) mount the
+`/auth/*` routes; `PLAY_FRONTEND_URL` (default `https://play.jc.id.lv`) is where login/callback
+redirect back to. A PARTIAL Google config warns loudly at boot instead of the usual silent
+absence. With sign-in on, `PLAY_CORS_ORIGINS` must be a non-empty allow-list — that is also what
+switches CORS into credentialed mode; the empty allow-all default stays credential-less.
 
 ## Quality gates — Definition of Done
 

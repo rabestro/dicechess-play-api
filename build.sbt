@@ -39,6 +39,8 @@ val MunitCatsEffectVersion = "2.2.0"
 // share one operational profile (same driver, migrations, test harness).
 val DoobieVersion             = "1.0.0-RC9"
 val FlywayVersion             = "13.1.0"
+val JavaJwtVersion            = "4.5.2"
+val JwksRsaVersion            = "0.24.1"
 val PostgresDriverVersion     = "42.7.13"
 val TestcontainersVersion     = "0.43.0"
 val TestcontainersJavaVersion = "1.21.3"
@@ -71,6 +73,10 @@ lazy val root = (project in file("."))
       "org.tpolecat"  %% "doobie-postgres-circe"      % DoobieVersion,
       "org.flywaydb"   % "flyway-database-postgresql" % FlywayVersion,
       "org.postgresql" % "postgresql"                 % PostgresDriverVersion,
+      // Google sign-in (#233, ADR-0017): HMAC session JWTs + RS256 id_token verification against
+      // Google's JWKS. Same libraries (and provenance) as the hardened analytics PR #215 port.
+      "com.auth0" % "java-jwt" % JavaJwtVersion,
+      "com.auth0" % "jwks-rsa" % JwksRsaVersion,
       // Logging backend for Ember
       "ch.qos.logback" % "logback-classic" % LogbackVersion % Runtime,
       // Testing
