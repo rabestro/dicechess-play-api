@@ -5,7 +5,7 @@ description: Register one HTTPS callback and let the server POST your turns — 
 
 The push alternative to streams and polling (**registered bots only**): register an HTTPS callback once, and the server POSTs to it whenever it is your turn — **the HTTP response body is your move**. A bot becomes a single stateless HTTPS handler, woken only when there is a decision to make. Works with every time control — a 1–3 s cold start is noise against a Fischer 300+3 budget.
 
-Webhooks are enabled per server by the operator; when off, every endpoint below answers `503 Service Unavailable`. The per-turn wait is bounded by both a server cap — **120 s on the public deployment** — and the mover's remaining clock; see [How long you have to answer](#how-long-you-have-to-answer).
+Webhooks are enabled per server by the operator; when off, every endpoint below answers `503 Service Unavailable` — except [delivery stats](#how-to-see-what-is-happening), which read history and answer regardless of whether the feature is currently on. The per-turn wait is bounded by both a server cap — **120 s on the public deployment** — and the mover's remaining clock; see [How long you have to answer](#how-long-you-have-to-answer).
 
 ## Register a webhook
 
@@ -107,3 +107,29 @@ POST /bot/capacity   { "maxConcurrentGames": 2 }
 A registered bot starts at **one**, and the limit is applied when a game is seated, never by queuing a turn inside a game you are already playing (that would spend your clock while you wait). If your function is billed or throttled per concurrent invocation, this is the knob that keeps three simultaneous games from turning into three time losses. See [Concurrent games](../rest/#concurrent-games) for the full response shape and what a refused seat looks like on each path.
 
 A webhook bot on the [rating ladder](../../authentication/#joining-the-rating-ladder) is fully passive: the scheduler starts the games and the webhook delivers the turns — the function needs no other integration. (Webhook bots do not contribute a client dice seed today; the [provably-fair scheme](../../provably-fair/) covers them with the participant-bound fallback, and the seed endpoint stays available to hybrid bots that also hold streams.)
+
+### How to see what is happening
+
+A bot that receives few turns has three otherwise-indistinguishable explanations: it declared a low [capacity](#how-many-games-you-can-hold) and is genuinely using it, it isn't being picked, or its endpoint is actually failing. The first is answered by `activeGames` in [`GET /bot/capacity`](../rest/#concurrent-games); the third — the one this server could see all along but never surfaced — is answered here:
+
+```text
+GET /bot/webhook/stats
+```
+
+```json
+{
+  "last24h": {
+    "totalDeliveries": 812,
+    "outcomes": [{ "outcome": "applied", "count": 790 }, { "outcome": "http_503", "count": 22 }],
+    "p50Ms": 200, "p90Ms": 1000, "p99Ms": 5000
+  },
+  "last7d": { "…": "same shape, over 7 days" },
+  "lastFailure": { "at": "2026-08-01T10:00:00Z", "reason": "the endpoint answered HTTP 503" }
+}
+```
+
+Two windows — 24 hours and 7 days — each with a count per outcome and three latency percentiles. Outcomes are named for what actually happened: `applied` (a usable move), `declined` (you sent `{"moves":[]}` on purpose), `refused` (the room rejected the moves — stale or illegal), `garbled` (the body didn't decode), `oversized_body`, `http_<code>` (your endpoint answered, just not `200` — this is exactly the "your own platform's request timeout" row from the table above, made visible: a `504` or `524` here means your gateway cut the turn, not this server), `timed_out` (nothing arrived within this server's own window), and `unreachable` (connection refused, DNS, or similar). `lastFailure` is the most recent of everything except `applied`/`declined` — the answer to "is it still broken, and since when" that a table of counts alone can't give.
+
+Percentiles are bucket-resolution approximations (a fixed set of latency buckets, log-spaced from 50 ms to 300 s), not exact — enough to tell "my p99 moved from 2 s to 30 s" without needing millisecond precision. Recording never sits on the turn path: a delivery is classified and queued the instant it completes, and a slow or unavailable stats write only ever costs a dropped data point, never a turn.
+
+`GET /bot/webhook/stats` needs a registered identity (`403` otherwise, same as the rest of this page) and answers `404` on a server that runs without a database — same as the leaderboard and catalog.

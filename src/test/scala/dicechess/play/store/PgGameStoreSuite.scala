@@ -256,6 +256,69 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("recordDelivery upserts the histogram cell, and statsFor splits it into the 24h/7d windows (#225)"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val now       = Instant.parse("2026-08-02T12:00:00Z")
+        val within24h = now.minusSeconds(3600)          // 1h ago — in both windows
+        val within7d  = now.minusSeconds(3 * 24 * 3600) // 3 days ago — in the 7d window only
+        val outside7d = now.minusSeconds(8 * 24 * 3600) // 8 days ago — in neither
+        for
+          _ <- db.register("stats-suite", "delivery-bot", "hash-stats-delivery")
+          // Two deliveries in the same hour land in the SAME cell — proving the upsert accumulates, not overwrites.
+          _       <- db.recordDelivery("stats-suite", "delivery-bot", DeliveryOutcome.Applied, 10.millis, within24h)
+          _       <- db.recordDelivery("stats-suite", "delivery-bot", DeliveryOutcome.Applied, 10.millis, within24h)
+          _       <- db.recordDelivery("stats-suite", "delivery-bot", DeliveryOutcome.TimedOut, 2.seconds, within7d)
+          _       <- db.recordDelivery("stats-suite", "delivery-bot", DeliveryOutcome.Applied, 10.millis, outside7d)
+          stats   <- db.statsFor("stats-suite", "delivery-bot", now)
+          nothing <- db.statsFor("stats-suite", "nobody", now)
+        yield
+          assertEquals(stats.last24h.totalDeliveries, 2L, "only the two within24h deliveries are in the 24h window")
+          assertEquals(stats.last24h.outcomes, List(OutcomeCount("applied", 2)))
+          assertEquals(
+            stats.last7d.totalDeliveries,
+            3L,
+            "the 7d window adds the timed_out delivery but still excludes the 8-day-old one"
+          )
+          assertEquals(
+            stats.last7d.outcomes.sortBy(_.outcome),
+            List(OutcomeCount("applied", 2), OutcomeCount("timed_out", 1))
+          )
+          assertEquals(nothing, WebhookStats.empty, "a bot with no recorded deliveries reports the empty windows")
+      }
+    }
+
+  test(
+    "recordDelivery sets last_failure_at/reason on a fault, but a clean Applied/Declined never overwrites it (#225)"
+  ):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val firstFault  = Instant.parse("2026-08-01T10:00:00Z")
+        val secondFault = Instant.parse("2026-08-01T11:00:00Z")
+        val laterClean  = Instant.parse("2026-08-01T12:00:00Z")
+        for
+          _ <- db.register("stats-suite", "failure-bot", "hash-stats-failure")
+          // last_failure_at/reason live on the bot_webhooks row itself (V13) — a real delivery only ever happens
+          // once a webhook is registered (deliverTurn's own guard), so the test mirrors that precondition.
+          _       <- db.put(BotWebhook("stats-suite", "failure-bot", "https://fn.example/turn", "secret", firstFault))
+          initial <- db.statsFor("stats-suite", "failure-bot", laterClean)
+          _ <- db.recordDelivery("stats-suite", "failure-bot", DeliveryOutcome.HttpStatus(503), 50.millis, firstFault)
+          oneFault <- db.statsFor("stats-suite", "failure-bot", laterClean)
+          _        <- db.recordDelivery("stats-suite", "failure-bot", DeliveryOutcome.TimedOut, 30.seconds, secondFault)
+          _        <- db.recordDelivery("stats-suite", "failure-bot", DeliveryOutcome.Applied, 10.millis, laterClean)
+          _        <- db.recordDelivery("stats-suite", "failure-bot", DeliveryOutcome.Declined, 10.millis, laterClean)
+          finalRow <- db.statsFor("stats-suite", "failure-bot", laterClean)
+        yield
+          assertEquals(initial.lastFailure, None, "no deliveries yet — nothing to report")
+          assertEquals(oneFault.lastFailure, Some(LastFailure(firstFault, "the endpoint answered HTTP 503")))
+          assertEquals(
+            finalRow.lastFailure,
+            Some(LastFailure(secondFault, "the server's own delivery window expired with no response")),
+            "the LATEST fault must win, and neither the later Applied nor the later Declined may overwrite it"
+          )
+      }
+    }
+
   test("a webhook row cannot exist without its bot identity — the FK rejects strangers (#104)"):
     withContainers { pg =>
       store(pg).use { db =>

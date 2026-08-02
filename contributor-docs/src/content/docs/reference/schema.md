@@ -25,6 +25,7 @@ Regenerate with `mise run contrib-docs:schema` after adding a migration.
 
 ```mermaid
 erDiagram
+    bot_webhook_stats
     bot_webhooks
     bots
     client_reports
@@ -32,6 +33,7 @@ erDiagram
     game_results
     games
     outbox
+    bots ||--o{ bot_webhook_stats : ""
     bots ||--o| bot_webhooks : ""
     games ||--o| outbox : ""
 ```
@@ -43,6 +45,22 @@ Only foreign keys appear as edges. Three tables carry no foreign key on purpose 
 
 ## Tables
 
+### `bot_webhook_stats`
+
+| Column | Type | Null | Default | Key |
+| --- | --- | --- | --- | --- |
+| `team` | `text` | no | — | FK → bots(team, name), PK |
+| `name` | `text` | no | — | FK → bots(team, name), PK |
+| `hour` | `timestamp with time zone` | no | — | PK |
+| `outcome` | `text` | no | — | PK |
+| `latency_bucket` | `smallint` | no | — | PK |
+| `count` | `bigint` | no | `0` | — |
+
+Indexes:
+
+- `bot_webhook_stats_pkey` — `CREATE UNIQUE INDEX bot_webhook_stats_pkey ON public.bot_webhook_stats USING btree (team, name, hour, outcome, latency_bucket)`
+- `bot_webhook_stats_recent_idx` — `CREATE INDEX bot_webhook_stats_recent_idx ON public.bot_webhook_stats USING btree (team, name, hour)`
+
 ### `bot_webhooks`
 
 | Column | Type | Null | Default | Key |
@@ -53,6 +71,8 @@ Only foreign keys appear as edges. Three tables carry no foreign key on purpose 
 | `secret` | `text` | no | — | — |
 | `verified_at` | `timestamp with time zone` | no | — | — |
 | `created_at` | `timestamp with time zone` | no | `now()` | — |
+| `last_failure_at` | `timestamp with time zone` | yes | — | — |
+| `last_failure_reason` | `text` | yes | — | — |
 
 Indexes:
 

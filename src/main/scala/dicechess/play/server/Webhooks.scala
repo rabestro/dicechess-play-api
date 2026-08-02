@@ -1,11 +1,11 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref, Resource}
-import cats.effect.std.{Console, Supervisor}
+import cats.effect.std.{Console, Queue, Supervisor}
 import cats.syntax.all.*
 import dicechess.play.core.{GameEvent, GameId, GameStatus, Principal, PublicGameState, Seat}
 import dicechess.play.game.GameRoom
-import dicechess.play.store.{BotWebhook, WebhookStore}
+import dicechess.play.store.{BotWebhook, DeliveryOutcome, WebhookStatsStore, WebhookStore}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import io.circe.parser.decode
@@ -60,7 +60,9 @@ final class Webhooks private (
     checkUrl: String => IO[Either[String, Uri]],
     config: Webhooks.Config,
     attached: Ref[IO, Set[(GameId, Seat)]],
-    runners: Supervisor[IO]
+    runners: Supervisor[IO],
+    stats: WebhookStatsStore,
+    deliveryEvents: Queue[IO, Webhooks.DeliveryEvent]
 ):
   import Webhooks.*
 
@@ -127,6 +129,19 @@ final class Webhooks private (
     (attachSweep.handleErrorWith(e => Console[IO].errorln(s"[play][webhook] sweep failed: $e")) *>
       IO.sleep(config.scanEvery)).foreverM
 
+  /** Drains `deliveryEvents` and persists each into its histogram cell (#225) — deliberately off the turn path:
+    * `deliverTurn` only ever `tryOffer`s (non-blocking) into the queue and moves on, so a slow or failing stats write
+    * can never delay a turn or the room's own clock. Scoped to the server by the caller (`.background`), same as
+    * `loop`; a single write failure is logged and the loop continues; the event itself is simply dropped, same
+    * "best-effort telemetry, never load-bearing" posture as the drop-on-overflow path in `recordDelivery`.
+    */
+  def statsLoop: IO[Nothing] =
+    deliveryEvents.take.flatMap { event =>
+      stats
+        .recordDelivery(event.team, event.name, event.outcome, event.elapsed, event.at)
+        .handleErrorWith(e => Console[IO].errorln(s"[play][webhook] stats write failed: $e"))
+    }.foreverM
+
   /** One sweep (exposed for tests): attach a runner for every (live game, seat) held by a bot with a registered webhook
     * that doesn't have one yet. The loop is the only caller, so attachment never races itself.
     */
@@ -186,7 +201,9 @@ final class Webhooks private (
 
   /** One turn's single delivery attempt: re-read the registration (rotation-aware), re-check against a FRESH snapshot
     * that it is still this seat's move (the triggering event may be stale), POST the envelope, and feed the answered
-    * moves to the room. Every failure path only logs — the clock is the reliability mechanism.
+    * moves to the room. Every failure path only logs — the clock is the reliability mechanism. `elapsed` is measured
+    * strictly around the POST itself (network + the server's own timeout), not the decode/submit that follows — that's
+    * in-memory and fast, and folding it in would blur "how long did the endpoint take" with noise (#225).
     */
   private def deliverTurn(
       id: GameId,
@@ -207,40 +224,89 @@ final class Webhooks private (
             val body    = WebhookEnvelope("yourTurn", id.value, seat, state).asJson.noSpaces
             val budget  = state.clocks.map(c => (if seat == Seat.White then c.white else c.black).millis)
             val timeout = budget.fold(config.timeout)(_.min(config.timeout)).max(1.millisecond)
-            post(hook.url, hook.secret, body, timeout).flatMap {
-              case Left(reason) =>
-                Console[IO].errorln(s"[play][webhook] game ${id.value} ${bot.externalId}: $reason (clock decides)")
-              case Right(answer) =>
-                decode[BotMove](answer) match
-                  case Left(_) =>
-                    Console[IO].errorln(
-                      s"[play][webhook] game ${id.value} ${bot.externalId}: unparseable response (clock decides)"
-                    )
-                  case Right(BotMove(Nil)) =>
-                    // An explicit empty answer: the bot declines to move. There is no voluntary pass in the rules
-                    // (forced passes are played by the server before delivery), so this simply leaves the clock
-                    // running — same outcome as not answering, but it closes the connection promptly.
-                    Console[IO].errorln(s"[play][webhook] game ${id.value} ${bot.externalId}: declined (empty moves)")
-                  case Right(BotMove(moves)) =>
-                    room
-                      .submitTurn(seat, moves)
-                      .flatMap:
-                        case GameRoom.TurnVerdict.Applied(_)      => IO.unit
-                        case GameRoom.TurnVerdict.Refused(reason) =>
-                          Console[IO].errorln(
-                            s"[play][webhook] game ${id.value} ${bot.externalId}: refused: $reason (clock decides)"
-                          )
-            }
+            for
+              started <- IO.monotonic
+              attempt <- postDetailed(hook.url, hook.secret, body, timeout)
+              elapsed <- IO.monotonic.map(_ - started)
+              outcome <- classify(id, seat, room, bot, attempt)
+              _       <- recordDelivery(bot, outcome, elapsed)
+            yield ()
           }
     }
 
-  /** One signed POST with the full security posture: the URL re-passes the guard (fresh resolve at send time — the
-    * anti-rebinding property), the body is signed with the per-bot secret, redirects are never followed (no redirect
-    * middleware on the client), and the response read is size-capped. Left is a short reason for logs/422s.
+  /** Turns one POST attempt into the log line an operator already expects (byte-identical to before this attempt was
+    * split into a typed `PostOutcome`, #225) AND the `DeliveryOutcome` telemetry records. The two taxonomies aren't the
+    * same shape on purpose: `Ok` still needs its body decoded and, if it names a move, submitted to the room before the
+    * REAL outcome (`Applied`/`Declined`/`Refused`/`Garbled`) is known.
+    */
+  private def classify(
+      id: GameId,
+      seat: Seat,
+      room: GameRoom,
+      bot: Principal.Bot,
+      attempt: PostOutcome
+  ): IO[DeliveryOutcome] =
+    def failed(reason: String, outcome: DeliveryOutcome): IO[DeliveryOutcome] =
+      Console[IO].errorln(s"[play][webhook] game ${id.value} ${bot.externalId}: $reason (clock decides)").as(outcome)
+
+    attempt match
+      case PostOutcome.Ok(answer) =>
+        decode[BotMove](answer) match
+          case Left(_)             => failed("unparseable response", DeliveryOutcome.Garbled)
+          case Right(BotMove(Nil)) =>
+            // An explicit empty answer: the bot declines to move. There is no voluntary pass in the rules (forced
+            // passes are played by the server before delivery), so this simply leaves the clock running — same
+            // outcome as not answering, but it closes the connection promptly.
+            Console[IO]
+              .errorln(s"[play][webhook] game ${id.value} ${bot.externalId}: declined (empty moves)")
+              .as(DeliveryOutcome.Declined)
+          case Right(BotMove(moves)) =>
+            room
+              .submitTurn(seat, moves)
+              .flatMap:
+                case GameRoom.TurnVerdict.Applied(_)      => IO.pure(DeliveryOutcome.Applied)
+                case GameRoom.TurnVerdict.Refused(reason) => failed(s"refused: $reason", DeliveryOutcome.Refused)
+      case PostOutcome.OversizedBody =>
+        failed("endpoint answered with an oversized body", DeliveryOutcome.OversizedBody)
+      case PostOutcome.HttpStatus(code) => failed(s"endpoint answered HTTP $code", DeliveryOutcome.HttpStatus(code))
+      case PostOutcome.TimedOut         => failed("could not reach the endpoint", DeliveryOutcome.TimedOut)
+      case PostOutcome.Unreachable      => failed("could not reach the endpoint", DeliveryOutcome.Unreachable)
+      case PostOutcome.PolicyRejected(reason) => failed(reason, DeliveryOutcome.Unreachable)
+
+  /** Fire-and-forget into the drain queue (#225) — `tryOffer` never blocks a turn on a slow or backed-up stats writer.
+    * Overflow (the queue is bounded, matching this class's own "delivery rate is structurally bounded" doctrine) drops
+    * the event with one log line rather than either blocking or silently losing it unremarked.
+    */
+  private def recordDelivery(bot: Principal.Bot, outcome: DeliveryOutcome, elapsed: FiniteDuration): IO[Unit] =
+    IO.realTime.map(t => Instant.ofEpochMilli(t.toMillis)).flatMap { at =>
+      deliveryEvents.tryOffer(DeliveryEvent(bot.team, bot.name, outcome, elapsed, at)).flatMap { accepted =>
+        Console[IO]
+          .errorln(
+            s"[play][webhook] delivery-stats queue full — dropped a ${DeliveryOutcome.key(outcome)} record " +
+              s"for ${bot.externalId}"
+          )
+          .unlessA(accepted)
+      }
+    }
+
+  /** The narrow shape three existing callers (`register`, `wake`, and the pre-#225 `deliverTurn`) all depend on: `post`
+    * itself is unchanged behaviorally, byte-for-byte, including every string it can return — it is now a thin view over
+    * [[postDetailed]]. Only `deliverTurn` needs the richer typed detail `postDetailed` exposes, so only it calls that
+    * directly.
     */
   private def post(url: String, secret: String, body: String, timeout: FiniteDuration): IO[Either[String, String]] =
+    postDetailed(url, secret, body, timeout).map(_.legacy)
+
+  /** One signed POST with the full security posture: the URL re-passes the guard (fresh resolve at send time — the
+    * anti-rebinding property), the body is signed with the per-bot secret, redirects are never followed (no redirect
+    * middleware on the client), and the response read is size-capped. Returns the FULL typed outcome — `deliverTurn`
+    * needs to distinguish `TimedOut` from `Unreachable` for delivery telemetry (#225), a distinction `post`'s legacy
+    * `Either[String, String]` deliberately erases (both read as the same caller-visible "could not reach the endpoint"
+    * — see [[PostOutcome.legacy]] for why: the reason must not become a connectivity oracle against internal hosts).
+    */
+  private def postDetailed(url: String, secret: String, body: String, timeout: FiniteDuration): IO[PostOutcome] =
     checkUrl(url).flatMap:
-      case Left(reason) => IO.pure(Left(reason))
+      case Left(reason) => IO.pure(PostOutcome.PolicyRejected(reason))
       case Right(uri)   =>
         IO.realTime.map(_.toSeconds).flatMap { ts =>
           val request = Request[IO](Method.POST, uri)
@@ -264,17 +330,21 @@ final class Webhooks private (
             .timeout(timeout)
             .attempt
             .flatMap:
-              case Right((200, bytes)) if bytes.length > MaxResponseBytes =>
-                IO.pure(Left("endpoint answered with an oversized body"))
-              case Right((200, bytes)) => IO.pure(Right(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)))
-              case Right((code, _))    => IO.pure(Left(s"endpoint answered HTTP $code"))
-              case Left(error)         =>
+              case Right((200, bytes)) if bytes.length > MaxResponseBytes => IO.pure(PostOutcome.OversizedBody)
+              case Right((200, bytes))                                    =>
+                IO.pure(PostOutcome.Ok(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)))
+              case Right((code, _)) => IO.pure(PostOutcome.HttpStatus(code))
+              case Left(error)      =>
                 // The transport detail (exception messages embed resolved addresses and distinguish refused
                 // from timed-out) goes to the server log only; the caller-visible reason stays generic so a
-                // 422 can't be used as a connectivity oracle against internal hosts (review).
-                Console[IO]
-                  .errorln(s"[play][webhook] POST failed: ${error.toString.take(200)}")
-                  .as(Left("could not reach the endpoint"))
+                // 422 can't be used as a connectivity oracle against internal hosts (review). The TYPE returned
+                // here — TimedOut vs Unreachable — is server-internal telemetry (#225) and crosses no such
+                // boundary, so it may distinguish what the logged/caller-visible text deliberately does not.
+                Console[IO].errorln(s"[play][webhook] POST failed: ${error.toString.take(200)}").as {
+                  error match
+                    case _: java.util.concurrent.TimeoutException => PostOutcome.TimedOut
+                    case _                                        => PostOutcome.Unreachable
+                }
         }
 
 object Webhooks:
@@ -289,6 +359,45 @@ object Webhooks:
     * make the server buffer. A truncated body simply fails JSON decoding and is treated as garbage.
     */
   private val MaxResponseBytes = 65536L
+
+  /** The typed detail behind one POST attempt (#225) — see [[Webhooks.postDetailed]]. */
+  private enum PostOutcome:
+    case Ok(body: String)
+    case OversizedBody
+    case HttpStatus(code: Int)
+    case TimedOut
+    case Unreachable
+    case PolicyRejected(reason: String) // checkUrl's own re-check failed; `reason` is its exact, existing message
+
+  private object PostOutcome:
+    extension (outcome: PostOutcome)
+      /** The pre-#225 shape, reproduced exactly: same cases, same strings, string-for-string. `TimedOut` and
+        * `Unreachable` collapse to the identical caller-visible text on purpose — see `postDetailed`'s doc.
+        */
+      def legacy: Either[String, String] = outcome match
+        case Ok(body)               => Right(body)
+        case OversizedBody          => Left("endpoint answered with an oversized body")
+        case HttpStatus(code)       => Left(s"endpoint answered HTTP $code")
+        case TimedOut               => Left("could not reach the endpoint")
+        case Unreachable            => Left("could not reach the endpoint")
+        case PolicyRejected(reason) => Left(reason)
+
+  /** One delivery, queued for the stats drain loop (#225) — plain data, no `IO` inside, so `tryOffer`ing it is O(1) and
+    * never itself a source of backpressure on the delivering fiber.
+    */
+  final private case class DeliveryEvent(
+      team: String,
+      name: String,
+      outcome: DeliveryOutcome,
+      elapsed: FiniteDuration,
+      at: Instant
+  )
+
+  /** Bounded generously relative to real traffic — delivery rate is structurally bounded by live games in progress
+    * (this class's own doc), so overflow should never happen in practice; the bound exists purely so a stuck stats
+    * writer degrades to dropped telemetry, never to unbounded memory growth.
+    */
+  private val DeliveryEventQueueCapacity = 512
 
   /** @param timeout
     *   the per-turn window: the longest a delivery may take, before the mover's remaining clock caps it further.
@@ -346,16 +455,20 @@ object Webhooks:
 
   /** A `Resource` because the service OWNS its per-game runner fibers (a `Supervisor`): releasing it cancels every
     * in-flight runner, so webhook delivery can never outlive the server that started it.
+    *
+    * `stats` defaults to [[WebhookStatsStore.noop]] — every existing caller (tests, and any deployment that hasn't
+    * wired persistence) gets a `Webhooks` that classifies deliveries and drains the queue exactly as if telemetry were
+    * on, only the writes themselves go nowhere. `Main` is the one caller that passes the real, Postgres-backed store.
     */
   def create(
       registry: GameRegistry,
       store: WebhookStore,
       client: Client[IO],
       config: Config,
-      checkUrl: String => IO[Either[String, Uri]] = WebhookSecurity.checkPublicHttps
+      checkUrl: String => IO[Either[String, Uri]] = WebhookSecurity.checkPublicHttps,
+      stats: WebhookStatsStore = WebhookStatsStore.noop
   ): Resource[IO, Webhooks] =
     Supervisor[IO](await = false).evalMap { runners =>
-      Ref
-        .of[IO, Set[(GameId, Seat)]](Set.empty)
-        .map(new Webhooks(registry, store, client, checkUrl, config, _, runners))
+      (Ref.of[IO, Set[(GameId, Seat)]](Set.empty), Queue.bounded[IO, DeliveryEvent](DeliveryEventQueueCapacity))
+        .mapN(new Webhooks(registry, store, client, checkUrl, config, _, runners, stats, _))
     }

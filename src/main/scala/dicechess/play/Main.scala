@@ -30,7 +30,7 @@ import dicechess.play.server.{
 }
 import dicechess.play.ingest.IngestDeliverer
 import dicechess.play.rating.{RatingBatch, StrengthCache, StrengthReport}
-import dicechess.play.store.{BotStore, GameStore, PgGameStore, Retention, WebhookStore}
+import dicechess.play.store.{BotStore, GameStore, PgGameStore, Retention, WebhookStatsStore, WebhookStore}
 import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
@@ -199,7 +199,14 @@ object Main extends IOApp.Simple:
                   s"(client cut ${webhookConfig.clientTimeout.toSeconds}s, idle ${webhookConfig.clientIdleTimeout.toSeconds}s)"
               ) *> pgStore.fold(WebhookStore.inMemory)(pg => IO.pure(pg: WebhookStore))
             )
-            .flatMap(webhookStore => Webhooks.create(registry, webhookStore, httpClient, webhookConfig))
+            .flatMap { webhookStore =>
+              // Delivery telemetry (#225) is Postgres-only, like the leaderboard/catalog: in-memory mode still
+              // classifies and drains every delivery exactly as if it were on, the writes just go nowhere
+              // (`WebhookStatsStore.noop`) — see its own doc for why that's the right default rather than a
+              // second in-memory code path.
+              val stats = pgStore.fold(WebhookStatsStore.noop)(pg => pg: WebhookStatsStore)
+              Webhooks.create(registry, webhookStore, httpClient, webhookConfig, stats = stats)
+            }
             .map(Some(_))
       // The sweepers (seeks, pending challenges), the ladder scheduler, the rating batch, the webhook loop, and the
       // ingest deliverer are scoped to the server: they run while it runs and are cancelled with it, so a failure
@@ -212,7 +219,10 @@ object Main extends IOApp.Simple:
           ladderLoop.background,
           ratingLoop.background,
           retentionLoop.background,
-          webhookService.fold(IO.never: IO[Unit])(_.loop.void).background
+          webhookService.fold(IO.never: IO[Unit])(_.loop.void).background,
+          // The stats drain loop (#225) is scoped identically to the delivery loop above — same service, same
+          // lifecycle, cancelled together on shutdown.
+          webhookService.fold(IO.never: IO[Unit])(_.statsLoop.void).background
         ).tupled
         loops.surround {
           // The leaderboard/profile API reads bots + game_results — DB-only seams, so without persistence the
@@ -243,7 +253,7 @@ object Main extends IOApp.Simple:
               cors(
                 (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
                   catalog <+> playerGames <+> strength <+> history <+> ingest <+>
-                  WebhookRoutes(botAuth, webhookService, webhookLimit) <+>
+                  WebhookRoutes(botAuth, webhookService, webhookLimit, pgStore) <+>
                   BotRoutes(
                     botAuth,
                     challenges,

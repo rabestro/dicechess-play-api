@@ -39,7 +39,7 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
   `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
   `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
-  V12 per-bot `max_concurrent_games`).
+  V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry).
 - `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics, plus a
   second deliverer instance draining browser reports from `client_reports` (#212).
 - `wire/Codecs.scala` — Circe codecs; the wire contract.
@@ -204,6 +204,16 @@ rebuild-per-tick behaviour.
   additionally gives the ladder only `limit - 1` of its slots (floor 1), so a catalog bot at the default
   is paired *and* reachable by a person only one at a time. Static (`PLAY_BOT_TOKENS`) and anonymous
   bots have no row and stay unbounded.
+- Webhook delivery telemetry (#225, `bot_webhook_stats`) is Postgres-only, but `Webhooks` itself never
+  branches on that — `WebhookStatsStore.noop` is the always-present default, so `deliverTurn` classifies
+  and enqueues every attempt in memory-only mode too; the writes just go nowhere. `GET
+  /bot/webhook/stats` is the part that is actually gated: 404 without persistence, same idiom as the
+  leaderboard/catalog. Recording is fire-and-forget through a bounded queue (`Webhooks.statsLoop`,
+  started alongside the delivery loop) — deliberately NOT inline in `deliverTurn`, so a slow or failing
+  stats write can never add latency to a turn or touch the room's own clock; queue overflow drops the
+  event with one log line rather than blocking. This is the same "report it back" half of #189's load
+  contract that #189 itself deferred — `activeGames` in `GET /bot/capacity` answers "am I busy with my
+  own declared limit", this answers "is my endpoint actually broken".
 - Retention (#179) will not reclaim anything on a deployment whose games predate `game_archive`,
   and this looks like the feature not working: the pass refuses to prune an ended non-aborted
   snapshot that has no archive row, because that snapshot is then the only copy of the game's
