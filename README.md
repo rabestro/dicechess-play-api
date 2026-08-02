@@ -126,9 +126,13 @@ live check — `GET /games` becomes non-empty and `/leaderboard` counts increase
 minute — not just `/health`.
 
 `STRENGTH_ELO0`/`STRENGTH_ELO1`/`STRENGTH_ALPHA`/`STRENGTH_BETA`/`STRENGTH_BOOTSTRAP_ITERATIONS`
-are different: they only ever *tune* the `/strength` SPRT/Bradley-Terry report, each falling
-back to its own default when unset — none of them disable anything. The report itself is
-populated by the rating batch, so it only ever has data while `RATING_INTERVAL_SECONDS` is set.
+and `STRENGTH_REFRESH_INTERVAL_SECONDS` are different: they only ever *tune* the `/strength`
+SPRT/Bradley-Terry report, each falling back to its own default when unset — none of them
+disable anything. The report itself is populated by the rating batch, so it only ever has data
+while `RATING_INTERVAL_SECONDS` is set. `STRENGTH_REFRESH_INTERVAL_SECONDS` (default `900`)
+is how often that report may be rebuilt (#215): each rebuild folds the entire rated history
+`STRENGTH_BOOTSTRAP_ITERATIONS` times over, so it deliberately runs far slower than the batch
+poll it rides on.
 
 ### Retention (#179)
 

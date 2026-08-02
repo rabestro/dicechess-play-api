@@ -49,6 +49,7 @@ in their queues undelivered. Boot warns on stderr, and nothing else complains.
 | `RATING_BATCH_SIZE` | Optional, default `100`. |
 | `LADDER_TIMEOUT_PARK_GAMES` | Optional, default `4`. Renamed from `LADDER_TIMEOUT_PARK_PAIRS` (#190). Despite the `LADDER_` prefix it is read by the *rating* batch — with rating off, a dead bot is never parked and keeps bleeding rating while inflating every opponent it meets. The name follows the feature, not the component. |
 | `STRENGTH_ELO0`, `STRENGTH_ELO1`, `STRENGTH_ALPHA`, `STRENGTH_BETA`, `STRENGTH_BOOTSTRAP_ITERATIONS` | Tuning knobs for the SPRT / Bradley-Terry report. Each falls back to its own default rather than disabling anything — but the report is refreshed by the rating batch, so it is only ever populated while `RATING_INTERVAL_SECONDS` is set. |
+| `STRENGTH_REFRESH_INTERVAL_SECONDS` | Optional, default `900` (15 minutes). The floor between two rebuilds of that report (#215). Like `LADDER_TIMEOUT_PARK_GAMES` this is read by the rating batch, so it does nothing without `RATING_INTERVAL_SECONDS`. A rebuild folds every rated game ever played, `STRENGTH_BOOTSTRAP_ITERATIONS` times over; tying it to the batch's own poll cadence cost a compute worker a third of all wall-clock time in production. `0` restores that pre-#215 behaviour (rebuild on every tick that applied a game) and is the only value that does. |
 
 ## Webhooks, retention, and the rest
 

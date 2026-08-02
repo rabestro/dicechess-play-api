@@ -137,9 +137,12 @@ object Main extends IOApp.Simple:
             .errorln("[play][rating] RATING_INTERVAL_SECONDS set but PLAY_DB_URL unset: rating batch disabled")
             .as(IO.never: IO[Unit])
         case (Some(ratingConfig), Some(pg)) =>
-          val batch =
-            new RatingBatch(botStore, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
-          IO.pure(batch.scheduler())
+          IO.println(
+            s"[play][rating] enabled: polling every ${ratingConfig.interval}, strength report rebuilt at most " +
+              s"every ${ratingConfig.strengthRefreshInterval}"
+          ) *> RatingBatch
+            .create(botStore, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
+            .map(_.scheduler())
       // Retention (#179) follows the same opt-in shape, and for this one the shape is a safety property, not just
       // consistency: it is the only scheduled task that DELETES, so leaving RETENTION_INTERVAL_SECONDS unset must be
       // the state that does nothing. It also needs the database for the obvious reason — nothing to prune in memory.
