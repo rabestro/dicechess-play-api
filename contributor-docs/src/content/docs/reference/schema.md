@@ -33,15 +33,21 @@ erDiagram
     game_results
     games
     outbox
+    user_guest_links
+    user_identities
+    users
     bots ||--o{ bot_webhook_stats : ""
     bots ||--o| bot_webhooks : ""
     games ||--o| outbox : ""
+    users ||--o{ user_guest_links : ""
+    users ||--o{ user_identities : ""
 ```
 
-Only foreign keys appear as edges. Three tables carry no foreign key on purpose —
-`game_results` and `game_archive` must outlive the snapshots they describe, and
+Only foreign keys appear as edges. Four tables carry no foreign key on purpose —
+`game_results` and `game_archive` must outlive the snapshots they describe,
 `client_reports` holds browser-submitted reports for games that never had a
-`games` row on this server (kept separate from authoritative game data by design).
+`games` row on this server (kept separate from authoritative game data by design),
+and `users` is the root of the account graph the other two user tables reference.
 
 ## Tables
 
@@ -198,3 +204,46 @@ Indexes:
 
 - `outbox_due_idx` — `CREATE INDEX outbox_due_idx ON public.outbox USING btree (next_attempt_at) WHERE ((delivered_at IS NULL) AND (NOT failed_permanently))`
 - `outbox_pkey` — `CREATE UNIQUE INDEX outbox_pkey ON public.outbox USING btree (game_id)`
+
+### `user_guest_links`
+
+| Column | Type | Null | Default | Key |
+| --- | --- | --- | --- | --- |
+| `guest_id` | `uuid` | no | — | PK |
+| `user_id` | `uuid` | no | — | FK → users(id) |
+| `linked_at` | `timestamp with time zone` | no | `now()` | — |
+
+Indexes:
+
+- `user_guest_links_pkey` — `CREATE UNIQUE INDEX user_guest_links_pkey ON public.user_guest_links USING btree (guest_id)`
+- `user_guest_links_user_idx` — `CREATE INDEX user_guest_links_user_idx ON public.user_guest_links USING btree (user_id)`
+
+### `user_identities`
+
+| Column | Type | Null | Default | Key |
+| --- | --- | --- | --- | --- |
+| `provider` | `text` | no | — | PK |
+| `subject` | `text` | no | — | PK |
+| `user_id` | `uuid` | no | — | FK → users(id) |
+| `email` | `text` | yes | — | — |
+| `created_at` | `timestamp with time zone` | no | `now()` | — |
+
+Indexes:
+
+- `user_identities_pkey` — `CREATE UNIQUE INDEX user_identities_pkey ON public.user_identities USING btree (provider, subject)`
+- `user_identities_user_idx` — `CREATE INDEX user_identities_user_idx ON public.user_identities USING btree (user_id)`
+
+### `users`
+
+| Column | Type | Null | Default | Key |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | no | — | PK |
+| `nickname` | `text` | no | — | — |
+| `created_at` | `timestamp with time zone` | no | `now()` | — |
+| `last_login_at` | `timestamp with time zone` | yes | — | — |
+| `is_active` | `boolean` | no | `true` | — |
+
+Indexes:
+
+- `users_nickname_ci_idx` — `CREATE UNIQUE INDEX users_nickname_ci_idx ON public.users USING btree (lower(nickname))`
+- `users_pkey` — `CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)`

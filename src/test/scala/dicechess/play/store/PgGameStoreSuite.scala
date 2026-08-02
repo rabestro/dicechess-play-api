@@ -16,6 +16,7 @@ import org.testcontainers.utility.DockerImageName
 
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.UUID
 import scala.concurrent.duration.*
 
 /** Persistence against a real PostgreSQL (testcontainers): the store round-trip, and the property the whole feature
@@ -1228,6 +1229,122 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             Some(ClientSeeds("white-client-seed-0001", "black-client-seed-0001")),
             "the submitted client seeds survive the crash into the reveal"
           )
+      }
+    }
+
+  // ── UserStore (#232) — every test uses its own subject/nickname namespace: the suite shares one
+  // database across all tests (TestContainerForAll, no per-test reset). ──────────────────────────
+
+  test("first login creates an account with a fresh nickname; repeat login reuses the same account"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        val storedEmail =
+          sql"""SELECT email FROM play.user_identities
+                WHERE provider = 'google' AND subject = 'sub-login-1'"""
+            .query[Option[String]]
+            .unique
+            .transact(xa)
+        for
+          first     <- db.upsertOnLogin("google", "sub-login-1", Some("first@example.com"), IO.pure("LoginNick1"))
+          again     <- db.upsertOnLogin("google", "sub-login-1", None, IO.pure("NeverUsed2"))
+          kept      <- storedEmail
+          _         <- db.upsertOnLogin("google", "sub-login-1", Some("renamed@example.com"), IO.pure("NeverUsed3"))
+          refreshed <- storedEmail
+          loaded    <- db.userById(first.id)
+        yield
+          assertEquals(first.nickname, "LoginNick1")
+          assertEquals(again.id, first.id)
+          assertEquals(again.nickname, "LoginNick1", "a repeat login must not rename the account")
+          assert(again.lastLoginAt.nonEmpty, "repeat login must stamp last_login_at")
+          assertEquals(kept, Some("first@example.com"), "a login without an email must not blank the stored one")
+          assertEquals(refreshed, Some("renamed@example.com"), "a login with a new email refreshes the stored one")
+          assert(loaded.exists(_.isActive), "accounts start active")
+      }
+    }
+
+  test("a nickname collision at first login retries with the next candidate, case-insensitively"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          counter <- IO.ref(0)
+          gen = counter.getAndUpdate(_ + 1).map(i => if i == 0 then "collidenick" else "CollideSecond")
+          _     <- db.upsertOnLogin("google", "sub-collide-a", None, IO.pure("CollideNick"))
+          other <- db.upsertOnLogin("google", "sub-collide-b", None, gen)
+        yield assertEquals(other.nickname, "CollideSecond", "'collidenick' collides with 'CollideNick'")
+      }
+    }
+
+  test("nickname updates enforce case-insensitive uniqueness but allow changing your own casing"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          a       <- db.upsertOnLogin("google", "sub-nick-a", None, IO.pure("NickHolderA"))
+          b       <- db.upsertOnLogin("google", "sub-nick-b", None, IO.pure("NickHolderB"))
+          taken   <- db.updateNickname(b.id, "nickholdera")
+          recased <- db.updateNickname(b.id, "NICKHOLDERB")
+          renamed <- db.updateNickname(b.id, "NickHolderB2")
+          missing <- db.updateNickname(UUID.randomUUID().toString, "GhostNick")
+          loaded  <- db.userById(b.id)
+          holderA <- db.userById(a.id)
+        yield
+          assertEquals(taken, NicknameUpdate.Taken)
+          assertEquals(recased, NicknameUpdate.Updated, "re-casing your own nickname must not self-collide")
+          assertEquals(renamed, NicknameUpdate.Updated)
+          assertEquals(missing, NicknameUpdate.UserNotFound)
+          assertEquals(loaded.map(_.nickname), Some("NickHolderB2"))
+          assertEquals(holderA.map(_.nickname), Some("NickHolderA"), "the rejected rename left account A untouched")
+      }
+    }
+
+  test("a guest id is claimed exactly once — idempotent for its owner, terminal for everyone else"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          owner   <- db.upsertOnLogin("google", "sub-guest-owner", None, IO.pure("GuestOwner"))
+          rival   <- db.upsertOnLogin("google", "sub-guest-rival", None, IO.pure("GuestRival"))
+          guestId <- IO(UUID.randomUUID().toString)
+          first   <- db.linkGuest(owner.id, guestId)
+          again   <- db.linkGuest(owner.id, guestId)
+          stolen  <- db.linkGuest(rival.id, guestId)
+          ghost   <- db.linkGuest(UUID.randomUUID().toString, UUID.randomUUID().toString)
+          linked  <- db.guestsOf(owner.id)
+        yield
+          assertEquals(first, GuestLink.Linked)
+          assertEquals(again, GuestLink.Linked, "re-claiming your own guest id is idempotent, not an error")
+          assertEquals(stolen, GuestLink.ClaimedByAnother)
+          assertEquals(ghost, GuestLink.UserNotFound)
+          assertEquals(linked, List(guestId))
+      }
+    }
+
+  test("deleting an account cascades identities and guest links but leaves game history untouched"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          user    <- db.upsertOnLogin("google", "sub-delete", None, IO.pure("DeletedNick"))
+          guestId <- IO(UUID.randomUUID().toString)
+          _       <- db.linkGuest(user.id, guestId)
+          gameId  <- GameId.random
+          _       <- db.save(
+            gameId,
+            endedResultFixture(Principal.User(user.id), Principal.Bot("delete-team", "delete-bot"), rated = true)
+          )
+          deleted <- db.deleteUser(user.id)
+          gone    <- db.userById(user.id)
+          // The same Google subject signing in again gets a FRESH account (the identity row cascaded)
+          // that can reuse the freed nickname — deletion must not squat names forever.
+          relogin <- db.upsertOnLogin("google", "sub-delete", None, IO.pure("DeletedNick"))
+          tally   <- db.resultTallyFor(Principal.User(user.id).externalId)
+          reclaim <- db.linkGuest(relogin.id, guestId)
+          missing <- db.deleteUser(user.id)
+        yield
+          assert(deleted)
+          assertEquals(gone, None)
+          assertNotEquals(relogin.id, user.id, "deletion severs the subject: re-login mints a new account")
+          assertEquals(relogin.nickname, "DeletedNick")
+          assertEquals(tally, ResultTally(1, 0, 0), "game_results keeps the orphaned user: external id")
+          assertEquals(reclaim, GuestLink.Linked, "the guest link cascaded, so the id is claimable again")
+          assert(!missing, "a second delete finds nothing")
       }
     }
 

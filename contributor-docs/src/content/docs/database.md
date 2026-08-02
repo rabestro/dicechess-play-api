@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-description: The seven tables of the play-api Postgres schema, what each is for, and the deliberate absence of some foreign keys.
+description: The eleven tables of the play-api Postgres schema, what each is for, and the deliberate absence of some foreign keys.
 ---
 
 Persistence is **opt-in**: with no database URL configured the server runs fully in memory and
@@ -114,6 +114,34 @@ by a check constraint.
 A sanitized, immutable record of a finished game: play's own durable representation of history,
 independent of both the analytics wire contract and snapshot retention. Access is always by
 game id, so the primary key is the only index.
+
+### `users` — registered player accounts (#232, ADR-0017)
+
+The account behind optional Google sign-in. Its `id` is a UUID **this server mints** at first
+login — the stable half of the `user:<uuid>` external id that lands in `game_results` — so it
+can never be forked or reassigned by anything a login provider controls. The nickname is the
+only public-facing field; uniqueness is case-insensitive via a functional index on
+`lower(nickname)` (no `citext` extension to install). `is_active` is a kill switch re-checked
+on every authenticated request, because the session token is deliberately never trusted for
+authorization state.
+
+### `user_identities` — login methods, keyed by `(provider, subject)`
+
+Why a second table instead of a `google_sub` column: identity and account are different
+lifecycles. The key is `(provider, subject)` — Google's stable `sub` claim — and **email is
+deliberately a mutable attribute here, never an identity key**; an address change must not
+fork the account (the lab/analytics predecessors keyed users by email and could not survive
+one). A second provider later is a row, not a schema change. Rows cascade away with the
+account.
+
+### `user_guest_links` — anonymous history claimed by an account
+
+`guest_id` is the primary key on purpose: one guest identity belongs to at most one account,
+ever — the claim is first-writer-wins and terminal, mirroring the restore-code trust model
+(possession of the id is the proof). History is **linked, not rewritten**: `game_results`
+keeps its `guest:` external ids and merged-history reads union over the account's linked set,
+so immutable records and already-delivered analytics rows are never touched. Links cascade
+away with the account, freeing the guest id for a future claim.
 
 ## Two deliberate design choices
 
