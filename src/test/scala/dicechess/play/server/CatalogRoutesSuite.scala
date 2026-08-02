@@ -161,6 +161,27 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
       resp     <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
     yield assertEquals(resp.status, Status.ServiceUnavailable)
 
+  test(
+    "POST /lobby/bots/{team}/{name}/wake is busy:true, NOT 503, for a busy bot on a server with webhooks disabled (#224)"
+  ):
+    // The capacity check runs before the webhooks match (CatalogRoutes.scala), specifically so busy is a per-bot
+    // fact independent of whether the feature flag is on at all — this pins that ordering against regressing back
+    // to a 503, which the plain "webhooks disabled" test above can't catch (that one uses an unbounded bot).
+    for
+      registry <- freshRegistry
+      _        <- registry.create(Principal.Bot("acme", "alice"), Principal.Bot("filler", "one"))
+      routes   <- app(
+        registry,
+        open = Set(("acme", "alice")),
+        webhooks = None,
+        declared = Map(("acme", "alice") -> 1)
+      )
+      resp <- routes.orNotFound.run(request(Method.POST, "/lobby/bots/acme/alice/wake"))
+      body <- resp.as[Wake]
+    yield
+      assertEquals(resp.status, Status.Ok)
+      assertEquals(body, Wake(alive = false, busy = true))
+
   test("POST /lobby/bots/{team}/{name}/wake is alive:true when the endpoint echoes the nonce"):
     for
       registry <- freshRegistry
