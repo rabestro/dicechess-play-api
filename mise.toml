@@ -6,6 +6,7 @@ java = "temurin-25"   # Primary runtime, aligned with CI (Java 25)
 # Git hooks & formatting
 lefthook = "latest"   # Git hooks manager (pre-commit / pre-push)
 betterleaks = "latest" # Secret scanning in the pre-commit hook
+actionlint = "1.7.12"           # GitHub Actions workflow linter (pre-commit hook)
 scalafmt = "3.11.4"   # native CLI; MUST match the version in .scalafmt.conf
 
 # Workflow CLIs
