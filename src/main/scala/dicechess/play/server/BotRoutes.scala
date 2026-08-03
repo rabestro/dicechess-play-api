@@ -405,7 +405,7 @@ object BotRoutes:
   private def seatOf(room: GameRoom, bot: Principal): IO[Option[Seat]] =
     room.seating.map(_.collectFirst { case (seat, principal) if principal == bot => seat })
 
-  private def setLadder(auth: BotAuth, bot: Principal.Bot, onLadder: Boolean): IO[Response[IO]] =
+  private[server] def setLadder(auth: BotAuth, bot: Principal.Bot, onLadder: Boolean): IO[Response[IO]] =
     auth
       .setOnLadder(bot, onLadder)
       .flatMap:
@@ -418,7 +418,7 @@ object BotRoutes:
     * the description is optional, and `Content-Length` is absent on chunked/HTTP-2 requests, so keying off it would
     * either 400 a legitimate empty body or silently drop a chunked one. Reading the bytes is transport-independent.
     */
-  private def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
+  private[server] def openToHumans(auth: BotAuth, req: Request[IO], bot: Principal.Bot): IO[Response[IO]] =
     req.bodyText.compile.string.flatMap: raw =>
       if raw.isBlank then respondCatalog(auth.openToHumans(bot, None))
       else
@@ -430,13 +430,13 @@ object BotRoutes:
               case Right(valid)  => respondCatalog(auth.openToHumans(bot, valid.description))
 
   /** `POST /bot/open-to-humans/leave` — opt out, leaving the description intact. */
-  private def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
+  private[server] def closeToHumans(auth: BotAuth, bot: Principal.Bot): IO[Response[IO]] =
     respondCatalog(auth.closeToHumans(bot))
 
   /** `POST /bot/capacity` — declare the limit. A required body, unlike `open-to-humans`: there is no sensible "empty
     * body" reading of a number, and silently re-applying the default would be indistinguishable from a typo.
     */
-  private def setCapacity(
+  private[server] def setCapacity(
       auth: BotAuth,
       registry: GameRegistry,
       req: Request[IO],
@@ -457,7 +457,7 @@ object BotRoutes:
     * right now — or 403 for a non-registered caller (no row to declare on). The active count is read after the policy
     * so a fresh declaration is reported against a current count, not a stale one.
     */
-  private def respondCapacity(
+  private[server] def respondCapacity(
       policy: IO[Option[BotSeatPolicy]],
       registry: GameRegistry,
       bot: Principal.Bot
@@ -471,7 +471,7 @@ object BotRoutes:
 
   /** Shared reply: the resulting catalog state as `OpenToHumans`, or 403 for a non-registered caller (no row to flag).
     */
-  private def respondCatalog(state: IO[Option[dicechess.play.store.BotCatalogState]]): IO[Response[IO]] =
+  private[server] def respondCatalog(state: IO[Option[dicechess.play.store.BotCatalogState]]): IO[Response[IO]] =
     state.flatMap:
       case Some(s) => Ok(OpenToHumans(s.openToHumans, s.description))
       case None    => Forbidden("only a registered bot can open itself to human games")

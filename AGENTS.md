@@ -34,7 +34,8 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
   (the only engine wrapper), `PlayerConnection` (transport-agnostic player handle).
 - `server/` — http4s routes and services: `HealthRoutes` (/health, /version), `PlayRoutes`
   (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*),
-  `IngestRoutes` (/ingest/games, browser report intake), `AuthRoutes` (/auth/*, Google sign-in,
+  `IngestRoutes` (/ingest/games, browser report intake), `OwnerBotRoutes` (/me/bots, #253/#254),
+  `AuthRoutes` (/auth/*, Google sign-in,
   #233), `MeRoutes` (guest claims + merged history, #236), plus `GameRegistry`, `Lobby`,
   `Challenges`, `BotAuth`, `AuthSession`, `GoogleAuth`, `Nicknames`, `BotEvents`,
   `AnonMintLimiter`, `SeatGuard`, `Cors`.
@@ -111,6 +112,14 @@ atomicity is per game, not per table. Ladder auto-park stays bot-only: a human l
 endpoint. **Never expose `bots.rated_for_humans` on the bot API**:
 its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one
 would register a weak bot and farm rating off it. Both rosters are additive — a typo narrows what is enabled.
+Owner-session bot management (#254): the owner drives their bot's own settings from a session through
+`/me/bots/{team}/{name}/…` — token rotation (with the bot's NAME echoed as confirmation, since rotation takes a
+running bot offline), ladder join/leave, catalog open/close, capacity. `OwnerBotRoutes` owns the whole `/me/bots`
+surface (claiming included) and calls the SAME helpers in `BotRoutes`, so the two credentials can never drift apart
+in semantics. **Bearer paths are untouched** — third-party authors' contract must not shift. Not-yours is **403**,
+absent is 404: hiding existence would protect nothing, since the public `GET /bots/{team}/{name}` already answers it.
+Webhook management by the owner is deliberately NOT here (see #256): the registration handshake and whether an owner
+may read back the HMAC secret are their own decisions.
 Bot ownership (#253/#239, ADR-0017): `bots.owner_external_id` — the column V4 created and nothing wrote until now —
 is filled by `POST /me/bots/claim`, which needs **both** credentials: the session says who is claiming, the bot's own
 Bearer token proves control of it. Claiming another account's bot is a **409, never a takeover** (a leaked token would

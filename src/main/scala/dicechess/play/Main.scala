@@ -25,6 +25,7 @@ import dicechess.play.server.{
   Lobby,
   LobbyRoutes,
   MeRoutes,
+  OwnerBotRoutes,
   PlayerRoutes,
   PlayRoutes,
   SeatGuard,
@@ -279,8 +280,13 @@ object Main extends IOApp.Simple:
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
           // The signed-in player's own surface (#236): guest claims plus the merged history those claims produce.
           // Gated exactly like /auth/* — it needs the same session, and there is nothing to read without persistence.
-          val me = (pgStore, sessionSecret)
-            .mapN((pg, secret) => MeRoutes(AuthSession(pg, secret), pg, pg, bots = Some(botAuth)))
+          // The owner's bot surface (#253/#254): the same operations the bot drives with its Bearer token, reached
+          // instead with the owner's session. Needs persistence (ownership is a column) and a session secret.
+          val ownerBots = (authSession, pgStore)
+            .mapN((s, _) => OwnerBotRoutes(s, botAuth, registry))
+            .getOrElse(org.http4s.HttpRoutes.empty[IO])
+          val me = (authSession, pgStore)
+            .mapN((s, pg) => MeRoutes(s, pg, pg))
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
           EmberServerBuilder
             .default[IO]
@@ -293,7 +299,7 @@ object Main extends IOApp.Simple:
                   authSession
                 ) <+>
                   leaderboard <+>
-                  catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+> me <+>
+                  catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+> me <+> ownerBots <+>
                   WebhookRoutes(botAuth, webhookService, webhookLimit, pgStore) <+>
                   BotRoutes(
                     botAuth,

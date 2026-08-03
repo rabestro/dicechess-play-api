@@ -106,7 +106,7 @@ object AuthRoutes:
 
       case req @ GET -> Root / "auth" / "me" =>
         session.userFor(req).flatMap {
-          case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+          case None       => IO.pure(AuthSession.notSignedIn)
           case Some(user) => meResponse(store, user, user.nickname)
         }
 
@@ -115,7 +115,7 @@ object AuthRoutes:
       // deletion), which is "you are no longer signed in" from the caller's point of view.
       case req @ PATCH -> Root / "auth" / "me" =>
         session.userFor(req).flatMap {
-          case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+          case None       => IO.pure(AuthSession.notSignedIn)
           case Some(user) =>
             req
               .attemptAs[NicknameChange]
@@ -131,7 +131,7 @@ object AuthRoutes:
                         case NicknameUpdate.Taken   =>
                           IO.pure(Response[IO](Status.Conflict).withEntity("nickname already taken"))
                         case NicknameUpdate.UserNotFound =>
-                          IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+                          IO.pure(AuthSession.notSignedIn)
                       }
               }
         }
@@ -148,7 +148,7 @@ object AuthRoutes:
       // disconnect grace, exactly as if the player had closed the tab; there is no special case for it.
       case req @ DELETE -> Root / "auth" / "me" =>
         session.userFor(req).flatMap {
-          case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+          case None       => IO.pure(AuthSession.notSignedIn)
           case Some(user) =>
             req
               .attemptAs[DeleteAccount]
