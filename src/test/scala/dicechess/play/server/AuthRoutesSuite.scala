@@ -56,7 +56,12 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
       }
     def linkGuest(userId: String, guestId: String): IO[GuestLink] = IO.raiseError(AssertionError("unused"))
     def guestsOf(userId: String): IO[List[String]]                = IO.raiseError(AssertionError("unused"))
-    def deleteUser(userId: String): IO[Boolean]                   = IO.raiseError(AssertionError("unused"))
+    def deleteUser(userId: String): IO[Boolean]                   =
+      ref.modify { users =>
+        users.find(_._2.id == userId) match
+          case None           => (users, false)
+          case Some((key, _)) => (users.removed(key), true)
+      }
 
   private def fixture: IO[(StubUsers, AuthSession, org.http4s.HttpApp[IO])] =
     Ref.of[IO, Map[String, UserAccount]](Map.empty).map { ref =>
@@ -252,3 +257,55 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(res.status, Status.Ok)
       assertEquals(cookieOf(res.cookies, AuthSession.SessionCookieName).maxAge, Some(0L))
+
+  // ── DELETE /auth/me (#237) ───────────────────────────────────────────────────
+
+  private def deleteAccount(token: Option[String], confirm: String): Request[IO] =
+    val base = Request[IO](Method.DELETE, uri"/auth/me").withEntity(DeleteAccount(confirm))
+    token.fold(base)(t => base.addCookie(RequestCookie(AuthSession.SessionCookieName, t)))
+
+  test("DELETE /auth/me without a session answers 401"):
+    for
+      (_, _, app) <- fixture
+      res         <- app.run(deleteAccount(None, "AnyNick"))
+    yield assertEquals(res.status, Status.Unauthorized)
+
+  test("DELETE /auth/me refuses a confirmation that is not the account's own nickname"):
+    for
+      (store, session, app) <- fixture
+      user                  <- store.upsertOnLogin("google", "sub-del-guard", None, IO.pure("GuardNick"))
+      token                 <- session.sign(user)
+      wrong                 <- app.run(deleteAccount(Some(token), "SomeoneElse"))
+      garbled               <- app.run(
+        Request[IO](Method.DELETE, uri"/auth/me")
+          .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
+          .withEntity("not json")
+      )
+      alive <- store.userById(user.id)
+    yield
+      assertEquals(wrong.status, Status.BadRequest)
+      assertEquals(garbled.status, Status.BadRequest)
+      assert(alive.isDefined, "a refused confirmation must leave the account intact")
+
+  test("DELETE /auth/me deletes the account, expires the session, and stays deleted"):
+    for
+      (store, session, app) <- fixture
+      user                  <- store.upsertOnLogin("google", "sub-del", None, IO.pure("DelNick"))
+      token                 <- session.sign(user)
+      // Case-insensitive on purpose: the display casing is the player's, and forcing an exact echo would only make a
+      // deliberate action fail for a reason nobody could see.
+      res  <- app.run(deleteAccount(Some(token), "delnick"))
+      gone <- store.userById(user.id)
+      // The signed token is still cryptographically valid — the user row behind it is what makes it useless.
+      after  <- app.run(signedGet("/auth/me", token))
+      repeat <- app.run(deleteAccount(Some(token), "delnick"))
+    yield
+      assertEquals(res.status, Status.NoContent)
+      assertEquals(cookieOf(res.cookies, AuthSession.SessionCookieName).maxAge, Some(0L))
+      assertEquals(gone, None)
+      assertEquals(after.status, Status.Unauthorized, "a valid token for a deleted account is not a session")
+      assertEquals(repeat.status, Status.Unauthorized, "the second attempt has no session left to act on")
+
+  private def signedGet(path: String, token: String): Request[IO] =
+    Request[IO](Method.GET, Uri.unsafeFromString(path))
+      .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
