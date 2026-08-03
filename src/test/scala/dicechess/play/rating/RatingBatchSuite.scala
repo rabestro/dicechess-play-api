@@ -28,7 +28,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
   private def batch(db: PgGameStore): IO[RatingBatch] =
-    StrengthCache.create.flatMap(RatingBatch.create(db, db, db, RatingBatch.Config.Default, _))
+    StrengthCache.create.flatMap(RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, _))
 
   private def endedFixture(
       white: Principal,
@@ -262,6 +262,92 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("a game between two accounts moves both ratings — one transaction across two rows of the users table"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          winner        <- db.upsertOnLogin("google", "sub-rb-uvu-w", None, IO.pure("RbWinner"))
+          loser         <- db.upsertOnLogin("google", "sub-rb-uvu-l", None, IO.pure("RbLoser"))
+          id            <- GameId.random
+          _             <- db.save(id, endedFixture(Principal.User(winner.id), Principal.User(loser.id), rated = true))
+          strengthCache <- StrengthCache.create
+          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
+          winnerRating  <- db.ratingOf(winner.id)
+          loserRating   <- db.ratingOf(loser.id)
+          queued        <- stillQueued(db, id)
+        yield
+          assert(winnerRating.exists(_.glickoRating > 1500), s"the winner must gain: $winnerRating")
+          assert(loserRating.exists(_.glickoRating < 1500), s"the loser must lose: $loserRating")
+          assert(winnerRating.exists(_.glickoRd < 350), "a played game must shrink the deviation")
+          assert(!queued, "the game must be stamped applied in the same transaction as the two writes")
+      }
+    }
+
+  test("an account vs a CURATED bot moves both populations at once; an uncurated bot is skipped but stamped"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          player <- db.upsertOnLogin("google", "sub-rb-uvb", None, IO.pure("RbMixed"))
+          _      <- db.register("rb-mixed", "curated", "hash-rb-curated")
+          _      <- db.register("rb-mixed", "plain", "hash-rb-plain")
+          _      <- db.setRatedForHumans("rb-mixed", "curated", ratedForHumans = true)
+          rated  <- GameId.random
+          casual <- GameId.random
+          me = Principal.User(player.id)
+          _             <- db.save(rated, endedFixture(me, Principal.Bot("rb-mixed", "curated"), rated = true))
+          _             <- db.save(casual, endedFixture(me, Principal.Bot("rb-mixed", "plain"), rated = true))
+          strengthCache <- StrengthCache.create
+          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
+          playerRating  <- db.ratingOf(player.id)
+          curated       <- db.ratingOf("rb-mixed", "curated")
+          plain         <- db.ratingOf("rb-mixed", "plain")
+          ratedQueued   <- stillQueued(db, rated)
+          casualQueued  <- stillQueued(db, casual)
+        yield
+          assert(playerRating.exists(_.glickoRating > 1500), s"the human won a rated game: $playerRating")
+          assert(curated.exists(_.glickoRating < 1500), s"the curated bot lost it: $curated")
+          assertEquals(
+            plain.map(_.glickoRating),
+            Some(1500.0),
+            "an uncurated bot's rating must not move — that gate is the anti-farming rule"
+          )
+          assert(!ratedQueued && !casualQueued, "both rows are stamped: a skip must not clog the head of the queue")
+      }
+    }
+
+  test("a guest participant is never rated, and a deleted account's game is skipped rather than crashing the tick"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          ghost     <- db.upsertOnLogin("google", "sub-rb-ghost", None, IO.pure("RbGhost"))
+          _         <- db.register("rb-guest", "curated", "hash-rb-guest-curated")
+          _         <- db.setRatedForHumans("rb-guest", "curated", ratedForHumans = true)
+          guestGame <- GameId.random
+          ghostGame <- GameId.random
+          bot = Principal.Bot("rb-guest", "curated")
+          _ <- db.save(
+            guestGame,
+            endedFixture(Principal.Guest("0197f0a0-0000-7000-8000-0000000c0248"), bot, rated = true)
+          )
+          _ <- db.save(ghostGame, endedFixture(Principal.User(ghost.id), bot, rated = true))
+          // The account plays a rated game and is then deleted: its user: id lingers in game_results forever (#237).
+          _             <- db.deleteUser(ghost.id)
+          strengthCache <- StrengthCache.create
+          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
+          botRating     <- db.ratingOf("rb-guest", "curated")
+          guestQueued   <- stillQueued(db, guestGame)
+          ghostQueued   <- stillQueued(db, ghostGame)
+        yield
+          assertEquals(
+            botRating.map(_.glickoRating),
+            Some(1500.0),
+            "neither a guest nor a vanished account may move a bot's rating"
+          )
+          assert(!guestQueued, "the guest game is stamped applied, not left at the head of the queue")
+          assert(!ghostQueued, "an unresolvable participant is a skip, not a poisoned row that halts the batch")
+      }
+    }
+
   test("a tick that applies a rated game also warms the strength cache with a report that includes it (#181)"):
     withContainers { pg =>
       store(pg).use { db =>
@@ -271,7 +357,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _             <- db.save(id, endedFixture(alice, bob, rated = true)) // alice (White) wins
           strengthCache <- StrengthCache.create
           before        <- strengthCache.get
-          _             <- RatingBatch.create(db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
+          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
           after         <- strengthCache.get
         yield
           assertEquals(before, None, "the cache starts cold")
@@ -298,7 +384,7 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _             <- db.save(id2, endedFixture(bob, alice, rated = true))
           strengthCache <- StrengthCache.create
           onePerPage = RatingBatch.Config.Default.copy(batchSize = 1)
-          _       <- RatingBatch.create(db, db, db, onePerPage, strengthCache).flatMap(_.tick)
+          _       <- RatingBatch.create(db, db, db, db, onePerPage, strengthCache).flatMap(_.tick)
           queued1 <- stillQueued(db, id1)
           queued2 <- stillQueued(db, id2)
           report  <- strengthCache.get
@@ -337,9 +423,9 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
     def markRatingApplied(gameId: GameId): IO[Unit]              = IO.unit
     def applyRatingUpdate(
         gameId: GameId,
-        white: Principal.Bot,
+        white: RatedIdentity,
         whiteGlicko: Glicko,
-        black: Principal.Bot,
+        black: RatedIdentity,
         blackGlicko: Glicko
     ): IO[Unit] = IO.unit
 
@@ -367,6 +453,7 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       strengthCache <- StrengthCache.create
       batch         <- RatingBatch.create(
         bots,
+        noUsers,
         oneGameQueue(queue),
         unreachableResults,
         RatingBatch.Config.Default,
@@ -377,6 +464,17 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       _           <- batch.tick
       aliceRating <- bots.ratingOf("acme", "alice")
     yield assertEquals(aliceRating.map(_.onLadder), Some(true), "a check that never completed must park nobody")
+
+  /** A store with no accounts — for the bot-only suites, where reaching a user path would be the bug. */
+  private val noUsers: UserStore = new UserStore:
+    def upsertOnLogin(p: String, s: String, e: Option[String], n: IO[String]): IO[UserAccount] =
+      IO.raiseError(AssertionError("unused"))
+    def userById(id: String): IO[Option[UserAccount]]                        = IO.pure(None)
+    def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(None)
+    def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
+    def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
+    def guestsOf(userId: String): IO[List[String]]                           = IO.pure(Nil)
+    def deleteUser(userId: String): IO[Boolean]                              = IO.raiseError(AssertionError("unused"))
 
   /** Counts calls to `finishedRatedSince` rather than serving real rows — the strength refresh's own cost the cache
     * exists to bound, made observable without a container (#181).
@@ -401,6 +499,7 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       strengthCache <- StrengthCache.create
       batch         <- RatingBatch.create(
         bots,
+        noUsers,
         oneGameQueue(emptyQueue),
         countingResults(refreshCount),
         RatingBatch.Config.Default,
@@ -425,7 +524,14 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       refreshCount  <- Ref.of[IO, Int](0)
       queue         <- Ref.of[IO, List[GameResultRow]](Nil)
       strengthCache <- StrengthCache.create
-      batch <- RatingBatch.create(bots, oneGameQueue(queue), countingResults(refreshCount), config, strengthCache)
+      batch         <- RatingBatch.create(
+        bots,
+        noUsers,
+        oneGameQueue(queue),
+        countingResults(refreshCount),
+        config,
+        strengthCache
+      )
       // Refilled before each tick, so every tick genuinely applies a game — the pre-#215 trigger, fired repeatedly.
       _     <- (queue.set(List(aliceTimedOut)) *> batch.tick).replicateA_(ticks)
       count <- refreshCount.get
@@ -621,3 +727,53 @@ class RatingBatchPureSuite extends munit.FunSuite:
       RatingBatch.planRefresh(appliedAny = false, cold = true, now = 11.seconds, interval = 15.minutes)(warm)
     assertEquals(rebuildNow, true, "an empty cache answers /strength with nothing at all — that outranks the interval")
     assertEquals(next, RatingBatch.RefreshState(Some(11.seconds), pending = false))
+
+/** The eligibility matrix for human ratings (#248, ADR-0017) — pure, so every rule is pinned without a database. The
+  * rules exist to stop rating farming, so each negative case here is a hole that must stay closed.
+  */
+class RatingEligibilitySuite extends munit.FunSuite:
+
+  private val userA = "0197f0a0-0000-7000-8000-0000000000a1"
+  private val userB = "0197f0a0-0000-7000-8000-0000000000b2"
+
+  private def account(id: String): RatingBatch.Participant =
+    RatingBatch.Participant.OfUser(id, UserRating.initial)
+
+  private def bot(
+      name: String,
+      ratedForHumans: Boolean = false,
+      owner: Option[String] = None
+  ): RatingBatch.Participant =
+    RatingBatch.Participant.OfBot(
+      Principal.Bot("acme", name),
+      BotRating.initial.copy(ratedForHumans = ratedForHumans, ownerExternalId = owner)
+    )
+
+  test("two accounts are always eligible — no curation gate applies between people"):
+    assertEquals(RatingBatch.ineligible(account(userA), account(userB)), None)
+
+  test("two bots are eligible regardless of the human-curation flag, which is not about them"):
+    assertEquals(RatingBatch.ineligible(bot("alice"), bot("bob")), None)
+
+  test("an account against an uncurated bot is not eligible, and the reason names the bot"):
+    val why = RatingBatch.ineligible(account(userA), bot("alice"))
+    assert(why.exists(_.contains("acme/alice")), why.toString)
+    assert(why.exists(_.contains("not curated")), why.toString)
+
+  test("an account against a curated bot is eligible, in either seat"):
+    assertEquals(RatingBatch.ineligible(account(userA), bot("alice", ratedForHumans = true)), None)
+    assertEquals(RatingBatch.ineligible(bot("alice", ratedForHumans = true), account(userA)), None)
+
+  test("the curation gate is symmetric: an uncurated bot blocks from either seat"):
+    assert(RatingBatch.ineligible(bot("alice"), account(userA)).isDefined)
+
+  test("a player's own bot is never eligible, even when the bot is curated"):
+    val own = bot("mine", ratedForHumans = true, owner = Some(Principal.User(userA).externalId))
+    val why = RatingBatch.ineligible(account(userA), own)
+    assert(why.exists(_.contains("their own bot")), why.toString)
+    // ...and from the other seat, or the farm would just swap colours.
+    assert(RatingBatch.ineligible(own, account(userA)).isDefined)
+
+  test("someone else's curated bot stays eligible — ownership only excludes the owner"):
+    val theirs = bot("theirs", ratedForHumans = true, owner = Some(Principal.User(userB).externalId))
+    assertEquals(RatingBatch.ineligible(account(userA), theirs), None)

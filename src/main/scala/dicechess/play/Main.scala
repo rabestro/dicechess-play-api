@@ -164,7 +164,7 @@ object Main extends IOApp.Simple:
             s"[play][rating] enabled: polling every ${ratingConfig.interval}, strength report rebuilt at most " +
               s"every ${ratingConfig.strengthRefreshInterval}"
           ) *> RatingBatch
-            .create(botStore, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
+            .create(botStore, pg, pg, pg, ratingConfig, strengthCache, StrengthReport.Config.configFromEnv)
             .map(_.scheduler())
       // Retention (#179) follows the same opt-in shape, and for this one the shape is a safety property, not just
       // consistency: it is the only scheduled task that DELETES, so leaving RETENTION_INTERVAL_SECONDS unset must be

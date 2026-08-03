@@ -5,7 +5,16 @@ import cats.effect.std.Console
 import cats.syntax.all.*
 import dicechess.play.core.{Principal, Termination}
 import dicechess.play.ingest.PlaysiteIngest
-import dicechess.play.store.{BotStore, GameResultRow, GameResultsStore, RatingStore}
+import dicechess.play.store.{
+  BotRating,
+  BotStore,
+  GameResultRow,
+  GameResultsStore,
+  RatedIdentity,
+  RatingStore,
+  UserRating,
+  UserStore
+}
 
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -44,6 +53,7 @@ import scala.concurrent.duration.*
   */
 final class RatingBatch private (
     botStore: BotStore,
+    userStore: UserStore,
     ratingStore: RatingStore,
     resultsStore: GameResultsStore,
     config: RatingBatch.Config,
@@ -118,26 +128,55 @@ final class RatingBatch private (
       Console[IO].errorln(s"[play][rating] tick failed, retrying next interval: $error")
     )).foreverM
 
+  /** Apply one rated game, whichever populations its two seats belong to (#248).
+    *
+    * Eligibility is decided HERE, not at game creation: `game_results.rated` records what the room was told, and this
+    * batch is the authority on whether that pairing may actually move a rating. The rules (ADR-0017), each with its own
+    * skip reason so an operator asking "why is my rating not moving" gets an answer rather than silence:
+    *   - a guest seat is never rated — resetting a guest identity is free, so it would be free rating too;
+    *   - an account vs a bot counts only if that bot is operator-curated (`rated_for_humans`), never on the bot's own
+    *     say-so (see V15);
+    *   - an account vs a bot it OWNS never counts, even when the bot is curated — that is farming with extra steps.
+    *     `ownerExternalId` is unwritten until #239 lands ownership, so today this can only decline; the check is here
+    *     rather than deferred because a comment would not have stopped the hole from opening.
+    */
   private def applyGame(row: GameResultRow): IO[Unit] =
-    (
-      Principal.fromBotExternalId(row.whiteExternalId),
-      Principal.fromBotExternalId(row.blackExternalId),
-      row.result.flatMap(RatingBatch.scores)
-    ) match
-      case (Some(white), Some(black), _) if white == black =>
-        skip(row, "self-play carries no rating information")
-      case (Some(white), Some(black), Some((whiteScore, blackScore))) =>
-        (botStore.ratingOf(white.team, white.name), botStore.ratingOf(black.team, black.name)).flatMapN {
-          case (Some(whiteRating), Some(blackRating)) =>
-            val whiteNew = Glicko2.update(whiteRating.glicko, List(Glicko2.Result(blackRating.glicko, whiteScore)))
-            val blackNew = Glicko2.update(blackRating.glicko, List(Glicko2.Result(whiteRating.glicko, blackScore)))
-            ratingStore.applyRatingUpdate(row.gameId, white, whiteNew, black, blackNew) *>
-              parkIfStreakReached(white, row, whiteRating.onLadder) *>
-              parkIfStreakReached(black, row, blackRating.onLadder)
-          case _ => skip(row, "a participant is not a REGISTERED bot")
-        }
-      case (Some(_), Some(_), None) => skip(row, "no definite result")
-      case _                        => skip(row, "a participant is not a bot identity")
+    (participantOf(row.whiteExternalId), participantOf(row.blackExternalId)).flatMapN { (white, black) =>
+      (white, black, row.result.flatMap(RatingBatch.scores)) match
+        case (Some(w), Some(b), _) if w.identity == b.identity =>
+          skip(row, "self-play carries no rating information")
+        case (Some(w), Some(b), Some((whiteScore, blackScore))) =>
+          RatingBatch.ineligible(w, b) match
+            case Some(why) => skip(row, why)
+            case None      =>
+              val whiteNew = Glicko2.update(w.glicko, List(Glicko2.Result(b.glicko, whiteScore)))
+              val blackNew = Glicko2.update(b.glicko, List(Glicko2.Result(w.glicko, blackScore)))
+              ratingStore.applyRatingUpdate(row.gameId, w.identity, whiteNew, b.identity, blackNew) *>
+                parkIfOnLadder(w, row) *> parkIfOnLadder(b, row)
+        case (Some(_), Some(_), None) => skip(row, "no definite result")
+        case _ => skip(row, "a participant has no rating state (a guest, or an unregistered bot)")
+    }
+
+  /** Resolve one stored external id into the rating state behind it, or `None` when it has none — a guest, an
+    * anonymous/unregistered bot, or an account that has since been deleted (#237 makes that reachable: the id stays in
+    * `game_results` forever, resolving to nothing).
+    */
+  private def participantOf(externalId: String): IO[Option[RatingBatch.Participant]] =
+    Principal.fromBotExternalId(externalId) match
+      case Some(bot) =>
+        botStore.ratingOf(bot.team, bot.name).map(_.map(RatingBatch.Participant.OfBot(bot, _)))
+      case None =>
+        Principal.fromUserExternalId(externalId) match
+          case Some(userId) => userStore.ratingOf(userId).map(_.map(RatingBatch.Participant.OfUser(userId, _)))
+          case None         => IO.pure(None)
+
+  /** The ladder auto-park check (#150) applies to bots only: a human losing on time is a human losing on time, not a
+    * dead endpoint to take off the pairing pool.
+    */
+  private def parkIfOnLadder(participant: RatingBatch.Participant, row: GameResultRow): IO[Unit] =
+    participant match
+      case RatingBatch.Participant.OfBot(bot, rating) => parkIfStreakReached(bot, row, rating.onLadder)
+      case RatingBatch.Participant.OfUser(_, _)       => IO.unit
 
   /** The auto-park check for one participant of a just-applied game (#150).
     *
@@ -186,11 +225,43 @@ final class RatingBatch private (
 
 object RatingBatch:
 
+  /** One seat's rating state, whichever population it belongs to (#248) — the batch's uniform view over the two, since
+    * they share one scale and differ only in which row a write lands on.
+    */
+  private[rating] enum Participant:
+    case OfBot(bot: Principal.Bot, rating: BotRating)
+    case OfUser(userId: String, rating: UserRating)
+
+    def identity: RatedIdentity = this match
+      case OfBot(bot, _)     => RatedIdentity.of(bot)
+      case OfUser(userId, _) => RatedIdentity.User(userId)
+
+    def glicko: Glicko = this match
+      case OfBot(_, rating)  => rating.glicko
+      case OfUser(_, rating) => rating.glicko
+
+  /** Why this pairing may NOT move a rating, or `None` when it may. Pure, so the whole policy matrix is testable
+    * without a database — and symmetric, so a rule cannot apply to White but not Black.
+    */
+  private[rating] def ineligible(white: Participant, black: Participant): Option[String] =
+    def humanVsBot(user: Participant.OfUser, bot: Participant.OfBot): Option[String] =
+      if bot.rating.ownerExternalId.contains(Principal.User(user.userId).externalId) then
+        Some("a player's game against their own bot is never rated")
+      else if !bot.rating.ratedForHumans then
+        Some(s"${bot.bot.team}/${bot.bot.name} is not curated for rated human games")
+      else None
+
+    (white, black) match
+      case (u: Participant.OfUser, b: Participant.OfBot) => humanVsBot(u, b)
+      case (b: Participant.OfBot, u: Participant.OfUser) => humanVsBot(u, b)
+      case _                                             => None
+
   /** The only way to build one: the strength refresh cadence needs a `Ref`, so construction is effectful. Named
     * `create` like `StrengthCache.create` rather than `apply`, so a call site cannot read as a bare constructor.
     */
   def create(
       botStore: BotStore,
+      userStore: UserStore,
       ratingStore: RatingStore,
       resultsStore: GameResultsStore,
       config: Config,
@@ -199,7 +270,7 @@ object RatingBatch:
   ): IO[RatingBatch] =
     Ref
       .of[IO, RefreshState](RefreshState.Initial)
-      .map(new RatingBatch(botStore, ratingStore, resultsStore, config, strengthCache, strengthConfig, _))
+      .map(new RatingBatch(botStore, userStore, ratingStore, resultsStore, config, strengthCache, strengthConfig, _))
 
   /** What the strength refresh has to remember between ticks (#215): when it last rebuilt the report, and whether rated
     * games have landed since. `pending` outlives the tick that set it precisely so a burst of games followed by an idle

@@ -740,9 +740,9 @@ final class PgGameStore private (xa: Transactor[IO])
 
   def applyRatingUpdate(
       gameId: GameId,
-      white: Principal.Bot,
+      white: RatedIdentity,
       whiteGlicko: Glicko,
-      black: Principal.Bot,
+      black: RatedIdentity,
       blackGlicko: Glicko
   ): IO[Unit] =
     (updateGlicko(white, whiteGlicko) *> updateGlicko(black, blackGlicko) *> stampApplied(gameId))
@@ -752,10 +752,19 @@ final class PgGameStore private (xa: Transactor[IO])
   def markRatingApplied(gameId: GameId): IO[Unit] =
     stampApplied(gameId).transact(xa).timeout(SaveTimeout)
 
-  private def updateGlicko(bot: Principal.Bot, glicko: Glicko): ConnectionIO[Unit] =
-    sql"""UPDATE play.bots
-          SET glicko_rating = ${glicko.rating}, glicko_rd = ${glicko.deviation}, glicko_vol = ${glicko.volatility}
-          WHERE team = ${bot.team} AND name = ${bot.name}""".update.run.void
+  /** One participant's rating write, dispatched to the table that identity lives in (#248). Both branches stay inside
+    * the caller's single transaction — see `RatingStore.applyRatingUpdate` on why atomicity is per game, not per table.
+    */
+  private def updateGlicko(identity: RatedIdentity, glicko: Glicko): ConnectionIO[Unit] =
+    identity match
+      case RatedIdentity.Bot(team, name) =>
+        sql"""UPDATE play.bots
+              SET glicko_rating = ${glicko.rating}, glicko_rd = ${glicko.deviation}, glicko_vol = ${glicko.volatility}
+              WHERE team = $team AND name = $name""".update.run.void
+      case RatedIdentity.User(id) =>
+        sql"""UPDATE play.users
+              SET glicko_rating = ${glicko.rating}, glicko_rd = ${glicko.deviation}, glicko_vol = ${glicko.volatility}
+              WHERE id = $id::uuid""".update.run.void
 
   private def stampApplied(gameId: GameId): ConnectionIO[Unit] =
     sql"""UPDATE play.game_results SET rating_applied_at = now()
