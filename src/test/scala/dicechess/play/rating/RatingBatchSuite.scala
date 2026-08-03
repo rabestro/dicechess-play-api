@@ -387,6 +387,49 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("a game against the player's OWN curated bot is not rated — the rule #248 could not reach until #253"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          owner <- db.upsertOnLogin("google", "sub-rb-owner", None, IO.pure("RbOwner"))
+          // Curated (so the human-vs-bot gate itself passes) AND owned by the very player it faces.
+          _       <- db.register("rb-own", "mine", "hash-rb-own", owner = Some(Principal.User(owner.id).externalId))
+          _       <- db.setRatedForHumans("rb-own", "mine", ratedForHumans = true)
+          _       <- db.register("rb-own", "theirs", "hash-rb-theirs")
+          _       <- db.setRatedForHumans("rb-own", "theirs", ratedForHumans = true)
+          ownGame <- GameId.random
+          strangerGame <- GameId.random
+          me = Principal.User(owner.id)
+          _             <- db.save(ownGame, endedFixture(me, Principal.Bot("rb-own", "mine"), rated = true))
+          _             <- db.save(strangerGame, endedFixture(me, Principal.Bot("rb-own", "theirs"), rated = true))
+          strengthCache <- StrengthCache.create
+          _             <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = RatingBatch.Config.Default,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
+          mine     <- db.ratingOf("rb-own", "mine")
+          theirs   <- db.ratingOf("rb-own", "theirs")
+          player   <- db.ratingOf(owner.id)
+          ownStill <- stillQueued(db, ownGame)
+        yield
+          assertEquals(
+            mine.map(_.glickoRating),
+            Some(1500.0),
+            "beating your own bot must move nothing — that is farming with extra steps"
+          )
+          assert(theirs.exists(_.glickoRating < 1500), s"someone else's curated bot still counts: $theirs")
+          // The player gained from the stranger's bot only, so a single win's worth — not two.
+          assert(player.exists(_.glickoRating > 1500), s"the legitimate game still rated: $player")
+          assert(!ownStill, "the skipped game is stamped applied, not left clogging the queue")
+      }
+    }
+
   test("a tick that applies a rated game also warms the strength cache with a report that includes it (#181)"):
     withContainers { pg =>
       store(pg).use { db =>

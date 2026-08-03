@@ -10,7 +10,6 @@ import dicechess.play.store.{
   BotCatalogStore,
   BotRating,
   BotSeatPolicy,
-  BotStore,
   GameStore,
   GuestLink,
   NicknameUpdate,
@@ -90,8 +89,7 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
     */
   private def catalogFixture: IO[(GameRegistry, HttpApp[IO], UserAccount, String)] =
     val bot: Principal.Bot = Principal.Bot(CatalogTeam, CatalogBotName)
-    val bots               = new BotStore:
-      def register(team: String, name: String, tokenHash: String): IO[Boolean]                 = IO.pure(false)
+    val bots               = new UnownedBotStore:
       def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                           = IO.pure(None)
       def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                = IO.pure(false)
       def ratingOf(team: String, name: String): IO[Option[BotRating]]                          = IO.pure(None)

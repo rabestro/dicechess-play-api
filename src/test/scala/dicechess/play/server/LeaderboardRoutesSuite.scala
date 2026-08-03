@@ -21,8 +21,7 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
   private val alice = Principal.Bot("acme", "alice")
   private val bob   = Principal.Bot("acme", "bob")
 
-  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new BotStore:
-    def register(team: String, name: String, tokenHash: String): IO[Boolean]        = IO.pure(false)
+  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new UnownedBotStore:
     def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                  = IO.pure(None)
     def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]       = IO.pure(false)
     def ratingOf(team: String, name: String): IO[Option[BotRating]]                 = IO.pure(known.get((team, name)))

@@ -148,7 +148,10 @@ object BotRoutes:
       registry: GameRegistry,
       lobby: Lobby,
       limiter: AnonMintLimiter,
-      registerLimiter: AnonMintLimiter
+      registerLimiter: AnonMintLimiter,
+      // Optional because the bot API predates accounts and must keep working without them: with a session present,
+      // registering while signed in records the owner in the same INSERT instead of needing a follow-up claim (#253).
+      session: Option[AuthSession] = None
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       // Zero-registration self-service: mint an ephemeral, unranked anonymous bot token for testing.
@@ -180,8 +183,9 @@ object BotRoutes:
                 .flatMap:
                   case Left(failure) => BadRequest(failure.message)
                   case Right(body)   =>
-                    auth
-                      .register(body.team, body.name)
+                    AuthSession
+                      .principalFor(session, req)
+                      .flatMap(owner => auth.register(body.team, body.name, owner.map(_.externalId)))
                       .flatMap:
                         case Right((token, bot)) =>
                           Created(BotRegistered(token, bot.team, bot.name, bot.externalId))
@@ -481,7 +485,10 @@ object BotRoutes:
       case None      => Unauthorized(bearerChallenge)
 
   /** The authenticated bot for a request, if its Bearer token is valid (static or live anonymous). */
-  private def asBot(auth: BotAuth, req: Request[IO]): IO[Option[Principal.Bot]] =
+  /** Package-visible so the owner surface can require BOTH credentials on one request (#253): `MeRoutes` needs the
+    * bot's identity from its Bearer token while the session says who is claiming it.
+    */
+  private[server] def asBot(auth: BotAuth, req: Request[IO]): IO[Option[Principal.Bot]] =
     bearer(req) match
       case None        => IO.pure(None)
       case Some(token) => auth.authenticate(token).map(_.collect { case bot: Principal.Bot => bot })

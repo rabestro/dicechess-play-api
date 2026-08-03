@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import dicechess.play.core.Principal
-import dicechess.play.store.{BotCatalogState, BotRating, BotSeatPolicy, BotStore}
+import dicechess.play.store.{BotCatalogState, BotRating, BotSeatPolicy, BotStore, OwnedBot, OwnerClaim}
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.{MessageDigest, SecureRandom}
@@ -62,15 +62,23 @@ final class BotAuth private (
   /** Claim a durable self-service identity: mint a token, persist only its hash, and hand the plaintext back — it is
     * shown exactly once and never stored. First-come-first-served within the slug rules; reserved teams and the static
     * roster can never be claimed, so registration cannot impersonate house/official bots.
+    *
+    * `owner` is the registering account's `user:<uuid>` when a signed-in author calls this (#253): written in the same
+    * INSERT, so registering while signed in needs no follow-up claim. Absent, the bot is simply unowned — still a
+    * first-class state, the same anonymous-first stance guests have.
     */
-  def register(team: String, name: String): IO[Either[RegisterRejected, (String, Principal.Bot)]] =
+  def register(
+      team: String,
+      name: String,
+      owner: Option[String] = None
+  ): IO[Either[RegisterRejected, (String, Principal.Bot)]] =
     if !isSlug(team) || !isSlug(name) then IO.pure(Left(RegisterRejected.InvalidSlug))
     else if ReservedTeams.contains(team) then IO.pure(Left(RegisterRejected.ReservedTeam))
     else if staticTokens.values.exists(_ == Principal.Bot(team, name)) then IO.pure(Left(RegisterRejected.Taken))
     else
       val token = randomToken()
       store
-        .register(team, name, sha256Hex(token))
+        .register(team, name, sha256Hex(token), owner)
         .map(claimed => if claimed then Right((token, Principal.Bot(team, name))) else Left(RegisterRejected.Taken))
 
   /** Rotate a registered bot's token: the old one stops authenticating immediately, the new plaintext is handed back
@@ -80,6 +88,19 @@ final class BotAuth private (
   def rotate(bot: Principal.Bot): IO[Option[String]] =
     val token = randomToken()
     store.rotate(bot.team, bot.name, sha256Hex(token)).map(rotated => Option.when(rotated)(token))
+
+  /** Claim this bot for an account (#253) — the write that finally fills `bots.owner_external_id`, and with it arms the
+    * anti-farming rule `RatingBatch` already enforces (a player's game against their own bot is never rated).
+    */
+  def claimOwner(bot: Principal.Bot, ownerExternalId: String): IO[OwnerClaim] =
+    store.claimOwner(bot.team, bot.name, ownerExternalId)
+
+  /** Release a bot the account owns, making it claimable again. */
+  def releaseOwner(team: String, name: String, ownerExternalId: String): IO[Boolean] =
+    store.releaseOwner(team, name, ownerExternalId)
+
+  /** Every bot the account owns — the "My bots" read. */
+  def botsOwnedBy(ownerExternalId: String): IO[List[OwnedBot]] = store.botsOwnedBy(ownerExternalId)
 
   /** The registered bot's current rating-ladder state. `None` for a static or anonymous caller — same "not a registered
     * identity" meaning as `rotate`.

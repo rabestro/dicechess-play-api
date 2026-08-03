@@ -16,8 +16,7 @@ import org.http4s.{HttpApp, Method, Request, Status}
   */
 class StrengthRoutesSuite extends munit.CatsEffectSuite:
 
-  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new BotStore:
-    def register(team: String, name: String, tokenHash: String): IO[Boolean]        = IO.pure(false)
+  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new UnownedBotStore:
     def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                  = IO.pure(None)
     def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]       = IO.pure(false)
     def ratingOf(team: String, name: String): IO[Option[BotRating]]                 = IO.pure(known.get((team, name)))

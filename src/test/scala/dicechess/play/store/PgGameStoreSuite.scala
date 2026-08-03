@@ -1504,6 +1504,40 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  test("ownership round-trips: set on register, claimed idempotently, refused for another account, released"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val alice = "user:0197f0a0-0000-7000-8000-000000000253"
+        val bob   = "user:0197f0a0-0000-7000-8000-000000000254"
+        for
+          _         <- db.register("own-team", "born-owned", "hash-own-born", owner = Some(alice))
+          born      <- db.ratingOf("own-team", "born-owned")
+          _         <- db.register("own-team", "adopted", "hash-own-adopted")
+          unowned   <- db.ratingOf("own-team", "adopted")
+          claimed   <- db.claimOwner("own-team", "adopted", alice)
+          again     <- db.claimOwner("own-team", "adopted", alice)
+          contested <- db.claimOwner("own-team", "adopted", bob)
+          ghost     <- db.claimOwner("own-team", "no-such-bot", alice)
+          notYours  <- db.releaseOwner("own-team", "adopted", bob)
+          mine      <- db.botsOwnedBy(alice)
+          released  <- db.releaseOwner("own-team", "adopted", alice)
+          after     <- db.botsOwnedBy(alice)
+          reclaimed <- db.claimOwner("own-team", "adopted", bob)
+        yield
+          assertEquals(born.flatMap(_.ownerExternalId), Some(alice), "registering while signed in needs no claim")
+          assertEquals(unowned.flatMap(_.ownerExternalId), None, "unowned stays a first-class state")
+          assertEquals(claimed, OwnerClaim.Claimed)
+          assertEquals(again, OwnerClaim.Claimed, "a retry by the owner is idempotent")
+          assertEquals(contested, OwnerClaim.ClaimedByAnother, "possession of the token is not a takeover")
+          assertEquals(ghost, OwnerClaim.NotRegistered)
+          assert(!notYours, "a wrong guess must not un-own someone else's bot")
+          assertEquals(mine.map(_.name).sorted, List("adopted", "born-owned"))
+          assert(released)
+          assertEquals(after.map(_.name), List("born-owned"), "the released bot leaves the owner's list")
+          assertEquals(reclaimed, OwnerClaim.Claimed, "release is what makes a transfer possible")
+      }
+    }
+
   private def sha256Hex(hexSeed: String): String =
     val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
     MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString
