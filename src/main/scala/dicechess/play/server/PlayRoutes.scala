@@ -17,8 +17,15 @@ import org.http4s.HttpRoutes
 
 import scala.concurrent.duration.*
 
-final case class CreateGame(white: String, black: String, timeControl: Option[TimeControl] = None)
-    derives Codec.AsObject
+/** `POST /games` (friend-by-link). `white`/`black` are the anonymous fallback (#235): a signed-in caller is seated from
+  * the session on BOTH sides (the creator holds both join tokens and hands one to a friend — token possession, not the
+  * label, is what grants the seat) and the fields are ignored; without a session both are required.
+  */
+final case class CreateGame(
+    white: Option[String] = None,
+    black: Option[String] = None,
+    timeControl: Option[TimeControl] = None
+) derives Codec.AsObject
 final case class SeatToken(seat: Seat, token: String) derives Codec.AsObject
 
 /** The created game plus a per-seat join token: the creator distributes each token to the player who should hold that
@@ -58,6 +65,7 @@ object PlayRoutes:
   def apply(
       registry: GameRegistry,
       wsb: WebSocketBuilder2[IO],
+      session: Option[AuthSession] = None,
       keepAlive: FiniteDuration = DefaultKeepAlive
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
@@ -69,17 +77,31 @@ object PlayRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              (Principal.guest(body.white), Principal.guest(body.black)) match
-                case (Left(err), _)               => BadRequest(s"white: $err")
-                case (_, Left(err))               => BadRequest(s"black: $err")
-                case (Right(white), Right(black)) =>
-                  registry
-                    .create(white, black, body.timeControl.getOrElse(TimeControl.Default))
-                    .flatMap:
-                      case Left(error)       => BadRequest(error)
-                      case Right((id, room)) =>
-                        val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
-                        room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
+              AuthSession.principalFor(session, req).flatMap { signedIn =>
+                val seats: Either[String, (Principal, Principal)] = signedIn match
+                  // Session wins (#235): the creator owns both seats until the share link is used, exactly as the
+                  // anonymous flow already seats one guest id on both sides.
+                  case Some(user) => Right((user, user))
+                  case None       =>
+                    def required(field: String, value: Option[String]) =
+                      value
+                        .toRight(s"$field: required when not signed in")
+                        .flatMap(id => Principal.guest(id).left.map(err => s"$field: $err"))
+                    for
+                      white <- required("white", body.white)
+                      black <- required("black", body.black)
+                    yield (white, black)
+                seats match
+                  case Left(err)             => BadRequest(err)
+                  case Right((white, black)) =>
+                    registry
+                      .create(white, black, body.timeControl.getOrElse(TimeControl.Default))
+                      .flatMap:
+                        case Left(error)       => BadRequest(error)
+                        case Right((id, room)) =>
+                          val tokens = room.joinTokens.toList.map((seat, token) => SeatToken(seat, token))
+                          room.diceCommit.flatMap(c => Created(CreatedGame(id.value, c, tokens)))
+              }
 
       // Public like the per-game snapshot: everything here is already public information. Feeds the Watch page, the
       // lobby's "top game" preview, and the live-games counter; sorted by version (most action first) and capped —
@@ -114,19 +136,33 @@ object PlayRoutes:
             case None       => NotFound()
             case Some(room) => room.legalMoves.flatMap(Ok(_))
 
-      // The seat is resolved from a verified join token; a tokenless connection is a read-only spectator.
-      case GET -> Root / "games" / id / "ws" :? TokenParam(token) =>
+      // The seat is resolved from a verified join token. A tokenless connection falls back to the session (#235):
+      // a signed-in player occupying EXACTLY one seat reconnects to it — the fix for "lost the ?seat= URL, demoted
+      // to spectator forever". Ambiguity (friend-by-link seats the creator on both sides until the link is used)
+      // means the session cannot name a seat, so the token stays required there. Anything else spectates, as before.
+      case req @ GET -> Root / "games" / id / "ws" :? TokenParam(token) =>
         registry
           .get(GameId(id))
           .flatMap:
             case None       => NotFound()
             case Some(room) =>
               token match
-                case None    => wsb.build(clientFrames(room, keepAlive), fromClient(room, Seat.Spectator))
                 case Some(t) =>
                   room.seatFor(t) match
                     case None       => Forbidden()
                     case Some(seat) => wsb.build(clientFrames(room, keepAlive), fromClient(room, seat))
+                case None =>
+                  AuthSession.principalFor(session, req).flatMap {
+                    case None       => wsb.build(clientFrames(room, keepAlive), fromClient(room, Seat.Spectator))
+                    case Some(user) =>
+                      room.seating.flatMap { seats =>
+                        val owned = seats.collect { case (seat, p) if p == user => seat }.toList
+                        val seat  = owned match
+                          case only :: Nil => only
+                          case _           => Seat.Spectator
+                        wsb.build(clientFrames(room, keepAlive), fromClient(room, seat))
+                      }
+                  }
 
   /** Frames pushed to a client: the room's event feed merged with periodic WebSocket pings. The browser auto-replies
     * with a pong, and that inbound frame resets the server's read-idle timeout — so a quiet but live game (a player

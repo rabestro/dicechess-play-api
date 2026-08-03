@@ -92,6 +92,13 @@ report, read by the rating batch like `LADDER_TIMEOUT_PARK_GAMES`. A rebuild fol
 ever played `STRENGTH_BOOTSTRAP_ITERATIONS` times, so it must NOT track the batch poll: doing so
 pegged a cats-effect worker for a third of all wall-clock time in production. `0` restores the old
 rebuild-per-tick behaviour.
+Identity on game-start paths (#235, ADR-0017): where a request used to be trusted to name its own guest id
+(`POST /games`, `/lobby/seeks`, `/lobby/seeks/{id}/accept`, `/lobby/play-bot`), **the session now wins and the body
+field is only an anonymous fallback** — a `user:` principal can never be expressed in a body, and a signed-in caller
+cannot be made to act as anyone else. Those fields became optional: required only when there is no session.
+A tokenless `GET /games/{id}/ws` also falls back to the session and reconnects a signed-in player to the single seat
+they occupy (the fix for a lost `?seat=` URL); two seats held by the same account (friend-by-link before the share
+link is used) stays ambiguous, so the join token remains the only way in there.
 Google sign-in (#233, ADR-0017): `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` +
 `GOOGLE_REDIRECT_URI` + `PLAY_SESSION_SECRET` (all four required, plus persistence) mount the
 `/auth/*` routes; `PLAY_FRONTEND_URL` (default `https://play.jc.id.lv`) is where login/callback

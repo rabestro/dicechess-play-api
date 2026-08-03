@@ -4,6 +4,7 @@ import cats.effect.IO
 import com.auth0.jwt.JWT
 import com.auth0.jwt.algorithms.Algorithm
 import com.auth0.jwt.interfaces.JWTVerifier
+import dicechess.play.core.Principal
 import dicechess.play.store.{UserAccount, UserStore}
 import org.http4s.{Request, ResponseCookie, SameSite}
 
@@ -58,6 +59,36 @@ object AuthSession:
 
   val SessionCookieName: String = "access_token"
   val StateCookieName: String   = "oauth_state"
+
+  /** The signed-in `Principal.User` behind a request, when sessions are enabled at all — `None` covers both "auth is
+    * not configured on this deployment" and "this request carries no usable session", because a route treats them the
+    * same way: fall back to the anonymous path.
+    */
+  def principalFor(session: Option[AuthSession], req: Request[IO]): IO[Option[Principal.User]] =
+    session.fold(IO.pure(Option.empty[Principal.User]))(_.userFor(req).map(_.map(u => Principal.User(u.id))))
+
+  /** The acting principal for a game-start request (#235, ADR-0017): **the session wins; the body is only ever a guest
+    * fallback.** A signed-in caller is seated as `Principal.User` no matter what the body says — accepting a
+    * body-supplied `user:` id would let anyone impersonate any account, so there is deliberately no way to express one.
+    * With no session, the body's bare guest UUID goes through `Principal.guest` exactly as before; absent too → `Left`,
+    * the route's 400.
+    *
+    * Both `Left` branches carry the `field` prefix themselves, so a caller answers with the message verbatim rather
+    * than prefixing it again (which read as `creator: creator is required…` for the missing-field branch).
+    */
+  def actingPrincipal(
+      session: Option[AuthSession],
+      req: Request[IO],
+      bodyGuestId: Option[String],
+      field: String
+  ): IO[Either[String, Principal]] =
+    principalFor(session, req).map {
+      case Some(user) => Right(user)
+      case None       =>
+        bodyGuestId match
+          case None     => Left(s"$field is required when not signed in")
+          case Some(id) => Principal.guest(id).left.map(err => s"$field: $err")
+    }
 
   /** 30 days — long enough that a casual player never re-logs, revocable anyway via the per-request DB read. */
   private val SessionTtlSeconds: Long = 30L * 24L * 3600L
