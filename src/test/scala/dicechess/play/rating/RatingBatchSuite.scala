@@ -28,7 +28,16 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
   private def batch(db: PgGameStore): IO[RatingBatch] =
-    StrengthCache.create.flatMap(RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, _))
+    StrengthCache.create.flatMap(cache =>
+      RatingBatch.create(
+        botStore = db,
+        userStore = db,
+        ratingStore = db,
+        resultsStore = db,
+        config = RatingBatch.Config.Default,
+        strengthCache = cache
+      )
+    )
 
   private def endedFixture(
       white: Principal,
@@ -271,10 +280,19 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           id            <- GameId.random
           _             <- db.save(id, endedFixture(Principal.User(winner.id), Principal.User(loser.id), rated = true))
           strengthCache <- StrengthCache.create
-          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
-          winnerRating  <- db.ratingOf(winner.id)
-          loserRating   <- db.ratingOf(loser.id)
-          queued        <- stillQueued(db, id)
+          _             <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = RatingBatch.Config.Default,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
+          winnerRating <- db.ratingOf(winner.id)
+          loserRating  <- db.ratingOf(loser.id)
+          queued       <- stillQueued(db, id)
         yield
           assert(winnerRating.exists(_.glickoRating > 1500), s"the winner must gain: $winnerRating")
           assert(loserRating.exists(_.glickoRating < 1500), s"the loser must lose: $loserRating")
@@ -287,22 +305,31 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
     withContainers { pg =>
       store(pg).use { db =>
         for
-          player <- db.upsertOnLogin("google", "sub-rb-uvb", None, IO.pure("RbMixed"))
-          _      <- db.register("rb-mixed", "curated", "hash-rb-curated")
-          _      <- db.register("rb-mixed", "plain", "hash-rb-plain")
-          _      <- db.setRatedForHumans("rb-mixed", "curated", ratedForHumans = true)
-          rated  <- GameId.random
-          casual <- GameId.random
+          player      <- db.upsertOnLogin("google", "sub-rb-uvb", None, IO.pure("RbMixed"))
+          _           <- db.register("rb-mixed", "curated", "hash-rb-curated")
+          _           <- db.register("rb-mixed", "plain", "hash-rb-plain")
+          _           <- db.setRatedForHumans("rb-mixed", "curated", ratedForHumans = true)
+          rated       <- GameId.random
+          vsUncurated <- GameId.random
           me = Principal.User(player.id)
           _             <- db.save(rated, endedFixture(me, Principal.Bot("rb-mixed", "curated"), rated = true))
-          _             <- db.save(casual, endedFixture(me, Principal.Bot("rb-mixed", "plain"), rated = true))
+          _             <- db.save(vsUncurated, endedFixture(me, Principal.Bot("rb-mixed", "plain"), rated = true))
           strengthCache <- StrengthCache.create
-          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
-          playerRating  <- db.ratingOf(player.id)
-          curated       <- db.ratingOf("rb-mixed", "curated")
-          plain         <- db.ratingOf("rb-mixed", "plain")
-          ratedQueued   <- stillQueued(db, rated)
-          casualQueued  <- stillQueued(db, casual)
+          _             <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = RatingBatch.Config.Default,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
+          playerRating    <- db.ratingOf(player.id)
+          curated         <- db.ratingOf("rb-mixed", "curated")
+          plain           <- db.ratingOf("rb-mixed", "plain")
+          ratedQueued     <- stillQueued(db, rated)
+          uncuratedQueued <- stillQueued(db, vsUncurated)
         yield
           assert(playerRating.exists(_.glickoRating > 1500), s"the human won a rated game: $playerRating")
           assert(curated.exists(_.glickoRating < 1500), s"the curated bot lost it: $curated")
@@ -311,7 +338,10 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
             Some(1500.0),
             "an uncurated bot's rating must not move — that gate is the anti-farming rule"
           )
-          assert(!ratedQueued && !casualQueued, "both rows are stamped: a skip must not clog the head of the queue")
+          assert(
+            !ratedQueued && !uncuratedQueued,
+            "both rows are stamped: a skip must not clog the head of the queue"
+          )
       }
     }
 
@@ -333,10 +363,19 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           // The account plays a rated game and is then deleted: its user: id lingers in game_results forever (#237).
           _             <- db.deleteUser(ghost.id)
           strengthCache <- StrengthCache.create
-          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
-          botRating     <- db.ratingOf("rb-guest", "curated")
-          guestQueued   <- stillQueued(db, guestGame)
-          ghostQueued   <- stillQueued(db, ghostGame)
+          _             <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = RatingBatch.Config.Default,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
+          botRating   <- db.ratingOf("rb-guest", "curated")
+          guestQueued <- stillQueued(db, guestGame)
+          ghostQueued <- stillQueued(db, ghostGame)
         yield
           assertEquals(
             botRating.map(_.glickoRating),
@@ -357,8 +396,17 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _             <- db.save(id, endedFixture(alice, bob, rated = true)) // alice (White) wins
           strengthCache <- StrengthCache.create
           before        <- strengthCache.get
-          _             <- RatingBatch.create(db, db, db, db, RatingBatch.Config.Default, strengthCache).flatMap(_.tick)
-          after         <- strengthCache.get
+          _             <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = RatingBatch.Config.Default,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
+          after <- strengthCache.get
         yield
           assertEquals(before, None, "the cache starts cold")
           assert(after.isDefined, "a tick that applied a game must warm the cache")
@@ -384,7 +432,16 @@ class RatingBatchSuite extends CatsEffectSuite with TestContainerForAll:
           _             <- db.save(id2, endedFixture(bob, alice, rated = true))
           strengthCache <- StrengthCache.create
           onePerPage = RatingBatch.Config.Default.copy(batchSize = 1)
-          _       <- RatingBatch.create(db, db, db, db, onePerPage, strengthCache).flatMap(_.tick)
+          _ <- RatingBatch
+            .create(
+              botStore = db,
+              userStore = db,
+              ratingStore = db,
+              resultsStore = db,
+              config = onePerPage,
+              strengthCache = strengthCache
+            )
+            .flatMap(_.tick)
           queued1 <- stillQueued(db, id1)
           queued2 <- stillQueued(db, id2)
           report  <- strengthCache.get
@@ -452,12 +509,12 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       queue         <- Ref.of[IO, List[GameResultRow]](List(aliceTimedOut))
       strengthCache <- StrengthCache.create
       batch         <- RatingBatch.create(
-        bots,
-        noUsers,
-        oneGameQueue(queue),
-        unreachableResults,
-        RatingBatch.Config.Default,
-        strengthCache
+        botStore = bots,
+        userStore = noUsers,
+        ratingStore = oneGameQueue(queue),
+        resultsStore = unreachableResults,
+        config = RatingBatch.Config.Default,
+        strengthCache = strengthCache
       )
       // The rating for this row has already committed by the time the check runs, so raising here would abort the rest
       // of the page for unrelated bots and buy nothing — the row is stamped and never returns to the queue.
@@ -498,12 +555,12 @@ class RatingBatchResilienceSuite extends CatsEffectSuite:
       emptyQueue    <- Ref.of[IO, List[GameResultRow]](Nil)
       strengthCache <- StrengthCache.create
       batch         <- RatingBatch.create(
-        bots,
-        noUsers,
-        oneGameQueue(emptyQueue),
-        countingResults(refreshCount),
-        RatingBatch.Config.Default,
-        strengthCache
+        botStore = bots,
+        userStore = noUsers,
+        ratingStore = oneGameQueue(emptyQueue),
+        resultsStore = countingResults(refreshCount),
+        config = RatingBatch.Config.Default,
+        strengthCache = strengthCache
       )
       _      <- batch.tick
       countA <- refreshCount.get

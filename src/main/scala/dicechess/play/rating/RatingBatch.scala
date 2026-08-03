@@ -154,7 +154,10 @@ final class RatingBatch private (
               ratingStore.applyRatingUpdate(row.gameId, w.identity, whiteNew, b.identity, blackNew) *>
                 parkIfOnLadder(w, row) *> parkIfOnLadder(b, row)
         case (Some(_), Some(_), None) => skip(row, "no definite result")
-        case _ => skip(row, "a participant has no rating state (a guest, or an unregistered bot)")
+        case _                        =>
+          // All three causes named: an operator reading this for a deleted account (#237 makes that reachable — the
+          // user: id outlives the row) must not be told it was a guest.
+          skip(row, "a participant has no rating state (a guest, an unregistered bot, or a deleted account)")
     }
 
   /** Resolve one stored external id into the rating state behind it, or `None` when it has none — a guest, an
