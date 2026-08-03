@@ -167,7 +167,7 @@ object CatalogRoutes:
                 AuthSession
                   .actingPrincipal(session, req, body.guestId, "guestId")
                   .flatMap:
-                    case Left(err)     => BadRequest(s"guestId: $err")
+                    case Left(err)     => BadRequest(err)
                     case Right(player) =>
                       if body.timeControl == TimeControl.Unlimited then
                         BadRequest("a catalog game must have a time control")

@@ -72,6 +72,9 @@ object AuthSession:
     * body-supplied `user:` id would let anyone impersonate any account, so there is deliberately no way to express one.
     * With no session, the body's bare guest UUID goes through `Principal.guest` exactly as before; absent too → `Left`,
     * the route's 400.
+    *
+    * Both `Left` branches carry the `field` prefix themselves, so a caller answers with the message verbatim rather
+    * than prefixing it again (which read as `creator: creator is required…` for the missing-field branch).
     */
   def actingPrincipal(
       session: Option[AuthSession],
@@ -84,7 +87,7 @@ object AuthSession:
       case None       =>
         bodyGuestId match
           case None     => Left(s"$field is required when not signed in")
-          case Some(id) => Principal.guest(id)
+          case Some(id) => Principal.guest(id).left.map(err => s"$field: $err")
     }
 
   /** 30 days — long enough that a casual player never re-logs, revocable anyway via the per-request DB read. */

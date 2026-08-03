@@ -4,14 +4,26 @@ import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.comcast.ip4s.*
 import dicechess.play.core.*
-import dicechess.play.store.{GuestLink, NicknameUpdate, UserAccount, UserStore}
+import dicechess.play.store.{
+  BotCatalogListing,
+  BotCatalogState,
+  BotCatalogStore,
+  BotRating,
+  BotSeatPolicy,
+  BotStore,
+  GameStore,
+  GuestLink,
+  NicknameUpdate,
+  UserAccount,
+  UserStore
+}
 import dicechess.play.wire.Codecs.given
 import io.circe.syntax.*
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.client.websocket.{WSFrame, WSRequest}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
-import org.http4s.jdkhttpclient.JdkWSClient
+import org.http4s.jdkhttpclient.{JdkHttpClient, JdkWSClient}
 import org.http4s.{Header, Headers, HttpApp, Method, Request, RequestCookie, Status, Uri}
 import org.typelevel.ci.*
 
@@ -65,6 +77,39 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
       seekApp  = LobbyRoutes(lobby, None).orNotFound
     yield (registry, lobbyApp, seekApp, user, token)
 
+  private val CatalogTeam    = "acme"
+  private val CatalogBotName = "alice"
+
+  /** `CatalogRoutes` needs the two bot seams; only the catalog membership and seat policy matter for `play-bot`, so
+    * everything else answers "nothing" rather than pulling in a database.
+    */
+  private def catalogFixture: IO[(GameRegistry, HttpApp[IO], UserAccount, String)] =
+    val bot: Principal.Bot = Principal.Bot(CatalogTeam, CatalogBotName)
+    val bots               = new BotStore:
+      def register(team: String, name: String, tokenHash: String): IO[Boolean]                     = IO.pure(false)
+      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                               = IO.pure(None)
+      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                    = IO.pure(false)
+      def ratingOf(team: String, name: String): IO[Option[BotRating]]                              = IO.pure(None)
+      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]        = IO.pure(None)
+      def onLadderCandidates: IO[List[BotSeatPolicy]]                                              = IO.pure(Nil)
+      def setMaxConcurrentGames(team: String, name: String, limit: Int): IO[Option[BotSeatPolicy]] = IO.pure(None)
+      def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]                      = IO.pure(None)
+      def openToHumans(team: String, name: String, description: Option[String]): IO[Option[BotCatalogState]] =
+        IO.pure(None)
+      def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] = IO.pure(None)
+      def openToHumansBots: IO[List[Principal.Bot]]                              = IO.pure(List(bot))
+    val catalog = new BotCatalogStore:
+      def catalogBots: IO[List[BotCatalogListing]] = IO.pure(Nil)
+    for
+      registry <- GameRegistry.create(store = GameStore.noop)
+      users    <- Ref.of[IO, Map[String, UserAccount]](Map.empty).map(StubUsers(_))
+      session = AuthSession(users, Secret)
+      user  <- users.upsertOnLogin("google", "sub-catalog", None, IO.pure("CatalogNick"))
+      token <- session.sign(user)
+      wake  <- AnonMintLimiter.create()
+      plays <- AnonMintLimiter.create()
+    yield (registry, CatalogRoutes(catalog, bots, None, registry, wake, plays, Some(session)).orNotFound, user, token)
+
   private def createSeek(app: HttpApp[IO], token: Option[String], creator: Option[String]) =
     val base = Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(creator))
     app.run(token.fold(base)(t => base.addCookie(RequestCookie(AuthSession.SessionCookieName, t))))
@@ -107,10 +152,19 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
       anonymous                <- createSeek(app, None, Some(GuestId))
       seek                     <- anonymous.as[CreatedSeek]
       missing                  <- createSeek(app, None, None)
+      reason                   <- missing.bodyText.compile.string
+      malformed                <- createSeek(app, None, Some("not-a-uuid"))
+      badReason                <- malformed.bodyText.compile.string
       creator                  <- creatorOf(registry, app, seek.seekId, OtherId)
     yield
       assertEquals(anonymous.status, Status.Created)
       assertEquals(missing.status, Status.BadRequest, "no session and no creator id is unusable")
+      assertEquals(malformed.status, Status.BadRequest)
+      // Both rejection branches name the field exactly once: the route answers the message verbatim rather than
+      // prefixing one that already carries the field.
+      assertEquals(reason, "\"creator is required when not signed in\"")
+      assert(badReason.startsWith("\"creator: "), badReason)
+      assert(!badReason.contains("creator: creator"), s"the field name must not be doubled: $badReason")
       assertEquals(creator, Principal.Guest(GuestId))
 
   test("a deployment without sign-in configured behaves exactly as before"):
@@ -123,6 +177,81 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
     yield
       assertEquals(res.status, Status.Created)
       assertEquals(creator, Principal.Guest(GuestId))
+
+  test("a signed-in accepter takes their seat as their account, ignoring the body id"):
+    for
+      (registry, app, _, user, token) <- fixture
+      // An anonymous guest posts the seek; the signed-in player accepts it while naming someone else in the body.
+      created <- createSeek(app, None, Some(GuestId))
+      seek    <- created.as[CreatedSeek]
+      accept = Request[IO](Method.POST, uri"/lobby/seeks" / seek.seekId / "accept")
+        .withEntity(AcceptSeek(Some(OtherId)))
+        .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
+      matched <- app.run(accept).flatMap(_.as[SeekMatch])
+      seats   <- registry.get(GameId(matched.gameId)).flatMap {
+        case None       => IO.raiseError(AssertionError("game not found"))
+        case Some(room) => room.seating
+      }
+    yield assertEquals(
+      seats.values.toSet,
+      Set[Principal](Principal.Guest(GuestId), Principal.User(user.id)),
+      "the accepter must be the session's account, never the body's id"
+    )
+
+  test("POST /games seats a signed-in creator on both sides, and anonymously both ids are required"):
+    (wsServer, JdkHttpClient.simple[IO]).tupled.use { case ((port, registry, user, token), http) =>
+      val games = Uri.unsafeFromString(s"http://127.0.0.1:$port") / "games"
+      val body  = CreateGame(Some(GuestId), Some(OtherId))
+      for
+        // A valid session plus a body naming two other identities: the session must own both seats.
+        created <- http.expect[CreatedGame](
+          Request[IO](Method.POST, games)
+            .withEntity(body)
+            .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
+        )
+        seats <- registry.get(GameId(created.gameId)).flatMap {
+          case None       => IO.raiseError(AssertionError("game not found"))
+          case Some(room) => room.seating
+        }
+        // Anonymous, one field missing: the fallback still demands it.
+        halfBody  <- http.status(Request[IO](Method.POST, games).withEntity(CreateGame(Some(GuestId), None)))
+        anonymous <- http.status(Request[IO](Method.POST, games).withEntity(CreateGame(None, None)))
+      yield
+        assertEquals(
+          seats.values.toSet,
+          Set[Principal](Principal.User(user.id)),
+          "both seats belong to the signed-in creator, not the body's ids"
+        )
+        assertEquals(halfBody, Status.BadRequest)
+        assertEquals(anonymous, Status.BadRequest)
+    }
+
+  test("POST /lobby/play-bot seats a signed-in caller as their account, ignoring the body guest id"):
+    for
+      (registry, catalog, user, token) <- catalogFixture
+      played                           <- catalog.run(
+        Request[IO](Method.POST, uri"/lobby/play-bot")
+          .withEntity(PlayBot(Some(GuestId), CatalogTeam, CatalogBotName, TimeControl.Fischer(300, 3)))
+          .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
+      )
+      matched <- played.as[SeekMatch]
+      seats   <- registry.get(GameId(matched.gameId)).flatMap {
+        case None       => IO.raiseError(AssertionError("game not found"))
+        case Some(room) => room.seating
+      }
+      // Anonymous with no guest id at all: still a 400, the fallback is required.
+      missing <- catalog.run(
+        Request[IO](Method.POST, uri"/lobby/play-bot")
+          .withEntity(PlayBot(None, CatalogTeam, CatalogBotName, TimeControl.Fischer(300, 3)))
+      )
+    yield
+      assertEquals(played.status, Status.Created)
+      assertEquals(
+        seats.values.toSet,
+        Set[Principal](Principal.User(user.id), Principal.Bot(CatalogTeam, CatalogBotName)),
+        "the human seat must be the session's account, not the body's guest id"
+      )
+      assertEquals(missing.status, Status.BadRequest)
 
   // The rated-eligibility matrix for `Principal.User` (user-vs-user, user-vs-registered-bot, and the guest/anon-bot
   // exclusions) is already asserted exhaustively in `GameRegistrySuite`'s isRated section — the policy lit up as-is

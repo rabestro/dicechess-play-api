@@ -60,7 +60,7 @@ object LobbyRoutes:
               AuthSession
                 .actingPrincipal(session, req, body.creator, "creator")
                 .flatMap:
-                  case Left(err)      => BadRequest(s"creator: $err")
+                  case Left(err)      => BadRequest(err)
                   case Right(creator) =>
                     lobby
                       .create(creator, body.timeControl.getOrElse(TimeControl.Default))
@@ -91,7 +91,7 @@ object LobbyRoutes:
               AuthSession
                 .actingPrincipal(session, req, body.accepter, "accepter")
                 .flatMap:
-                  case Left(err)       => BadRequest(s"accepter: $err")
+                  case Left(err)       => BadRequest(err)
                   case Right(accepter) =>
                     lobby
                       .accept(id, accepter)
