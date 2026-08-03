@@ -3,6 +3,7 @@ package dicechess.play.server
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import dicechess.play.store.{GuestLink, NicknameUpdate, UserAccount, UserStore}
+import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.headers.Location
 import org.http4s.implicits.*
 import org.http4s.{Method, Request, RequestCookie, ResponseCookie, SameSite, Status, Uri}
@@ -45,10 +46,17 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
         }
       }
     def userById(id: String): IO[Option[UserAccount]]                        = ref.get.map(_.values.find(_.id == id))
-    def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
-    def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
-    def guestsOf(userId: String): IO[List[String]]                           = IO.raiseError(AssertionError("unused"))
-    def deleteUser(userId: String): IO[Boolean]                              = IO.raiseError(AssertionError("unused"))
+    def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
+      ref.modify { users =>
+        users.find(_._2.id == userId) match
+          case None => (users, NicknameUpdate.UserNotFound)
+          case _ if users.values.exists(u => u.id != userId && u.nickname.equalsIgnoreCase(nickname)) =>
+            (users, NicknameUpdate.Taken)
+          case Some((key, user)) => (users.updated(key, user.copy(nickname = nickname)), NicknameUpdate.Updated)
+      }
+    def linkGuest(userId: String, guestId: String): IO[GuestLink] = IO.raiseError(AssertionError("unused"))
+    def guestsOf(userId: String): IO[List[String]]                = IO.raiseError(AssertionError("unused"))
+    def deleteUser(userId: String): IO[Boolean]                   = IO.raiseError(AssertionError("unused"))
 
   private def fixture: IO[(StubUsers, AuthSession, org.http4s.HttpApp[IO])] =
     Ref.of[IO, Map[String, UserAccount]](Map.empty).map { ref =>
@@ -59,6 +67,10 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
 
   private def cookieOf(cookies: List[ResponseCookie], name: String): ResponseCookie =
     cookies.find(_.name == name).getOrElse(fail(s"expected a '$name' cookie, got ${cookies.map(_.name)}"))
+
+  private def patchNickname(token: Option[String], name: String): Request[IO] =
+    val base = Request[IO](Method.PATCH, uri"/auth/me").withEntity(NicknameChange(name))
+    token.fold(base)(t => base.addCookie(RequestCookie(AuthSession.SessionCookieName, t)))
 
   private def callbackRequest(code: String, state: String, cookieState: Option[String]): Request[IO] =
     val base = Request[IO](
@@ -109,8 +121,8 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
         Request[IO](Method.GET, uri"/auth/me")
           .addCookie(RequestCookie(AuthSession.SessionCookieName, sessionCookie.content))
       )
-      body <- me.as[String]
-      user <- store.userById(extractId(body))
+      meResp <- me.as[MeResponse]
+      user   <- store.userById(meResp.id)
     yield
       assertEquals(res.status, Status.SeeOther)
       assertEquals(res.headers.get[Location].map(_.uri.renderString), Some(FrontendUrl))
@@ -120,14 +132,19 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
       assert(sessionCookie.domain.isEmpty, "host-only on purpose — no Domain attribute")
       assertEquals(cookieOf(res.cookies, AuthSession.StateCookieName).maxAge, Some(0L), "state cookie is cleared")
       assertEquals(me.status, Status.Ok)
-      assert(body.contains("player-"), s"auto-generated nickname expected in $body")
+      assertEquals(user.map(_.nickname), Some(meResp.nickname))
+      assertEquals(
+        Nicknames.validate(meResp.nickname),
+        Right(meResp.nickname),
+        "the auto-generated nickname must self-validate"
+      )
       assert(user.exists(_.isActive))
 
   test("a failed Google exchange answers a generic 500 without the diagnostic detail"):
     for
       (_, _, app) <- fixture
       res         <- app.run(callbackRequest("bad-code", "state-1", Some("state-1")))
-      body        <- res.as[String]
+      body        <- res.bodyText.compile.string
     yield
       assertEquals(res.status, Status.InternalServerError)
       // The Circe entity codec (same import as every other route here) renders a String body as a JSON string.
@@ -173,6 +190,61 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
       assertEquals(gone.status, Status.Unauthorized)
       assertEquals(off.status, Status.Unauthorized)
 
+  test("PATCH /auth/me without a session answers 401"):
+    for
+      (_, _, app) <- fixture
+      res         <- app.run(patchNickname(None, "FreshNick1"))
+    yield assertEquals(res.status, Status.Unauthorized)
+
+  test("PATCH /auth/me validates the format before touching the store"):
+    for
+      (store, session, app) <- fixture
+      user                  <- store.upsertOnLogin("google", "sub-patch-format", None, IO.pure("FormatNick"))
+      token                 <- session.sign(user)
+      short                 <- app.run(patchNickname(Some(token), "ab"))
+      reserved              <- app.run(patchNickname(Some(token), "Admin"))
+      digits                <- app.run(patchNickname(Some(token), "1stPlace"))
+      garbled               <- app.run(
+        Request[IO](Method.PATCH, uri"/auth/me")
+          .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
+          .withEntity("not json")
+      )
+      kept <- store.userById(user.id)
+    yield
+      assertEquals(short.status, Status.BadRequest)
+      assertEquals(reserved.status, Status.BadRequest)
+      assertEquals(digits.status, Status.BadRequest)
+      assertEquals(garbled.status, Status.BadRequest)
+      assertEquals(kept.map(_.nickname), Some("FormatNick"), "a rejected rename must change nothing")
+
+  test("PATCH /auth/me renames on success and answers 409 when the name is taken"):
+    for
+      (store, session, app) <- fixture
+      user                  <- store.upsertOnLogin("google", "sub-patch-a", None, IO.pure("PatchNickA"))
+      _                     <- store.upsertOnLogin("google", "sub-patch-b", None, IO.pure("PatchNickB"))
+      token                 <- session.sign(user)
+      renamed               <- app.run(patchNickname(Some(token), "PatchNickA2"))
+      body                  <- renamed.as[MeResponse]
+      taken                 <- app.run(patchNickname(Some(token), "patchnickb"))
+      stored                <- store.userById(user.id)
+    yield
+      assertEquals(renamed.status, Status.Ok)
+      assertEquals(body.nickname, "PatchNickA2")
+      assertEquals(taken.status, Status.Conflict, "'patchnickb' collides case-insensitively with PatchNickB")
+      assertEquals(stored.map(_.nickname), Some("PatchNickA2"))
+
+  test("PATCH /auth/me racing an account deletion answers 401, not 404"):
+    for
+      (sessionStore, session, _) <- fixture
+      user                       <- sessionStore.upsertOnLogin("google", "sub-patch-race", None, IO.pure("RaceNick"))
+      token                      <- session.sign(user)
+      // The session store still knows the user (the cookie check passes); the routes' store no longer does —
+      // the same two-store technique as the GET test, standing in for a deletion between check and write.
+      empty <- Ref.of[IO, Map[String, UserAccount]](Map.empty).map(StubUsers(_))
+      app = AuthRoutes(session, stubGoogle, empty, FrontendUrl).orNotFound
+      res <- app.run(patchNickname(Some(token), "FreshNick1"))
+    yield assertEquals(res.status, Status.Unauthorized)
+
   test("POST /auth/logout expires the session cookie"):
     for
       (_, _, app) <- fixture
@@ -180,11 +252,3 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
     yield
       assertEquals(res.status, Status.Ok)
       assertEquals(cookieOf(res.cookies, AuthSession.SessionCookieName).maxAge, Some(0L))
-
-  /** Pull the `id` out of the tiny `/auth/me` JSON without a decoder dependency on the response type. */
-  private def extractId(meBody: String): String =
-    val marker = "\"id\":\""
-    val start  = meBody.indexOf(marker)
-    assert(start >= 0, s"no id in $meBody")
-    val from = start + marker.length
-    meBody.substring(from, meBody.indexOf('"', from))

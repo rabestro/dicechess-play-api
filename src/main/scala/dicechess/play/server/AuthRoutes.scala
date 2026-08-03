@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.IO
 import cats.effect.std.Console
-import dicechess.play.store.UserStore
+import dicechess.play.store.{NicknameUpdate, UserStore}
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
@@ -18,6 +18,11 @@ import java.util.Base64
   * would appear HERE only, never on any public wire type.
   */
 final case class MeResponse(id: String, nickname: String) derives Codec.AsObject
+
+/** `PATCH /auth/me`'s body (#234). One field on purpose — every future profile edit should arrive as its own reviewed
+  * field, not ride an anything-goes map.
+  */
+final case class NicknameChange(nickname: String) derives Codec.AsObject
 
 /** Google sign-in (#233, ADR-0017), ported from the hardened dicechess-analytics PR #215 branch:
   *
@@ -36,16 +41,6 @@ final case class MeResponse(id: String, nickname: String) derives Codec.AsObject
 object AuthRoutes:
 
   private val secureRandom = SecureRandom()
-
-  /** Interim nickname source until #234 lands the dictionary generator: unique-enough hex under the store's own
-    * collision retry, and already valid under #234's planned format rules.
-    */
-  private[server] def placeholderNickname: IO[String] =
-    IO {
-      val bytes = new Array[Byte](4)
-      secureRandom.nextBytes(bytes)
-      s"player-${bytes.map("%02x".format(_)).mkString}"
-    }
 
   private def randomState: IO[String] = IO {
     val bytes = new Array[Byte](32)
@@ -80,7 +75,7 @@ object AuthRoutes:
           case (Some(c), Some(s), Some(saved)) if constantTimeEquals(s, saved) =>
             val flow = for
               identity <- google.identityFor(c)
-              user     <- store.upsertOnLogin("google", identity.subject, identity.email, placeholderNickname)
+              user     <- store.upsertOnLogin("google", identity.subject, identity.email, Nicknames.fresh)
               token    <- session.sign(user)
             yield redirect(frontendUrl)
               .addCookie(session.sessionCookie(token))
@@ -99,6 +94,32 @@ object AuthRoutes:
         session.userFor(req).flatMap {
           case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
           case Some(user) => Ok(MeResponse(id = user.id, nickname = user.nickname))
+        }
+
+      // Rename (#234). Format rules live in Nicknames.validate; the store enforces only uniqueness. `UserNotFound`
+      // maps to 401, not 404 — it means the account vanished between the session check and the write (a racing
+      // deletion), which is "you are no longer signed in" from the caller's point of view.
+      case req @ PATCH -> Root / "auth" / "me" =>
+        session.userFor(req).flatMap {
+          case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+          case Some(user) =>
+            req
+              .attemptAs[NicknameChange]
+              .value
+              .flatMap {
+                case Left(failure) => BadRequest(failure.message)
+                case Right(body)   =>
+                  Nicknames.validate(body.nickname) match
+                    case Left(reason) => BadRequest(reason)
+                    case Right(name)  =>
+                      store.updateNickname(user.id, name).flatMap {
+                        case NicknameUpdate.Updated => Ok(MeResponse(id = user.id, nickname = name))
+                        case NicknameUpdate.Taken   =>
+                          IO.pure(Response[IO](Status.Conflict).withEntity("nickname already taken"))
+                        case NicknameUpdate.UserNotFound =>
+                          IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+                      }
+              }
         }
 
       case POST -> Root / "auth" / "logout" =>
