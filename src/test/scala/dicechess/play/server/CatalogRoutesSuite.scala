@@ -11,8 +11,6 @@ import dicechess.play.store.{
   BotSeatPolicy,
   BotStore,
   GameStore,
-  OwnedBot,
-  OwnerClaim,
   WebhookStore
 }
 import io.circe.Json
@@ -46,14 +44,10 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     * unbounded — which is what every pre-#189 test in this file relies on.
     */
   private def stubBots(open: Set[(String, String)], declared: Map[(String, String), Int]): BotStore =
-    new BotStore:
-      def register(team: String, name: String, tokenHash: String, owner: Option[String]): IO[Boolean] = IO.pure(false)
-      def claimOwner(team: String, name: String, owner: String): IO[OwnerClaim] = IO.pure(OwnerClaim.NotRegistered)
-      def releaseOwner(team: String, name: String, owner: String): IO[Boolean]  = IO.pure(false)
-      def botsOwnedBy(owner: String): IO[List[OwnedBot]]                        = IO.pure(Nil)
-      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]            = IO.pure(None)
-      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean] = IO.pure(false)
-      def ratingOf(team: String, name: String): IO[Option[BotRating]]           = IO.pure(None)
+    new UnownedBotStore:
+      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                           = IO.pure(None)
+      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                = IO.pure(false)
+      def ratingOf(team: String, name: String): IO[Option[BotRating]]                          = IO.pure(None)
       def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]    = IO.pure(None)
       def setRatedForHumans(team: String, name: String, rated: Boolean): IO[Option[BotRating]] =
         IO.pure(None)

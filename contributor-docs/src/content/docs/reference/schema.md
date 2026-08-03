@@ -109,6 +109,7 @@ Check constraints:
 
 Indexes:
 
+- `bots_owner_idx` — `CREATE INDEX bots_owner_idx ON public.bots USING btree (owner_external_id) WHERE (owner_external_id IS NOT NULL)`
 - `bots_pkey` — `CREATE UNIQUE INDEX bots_pkey ON public.bots USING btree (team, name)`
 - `bots_token_hash_key` — `CREATE UNIQUE INDEX bots_token_hash_key ON public.bots USING btree (token_hash)`
 

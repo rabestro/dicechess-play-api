@@ -116,7 +116,7 @@ is filled by `POST /me/bots/claim`, which needs **both** credentials: the sessio
 Bearer token proves control of it. Claiming another account's bot is a **409, never a takeover** (a leaked token would
 otherwise steal attribution and rating history); transfer is the current owner calling `DELETE /me/bots/{team}/{name}`,
 so it is explicit on both sides rather than a race. `POST /bot/register` with a session sets the owner in the same
-INSERT. Ownership stays optional — an unowned registered bot behaves exactly as before. This is also what finally arms
+INSERT (the route resolves it via `AuthSession.principalFor`, so the bot API keeps working with no accounts at all). Ownership stays optional — an unowned registered bot behaves exactly as before. This is also what finally arms
 `RatingBatch`'s own-bot rule: it has read `ownerExternalId` since #248 and could only ever decline.
 Human ratings on the public wire (#249): `/leaderboard?kind=bots|players|all` — the default stays **bots** so the
 SPA's existing call is unchanged (the only added field is `kind` on each row; a player row carries `team: null`).

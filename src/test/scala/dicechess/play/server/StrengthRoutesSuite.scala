@@ -16,11 +16,7 @@ import org.http4s.{HttpApp, Method, Request, Status}
   */
 class StrengthRoutesSuite extends munit.CatsEffectSuite:
 
-  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new BotStore:
-    def register(team: String, name: String, tokenHash: String, owner: Option[String]): IO[Boolean] = IO.pure(false)
-    def claimOwner(team: String, name: String, owner: String): IO[OwnerClaim]       = IO.pure(OwnerClaim.NotRegistered)
-    def releaseOwner(team: String, name: String, owner: String): IO[Boolean]        = IO.pure(false)
-    def botsOwnedBy(owner: String): IO[List[OwnedBot]]                              = IO.pure(Nil)
+  private def stubBots(known: Map[(String, String), BotRating]): BotStore = new UnownedBotStore:
     def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                  = IO.pure(None)
     def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]       = IO.pure(false)
     def ratingOf(team: String, name: String): IO[Option[BotRating]]                 = IO.pure(known.get((team, name)))

@@ -302,7 +302,8 @@ object Main extends IOApp.Simple:
                     registry,
                     lobby,
                     mintLimit,
-                    registerLimit
+                    registerLimit,
+                    session = authSession
                   )).orNotFound
               )
             )

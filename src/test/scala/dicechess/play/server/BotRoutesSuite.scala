@@ -649,3 +649,68 @@ class BotRoutesSuite extends munit.CatsEffectSuite:
     app
       .flatMap(_.run(request(Method.POST, uri"/bot/game" / "x" / "resign", None)))
       .map(r => assertEquals(r.status, Status.Unauthorized))
+
+  /** Registering while signed in records the owner in the same INSERT (#253) — the wiring lives in the ROUTE (it
+    * resolves the session), so `BotAuth.register` alone cannot prove it.
+    */
+  test("POST /bot/register under a session records the owner; without one the bot stays unowned"):
+    val secret = "test-session-secret"
+    for
+      bots       <- dicechess.play.store.BotStore.inMemory
+      auth       <- BotAuth.fromSpec("", bots)
+      events     <- BotEvents.create
+      registry   <- GameRegistry.create()
+      challenges <- Challenges.create(events, registry)
+      lobby      <- Lobby.create(registry)
+      limiter    <- AnonMintLimiter.create(limit = 100)
+      accounts   <- cats.effect.Ref.of[IO, Map[String, dicechess.play.store.UserAccount]](Map.empty)
+      users   = OwnerStubUsers(accounts)
+      session = AuthSession(users, secret)
+      user  <- users.upsertOnLogin("google", "sub-bot-owner", None, IO.pure("BotOwner"))
+      token <- session.sign(user)
+      routes = BotRoutes(
+        auth,
+        challenges,
+        events,
+        registry,
+        lobby,
+        limiter,
+        limiter,
+        session = Some(session)
+      ).orNotFound
+      signedIn <- routes.run(
+        Request[IO](Method.POST, uri"/bot/register")
+          .withEntity(RegisterBot("owned", "byme"))
+          .addCookie(org.http4s.RequestCookie(AuthSession.SessionCookieName, token))
+      )
+      anonymous <- routes.run(Request[IO](Method.POST, uri"/bot/register").withEntity(RegisterBot("owned", "nobody")))
+      owned     <- bots.ratingOf("owned", "byme")
+      unowned   <- bots.ratingOf("owned", "nobody")
+    yield
+      assertEquals(signedIn.status, Status.Created)
+      assertEquals(anonymous.status, Status.Created)
+      assertEquals(
+        owned.flatMap(_.ownerExternalId),
+        Some(dicechess.play.core.Principal.User(user.id).externalId),
+        "a signed-in author should not need a follow-up claim"
+      )
+      assertEquals(unowned.flatMap(_.ownerExternalId), None, "the bot API keeps working with no account at all")
+
+/** Just enough `UserStore` for the session check in the register route. */
+final private class OwnerStubUsers(ref: cats.effect.Ref[IO, Map[String, dicechess.play.store.UserAccount]])
+    extends dicechess.play.store.UserStore:
+  import dicechess.play.store.*
+  def upsertOnLogin(p: String, s: String, e: Option[String], n: IO[String]): IO[UserAccount] =
+    (n, IO.realTimeInstant).flatMapN { (nickname, now) =>
+      ref.modify { users =>
+        val user = UserAccount(java.util.UUID.randomUUID().toString, nickname, now, Some(now), isActive = true)
+        (users.updated(s, user), user)
+      }
+    }
+  def userById(id: String): IO[Option[UserAccount]]                        = ref.get.map(_.values.find(_.id == id))
+  def byNickname(nickname: String): IO[Option[UserAccount]]                = IO.pure(None)
+  def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(None)
+  def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
+  def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
+  def guestsOf(userId: String): IO[List[String]]                           = IO.pure(Nil)
+  def deleteUser(userId: String): IO[Boolean]                              = IO.raiseError(AssertionError("unused"))
