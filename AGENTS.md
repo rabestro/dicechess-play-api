@@ -35,8 +35,9 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
 - `server/` — http4s routes and services: `HealthRoutes` (/health, /version), `PlayRoutes`
   (/games + /games/{id}/ws), `LobbyRoutes` (/lobby/seeks), `BotRoutes` (/bot/*),
   `IngestRoutes` (/ingest/games, browser report intake), `AuthRoutes` (/auth/*, Google sign-in,
-  #233), plus `GameRegistry`, `Lobby`, `Challenges`, `BotAuth`, `AuthSession`, `GoogleAuth`,
-  `BotEvents`, `AnonMintLimiter`, `SeatGuard`, `Cors`.
+  #233), `MeRoutes` (guest claims + merged history, #236), plus `GameRegistry`, `Lobby`,
+  `Challenges`, `BotAuth`, `AuthSession`, `GoogleAuth`, `Nicknames`, `BotEvents`,
+  `AnonMintLimiter`, `SeatGuard`, `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
   `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
   V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry, V14 user accounts).
@@ -99,6 +100,12 @@ cannot be made to act as anyone else. Those fields became optional: required onl
 A tokenless `GET /games/{id}/ws` also falls back to the session and reconnects a signed-in player to the single seat
 they occupy (the fix for a lost `?seat=` URL); two seats held by the same account (friend-by-link before the share
 link is used) stays ambiguous, so the join token remains the only way in there.
+Claimed guest history (#236, ADR-0017): `GameResultsStore.playerGamesPage`/`opponentsFor` take a LIST of
+external ids — "the requester" is one account plus every guest id it has claimed, and a merged history is a
+union at READ time (nothing in `game_results`/`game_archive` is ever rewritten). Self-play exclusion in
+`opponentsFor` therefore means "the other seat is also me", which now includes an account vs its own claimed
+guest id. The claim set is owner-only: `GET /players/{guestId}/…` must never resolve a guest id to a
+nickname, or signing up would retroactively deanonymise that id's past games.
 Google sign-in (#233, ADR-0017): `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` +
 `GOOGLE_REDIRECT_URI` + `PLAY_SESSION_SECRET` (all four required, plus persistence) mount the
 `/auth/*` routes; `PLAY_FRONTEND_URL` (default `https://play.jc.id.lv`) is where login/callback

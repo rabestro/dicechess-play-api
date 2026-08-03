@@ -1,5 +1,6 @@
 package dicechess.play.store
 
+import cats.data.NonEmptyList
 import cats.effect.{IO, Resource}
 import cats.effect.std.Console
 import cats.syntax.all.*
@@ -9,6 +10,7 @@ import doobie.implicits.javatimedrivernative.*
 import doobie.postgres.circe.jsonb.implicits.*
 import doobie.hikari.HikariTransactor
 import doobie.util.ExecutionContexts
+import doobie.util.fragments
 import dicechess.play.core.{GameId, GameOver, GameStatus, Principal, Seat, Termination}
 import dicechess.play.ingest.PlaysiteIngest
 import dicechess.play.rating.Glicko
@@ -588,7 +590,7 @@ final class PgGameStore private (xa: Transactor[IO])
   private def pageSide(
       participantCol: String,
       opponentCol: String,
-      externalId: String,
+      externalIds: NonEmptyList[String],
       before: Option[Instant],
       opponent: Option[OpponentFilter],
       povResult: Option[Int],
@@ -598,7 +600,10 @@ final class PgGameStore private (xa: Transactor[IO])
       case OpponentFilter.Bot(id)   => Fragment.const(opponentCol) ++ fr"= $id"
       case OpponentFilter.HumanOnly => Fragment.const(opponentCol) ++ fr"NOT LIKE 'bot:team:%'"
     // The participant match is always present, so this list is never empty — `reduce` (not `reduceOption`) is safe.
-    val predicates = (Fragment.const(participantCol) ++ fr"= $externalId") :: List(
+    // `Fragments.in` (not a hand-built IN-list, and not `= ANY(array)`): it keeps every id a bound parameter while
+    // needing no Postgres array codec — importing one here would also silently replace the deliberate
+    // driver-native java.time mapping this file relies on everywhere else.
+    val predicates = fragments.in(Fragment.const(participantCol), externalIds) :: List(
       before.map(b => fr"finished_at < $b"),
       opponentFrag,
       povResult.map(r => fr"result = $r")
@@ -620,7 +625,7 @@ final class PgGameStore private (xa: Transactor[IO])
     if requesterIsWhite then whitePov else -whitePov
 
   def playerGamesPage(
-      externalId: String,
+      externalIds: List[String],
       before: Option[Instant],
       opponent: Option[OpponentFilter],
       result: Option[PovResultFilter],
@@ -628,12 +633,25 @@ final class PgGameStore private (xa: Transactor[IO])
   ): IO[GameResultsStore.Page] =
     // One row past `limit`, so `hasMore` is exact without a COUNT(*) or a second round trip (same idea as
     // recentResultsFor's own limit-per-branch-then-relimit shape, just with optional filters folded in).
+    // No identities means nothing can match — answer an empty page rather than building a predicate-less query that
+    // would return every game ever played.
+    NonEmptyList.fromList(externalIds) match
+      case None      => IO.pure(GameResultsStore.Page(Nil, hasMore = false))
+      case Some(ids) => pagedResults(ids, before, opponent, result, limit)
+
+  private def pagedResults(
+      externalIds: NonEmptyList[String],
+      before: Option[Instant],
+      opponent: Option[OpponentFilter],
+      result: Option[PovResultFilter],
+      limit: Int
+  ): IO[GameResultsStore.Page] =
     val fetchLimit  = limit + 1
     val whiteBranch =
       pageSide(
         "white_external_id",
         "black_external_id",
-        externalId,
+        externalIds,
         before,
         opponent,
         result.map(povResultValue(_, requesterIsWhite = true)),
@@ -643,7 +661,7 @@ final class PgGameStore private (xa: Transactor[IO])
       pageSide(
         "black_external_id",
         "white_external_id",
-        externalId,
+        externalIds,
         before,
         opponent,
         result.map(povResultValue(_, requesterIsWhite = false)),
@@ -658,29 +676,35 @@ final class PgGameStore private (xa: Transactor[IO])
         GameResultsStore.Page(rows.take(limit).map(PgGameStore.toRow), hasMore = rows.length > limit)
       }
 
-  /** Self-play (`white_external_id = black_external_id`) is excluded from both branches — a game against yourself has
-    * no opponent to aggregate against. `bot_key` collapses every non-bot opponent onto `NULL`, so `GROUP BY bot_key`
-    * yields one row per registered bot plus one row for every human/guest opponent combined.
+  /** Self-play is excluded from both branches — a game against yourself has no opponent to aggregate against, and with
+    * several requester identities (#236) that includes a signed-in player against their own claimed guest id. `bot_key`
+    * collapses every non-bot opponent onto `NULL`, so `GROUP BY bot_key` yields one row per registered bot plus one row
+    * for every human/guest opponent combined.
     */
-  def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] =
-    sql"""SELECT bot_key, count(*)::int AS games,
+  def opponentsFor(externalIds: List[String]): IO[List[OpponentAggregateRow]] =
+    NonEmptyList.fromList(externalIds).fold(IO.pure(List.empty[OpponentAggregateRow]))(opponentAggregates)
+
+  private def opponentAggregates(ids: NonEmptyList[String]): IO[List[OpponentAggregateRow]] =
+    val mine    = (col: String) => fragments.in(Fragment.const(col), ids)
+    val notMine = (col: String) => fr"NOT" ++ fragments.in(Fragment.const(col), ids)
+    val asWhite =
+      fr"""SELECT CASE WHEN black_external_id LIKE 'bot:team:%' THEN black_external_id END AS bot_key,
+                  result AS pov_result, finished_at
+           FROM play.game_results
+           WHERE""" ++ mine("white_external_id") ++ fr"AND" ++ notMine("black_external_id")
+    val asBlack =
+      fr"""SELECT CASE WHEN white_external_id LIKE 'bot:team:%' THEN white_external_id END AS bot_key,
+                  -result AS pov_result, finished_at
+           FROM play.game_results
+           WHERE""" ++ mine("black_external_id") ++ fr"AND" ++ notMine("white_external_id")
+    (fr"""SELECT bot_key, count(*)::int AS games,
                  count(*) FILTER (WHERE pov_result = 1)::int AS wins,
                  count(*) FILTER (WHERE pov_result = 0)::int AS draws,
                  count(*) FILTER (WHERE pov_result = -1)::int AS losses,
                  max(finished_at) AS last_played_at
-          FROM (
-            (SELECT CASE WHEN black_external_id LIKE 'bot:team:%' THEN black_external_id END AS bot_key,
-                    result AS pov_result, finished_at
-             FROM play.game_results
-             WHERE white_external_id = $externalId AND black_external_id <> white_external_id)
-            UNION ALL
-            (SELECT CASE WHEN white_external_id LIKE 'bot:team:%' THEN white_external_id END AS bot_key,
-                    -result AS pov_result, finished_at
-             FROM play.game_results
-             WHERE black_external_id = $externalId AND white_external_id <> black_external_id)
-          ) per_game
+          FROM ((""" ++ asWhite ++ fr") UNION ALL (" ++ asBlack ++ fr""")) per_game
           GROUP BY bot_key
-          ORDER BY games DESC, last_played_at DESC"""
+          ORDER BY games DESC, last_played_at DESC""")
       .query[(Option[String], Int, Int, Int, Int, Instant)]
       .to[List]
       .transact(xa)

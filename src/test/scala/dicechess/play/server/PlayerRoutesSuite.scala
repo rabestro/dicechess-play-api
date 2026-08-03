@@ -34,14 +34,14 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     def finishedRatedSince(since: Instant): IO[List[GameResultRow]]               = IO.pure(Nil)
 
     def playerGamesPage(
-        externalId: String,
+        externalIds: List[String],
         before: Option[Instant],
         opponent: Option[OpponentFilter],
         result: Option[PovResultFilter],
         limit: Int
     ): IO[GameResultsStore.Page] =
-      val filtered = recent.getOrElse(externalId, Nil).filter { row =>
-        val requesterIsWhite = row.whiteExternalId == externalId
+      val filtered = externalIds.flatMap(recent.getOrElse(_, Nil)).distinct.filter { row =>
+        val requesterIsWhite = externalIds.contains(row.whiteExternalId)
         val opponentId       = if requesterIsWhite then row.blackExternalId else row.whiteExternalId
         val beforeOk         = before.forall(row.finishedAt.isBefore)
         val opponentOk       = opponent.forall:
@@ -59,8 +59,8 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
       val sorted = filtered.sortBy(_.finishedAt).reverse
       IO.pure(GameResultsStore.Page(sorted.take(limit), hasMore = sorted.size > limit))
 
-    def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]] =
-      IO.pure(opponents.getOrElse(externalId, Nil))
+    def opponentsFor(externalIds: List[String]): IO[List[OpponentAggregateRow]] =
+      IO.pure(externalIds.flatMap(opponents.getOrElse(_, Nil)))
 
   private def app(
       recent: Map[String, List[GameResultRow]] = Map.empty,

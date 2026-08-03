@@ -504,11 +504,15 @@ trait GameResultsStore:
     */
   def finishedRatedSince(since: java.time.Instant): IO[List[GameResultRow]]
 
-  /** A filtered, keyset-paginated page of `externalId`'s finished games (#173) — the general-purpose sibling of
-    * `recentResultsFor`, which serves only the small fixed-size page a bot's profile glance needs and must stay
-    * unchanged for that caller. Always fetches one row past `limit`, so `GameResultsStore.Page.hasMore` is exact
-    * without a `COUNT(*)` or a second round trip.
+  /** A filtered, keyset-paginated page of finished games (#173) — the general-purpose sibling of `recentResultsFor`,
+    * which serves only the small fixed-size page a bot's profile glance needs and must stay unchanged for that caller.
+    * Always fetches one row past `limit`, so `GameResultsStore.Page.hasMore` is exact without a `COUNT(*)` or a second
+    * round trip.
     *
+    * @param externalIds
+    *   every identity that counts as "the requester". Usually one; a signed-in account passes its own `user:<uuid>`
+    *   PLUS every `guest:<uuid>` it has claimed (#236), which is how a merged history reads as one timeline without
+    *   rewriting a single stored row.
     * @param before
     *   exclusive upper bound on `finished_at`; `None` for the first page.
     * @param opponent
@@ -517,23 +521,26 @@ trait GameResultsStore:
     *   guard against being passed an arbitrary guest id (see `OpponentFilter`'s own doc for why the public route must
     *   never accept one).
     * @param result
-    *   restricts to games with this outcome from `externalId`'s own point of view; `None` for no result filter.
+    *   restricts to games with this outcome from the requester's own point of view; `None` for no result filter.
     */
   def playerGamesPage(
-      externalId: String,
+      externalIds: List[String],
       before: Option[java.time.Instant],
       opponent: Option[OpponentFilter],
       result: Option[PovResultFilter],
       limit: Int
   ): IO[GameResultsStore.Page]
 
-  /** `externalId`'s aggregate W-D-L against every opponent it has played, one row per bot plus one collapsed row for
+  /** The requester's aggregate W-D-L against every opponent it has played, one row per bot plus one collapsed row for
     * every human/guest opponent (#174) — most-played first, ties broken by most recent. Unlike `resultTallyFor`
     * (`LeaderboardStore`, rated-decided games only), this includes casual games: every guest game is casual by
-    * `GameRegistry.isRated`, so a rated-only tally would always be empty for a guest caller. Self-play (both seats the
-    * same participant) is excluded — it has no opponent to aggregate against.
+    * `GameRegistry.isRated`, so a rated-only tally would always be empty for a guest caller.
+    *
+    * `externalIds` carries the same "one requester, possibly several identities" meaning as `playerGamesPage`.
+    * Self-play is excluded, and with several identities that means a game whose OTHER seat is also the requester (a
+    * signed-in player against their own claimed guest id) — it has no opponent to aggregate against either.
     */
-  def opponentsFor(externalId: String): IO[List[OpponentAggregateRow]]
+  def opponentsFor(externalIds: List[String]): IO[List[OpponentAggregateRow]]
 
 object GameResultsStore:
   /** `recentResultsFor`'s default page size — bounds a prolific bot's history to a reasonable page rather than its
