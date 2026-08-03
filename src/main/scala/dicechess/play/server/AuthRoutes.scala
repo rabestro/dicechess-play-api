@@ -174,15 +174,16 @@ object AuthRoutes:
     * the seeds rather than failing the request — the account is real either way.
     */
   private def meResponse(store: UserStore, user: UserAccount, nickname: String): IO[Response[IO]] =
-    store.ratingOf(user.id).flatMap { rating =>
-      val state = rating.getOrElse(UserRating.initial)
-      Ok(
-        MeResponse(
-          id = user.id,
-          nickname = nickname,
-          rating = state.glickoRating,
-          rd = state.glickoRd,
-          provisional = state.glickoRd > Glicko2.ProvisionalDeviationThreshold
+    store
+      .ratingOf(user.id)
+      .flatMap: rating =>
+        val state = rating.getOrElse(UserRating.initial)
+        Ok(
+          MeResponse(
+            id = user.id,
+            nickname = nickname,
+            rating = state.glickoRating,
+            rd = state.glickoRd,
+            provisional = state.glickoRd > Glicko2.ProvisionalDeviationThreshold
+          )
         )
-      )
-    }

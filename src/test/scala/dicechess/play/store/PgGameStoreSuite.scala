@@ -1450,14 +1450,15 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
 
   test("the player leaderboard hides provisional and inactive accounts, and counts rated games only"):
     withContainers { pg =>
-      store(pg).use { db =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
         for
-          converged   <- db.upsertOnLogin("google", "sub-board-conv", None, IO.pure("BoardConverged"))
-          provisional <- db.upsertOnLogin("google", "sub-board-prov", None, IO.pure("BoardProvisional"))
-          opponent    <- db.upsertOnLogin("google", "sub-board-opp", None, IO.pure("BoardOpponent"))
-          ratedId     <- GameId.random
-          casualId    <- GameId.random
-          _           <- db.save(
+          converged     <- db.upsertOnLogin("google", "sub-board-conv", None, IO.pure("BoardConverged"))
+          provisional   <- db.upsertOnLogin("google", "sub-board-prov", None, IO.pure("BoardProvisional"))
+          opponent      <- db.upsertOnLogin("google", "sub-board-opp", None, IO.pure("BoardOpponent"))
+          ratedId       <- GameId.random
+          casualId      <- GameId.random
+          blockedGameId <- GameId.random
+          _             <- db.save(
             ratedId,
             endedResultFixture(Principal.User(converged.id), Principal.User(opponent.id), rated = true)
           )
@@ -1473,14 +1474,25 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             black = RatedIdentity.User(opponent.id),
             blackGlicko = dicechess.play.rating.Glicko(1450.0, 95.0, 0.06)
           )
+          // A CONVERGED but deactivated account: the `is_active` half of the filter would otherwise be untested, and
+          // the public board relies on it to keep a blocked player off the list.
+          blocked <- db.upsertOnLogin("google", "sub-board-blocked", None, IO.pure("BoardBlocked"))
+          _       <- db.applyRatingUpdate(
+            gameId = blockedGameId,
+            white = RatedIdentity.User(blocked.id),
+            whiteGlicko = dicechess.play.rating.Glicko(1700.0, 85.0, 0.06),
+            black = RatedIdentity.User(opponent.id),
+            blackGlicko = dicechess.play.rating.Glicko(1450.0, 95.0, 0.06)
+          )
+          _     <- sql"UPDATE play.users SET is_active = false WHERE id = ${blocked.id}::uuid".update.run.transact(xa)
           board <- db.playerLeaderboard(maxRd = Glicko2.ProvisionalDeviationThreshold)
         yield
-          val listed =
-            board.filter(row => Set("BoardConverged", "BoardProvisional", "BoardOpponent").contains(row.nickname))
+          val mine   = Set("BoardConverged", "BoardProvisional", "BoardOpponent", "BoardBlocked")
+          val listed = board.filter(row => mine.contains(row.nickname))
           assertEquals(
             listed.map(_.nickname),
             List("BoardConverged", "BoardOpponent"),
-            s"a still-provisional account (rd 350) must be absent: ${board.map(_.nickname)}"
+            s"provisional (rd 350) and deactivated accounts must both be absent: ${board.map(_.nickname)}"
           )
           assertEquals(listed.map(_.rating), List(1650.0, 1450.0), "best rating first")
           assertEquals(
@@ -1488,7 +1500,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             Some(ResultTally(1, 0, 0)),
             "the casual game must not appear in the rated W-D-L"
           )
-          assert(provisional.id.nonEmpty)
+          assertEquals(provisional.nickname, "BoardProvisional")
       }
     }
 

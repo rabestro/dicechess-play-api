@@ -181,7 +181,7 @@ object LeaderboardRoutes:
             val maxRd    = Glicko2.ProvisionalDeviationThreshold
             val botRows  = if wantedFor.bots then board.leaderboard(maxRd) else IO.pure(Nil)
             val playRows = if wantedFor.players then board.playerLeaderboard(maxRd) else IO.pure(Nil)
-            (botRows, playRows).flatMapN { (botEntries, playerEntries) =>
+            (botRows, playRows).flatMapN: (botEntries, playerEntries) =>
               // Ranked across both populations by rating, because they ARE one scale — a separate rank per kind would
               // imply two currencies. Ties break exactly as each single-population query already orders.
               val merged = botEntries.map(LeaderboardRoutes.botRow) ++ playerEntries.map(LeaderboardRoutes.playerRow)
@@ -190,7 +190,6 @@ object LeaderboardRoutes:
                 .zipWithIndex
                 .map((row, index) => row.copy(rank = index + 1))
               Ok(Leaderboard(ranked))
-            }
 
       // The account counterpart of `GET /bots/{team}/{name}`, keyed by the only public handle a person has. Not
       // `/players/{something}`: that shape is taken by the guest-history reads, whose path segment is a bare uuid.
@@ -251,7 +250,7 @@ object LeaderboardRoutes:
       board.resultTallyFor(externalId),
       results.recentResultsFor(externalId, RecentGamesShown),
       results.opponentsFor(List(externalId))
-    ).flatMapN { (rating, tally, recent, opponents) =>
+    ).flatMapN: (rating, tally, recent, opponents) =>
       val state = rating.getOrElse(UserRating.initial)
       Ok(
         PlayerProfile(
@@ -267,7 +266,6 @@ object LeaderboardRoutes:
           recent = recent.map(recentGame(externalId, _))
         )
       )
-    }
 
   /** Reframe a stored white-POV row from the profiled bot's point of view. */
   private def recentGame(profiledExternalId: String, row: GameResultRow): RecentGame =
