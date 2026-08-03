@@ -6,7 +6,8 @@ import com.auth0.jwt.algorithms.Algorithm
 import com.auth0.jwt.interfaces.JWTVerifier
 import dicechess.play.core.Principal
 import dicechess.play.store.{UserAccount, UserStore}
-import org.http4s.{Request, ResponseCookie, SameSite}
+import org.http4s.circe.CirceEntityCodec.given
+import org.http4s.{Request, Response, ResponseCookie, SameSite, Status}
 
 import java.util.Date
 import scala.util.Try
@@ -50,12 +51,22 @@ final class AuthSession(store: UserStore, secret: String):
       case None     => IO.pure(None)
       case Some(id) => store.userById(id).map(_.filter(_.isActive))
 
+  /** The session gate every account-facing route starts with: a live account, or one 401. It lives here rather than
+    * being repeated per route file for the same reason the bot-management helpers are shared — the "not signed in"
+    * wording is part of the contract clients read, and two copies would eventually answer differently.
+    */
+  def withUser(req: Request[IO])(f: UserAccount => IO[Response[IO]]): IO[Response[IO]] =
+    userFor(req).flatMap(_.fold(IO.pure(AuthSession.notSignedIn))(f))
+
   def sessionCookie(token: String): ResponseCookie =
     AuthSession.cookie(AuthSession.SessionCookieName, token, AuthSession.SessionTtlSeconds)
 
   def expiredSessionCookie: ResponseCookie = AuthSession.expired(AuthSession.SessionCookieName)
 
 object AuthSession:
+
+  /** The single 401 body for a missing or unusable session, so the two owner surfaces cannot answer differently. */
+  val notSignedIn: Response[IO] = Response[IO](Status.Unauthorized).withEntity("Not signed in")
 
   val SessionCookieName: String = "access_token"
   val StateCookieName: String   = "oauth_state"

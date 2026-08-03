@@ -282,11 +282,11 @@ object Main extends IOApp.Simple:
           // Gated exactly like /auth/* — it needs the same session, and there is nothing to read without persistence.
           // The owner's bot surface (#253/#254): the same operations the bot drives with its Bearer token, reached
           // instead with the owner's session. Needs persistence (ownership is a column) and a session secret.
-          val ownerBots = (pgStore, sessionSecret)
-            .mapN((pg, secret) => OwnerBotRoutes(AuthSession(pg, secret), botAuth, registry))
+          val ownerBots = (authSession, pgStore)
+            .mapN((s, _) => OwnerBotRoutes(s, botAuth, registry))
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
-          val me = (pgStore, sessionSecret)
-            .mapN((pg, secret) => MeRoutes(AuthSession(pg, secret), pg, pg))
+          val me = (authSession, pgStore)
+            .mapN((s, pg) => MeRoutes(s, pg, pg))
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
           EmberServerBuilder
             .default[IO]

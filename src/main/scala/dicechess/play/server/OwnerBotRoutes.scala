@@ -45,15 +45,13 @@ final case class ConfirmRotation(confirm: String) derives Codec.AsObject
   */
 object OwnerBotRoutes:
 
-  private val notSignedIn: Response[IO] = Response[IO](Status.Unauthorized).withEntity("Not signed in")
-
   def apply(session: AuthSession, auth: BotAuth, registry: GameRegistry): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       // Claiming needs BOTH credentials: the session says who is claiming, the bot's Bearer token proves control of it
       // (#253). Neither alone is enough — a session alone would let anyone claim any bot, and a token alone has nobody
       // to claim it for.
       case req @ POST -> Root / "me" / "bots" / "claim" =>
-        withUser(session, req): user =>
+        session.withUser(req): user =>
           BotRoutes.asBot(auth, req).flatMap {
             case None      => IO.pure(Response[IO](Status.Unauthorized).withEntity("bot token required"))
             case Some(bot) =>
@@ -68,7 +66,7 @@ object OwnerBotRoutes:
           }
 
       case req @ GET -> Root / "me" / "bots" =>
-        withUser(session, req)(myBots(auth, _))
+        session.withUser(req)(myBots(auth, _))
 
       // Releasing is the explicit half of a transfer: the bot becomes claimable again, so handing it over does not
       // depend on who calls claim last. Session-only — the owner does not need the bot's token to let it go.
@@ -127,7 +125,7 @@ object OwnerBotRoutes:
       team: String,
       name: String
   )(action: (UserAccount, Principal.Bot) => IO[Response[IO]]): IO[Response[IO]] =
-    withUser(session, req): user =>
+    session.withUser(req): user =>
       val bot: Principal.Bot = Principal.Bot(team, name)
       auth.ratingOf(bot).flatMap {
         case None         => IO.pure(Response[IO](Status.NotFound).withEntity("no such bot"))
@@ -145,8 +143,3 @@ object OwnerBotRoutes:
             owned.map(b => MyBot(b.team, b.name, b.rating, b.rd, b.onLadder, b.openToHumans, b.ratedForHumans))
           )
         )
-
-  private def withUser(session: AuthSession, req: Request[IO])(
-      f: UserAccount => IO[Response[IO]]
-  ): IO[Response[IO]] =
-    session.userFor(req).flatMap(_.fold(IO.pure(notSignedIn))(f))

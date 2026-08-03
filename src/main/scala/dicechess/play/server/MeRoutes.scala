@@ -50,8 +50,6 @@ object MeRoutes:
   private object VsParam     extends OptionalQueryParamDecoderMatcher[String]("vs")
   private object ResultParam extends OptionalQueryParamDecoderMatcher[String]("result")
 
-  private val notSignedIn: Response[IO] = Response[IO](Status.Unauthorized).withEntity("Not signed in")
-
   def apply(
       session: AuthSession,
       users: UserStore,
@@ -59,7 +57,7 @@ object MeRoutes:
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case req @ POST -> Root / "auth" / "me" / "guests" =>
-        withUser(session, req): user =>
+        session.withUser(req): user =>
           req
             .attemptAs[ClaimGuest]
             .value
@@ -77,15 +75,15 @@ object MeRoutes:
                         IO.pure(Response[IO](Status.Conflict).withEntity("that guest id belongs to another account"))
                       // The account vanished between the session check and the write — "no longer signed in", as
                       // everywhere else in this surface.
-                      case GuestLink.UserNotFound => IO.pure(notSignedIn)
+                      case GuestLink.UserNotFound => IO.pure(AuthSession.notSignedIn)
                     }
 
       case req @ GET -> Root / "auth" / "me" / "guests" =>
-        withUser(session, req)(guestsOf(users, _))
+        session.withUser(req)(guestsOf(users, _))
 
       case req @ GET -> Root / "me" / "games" :? LimitParam(limit) +& BeforeParam(before) +& VsParam(vs) +&
           ResultParam(result) =>
-        withUser(session, req): user =>
+        session.withUser(req): user =>
           val validated = for
             parsed    <- parseValidated(limit, "limit")
             beforeAt  <- parseValidated(before, "before")
@@ -105,7 +103,7 @@ object MeRoutes:
               }
 
       case req @ GET -> Root / "me" / "opponents" =>
-        withUser(session, req): user =>
+        session.withUser(req): user =>
           identitiesOf(users, user).flatMap { ids =>
             results.opponentsFor(ids.toList).flatMap(rows => Ok(PlayerOpponents(rows.map(playerOpponent))))
           }
@@ -118,9 +116,6 @@ object MeRoutes:
 
   private def guestsOf(users: UserStore, user: UserAccount): IO[Response[IO]] =
     users.guestsOf(user.id).flatMap(guests => Ok(ClaimedGuests(guests)))
-
-  private def withUser(session: AuthSession, req: Request[IO])(f: UserAccount => IO[Response[IO]]): IO[Response[IO]] =
-    session.userFor(req).flatMap(_.fold(IO.pure(notSignedIn))(f))
 
   private def parseValidated[A](param: Option[ValidatedNel[ParseFailure, A]], name: String): Either[String, Option[A]] =
     param match
