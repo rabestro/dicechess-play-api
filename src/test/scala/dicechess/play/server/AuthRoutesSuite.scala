@@ -233,6 +233,18 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
       assertEquals(taken.status, Status.Conflict, "'patchnickb' collides case-insensitively with PatchNickB")
       assertEquals(stored.map(_.nickname), Some("PatchNickA2"))
 
+  test("PATCH /auth/me racing an account deletion answers 401, not 404"):
+    for
+      (sessionStore, session, _) <- fixture
+      user                       <- sessionStore.upsertOnLogin("google", "sub-patch-race", None, IO.pure("RaceNick"))
+      token                      <- session.sign(user)
+      // The session store still knows the user (the cookie check passes); the routes' store no longer does —
+      // the same two-store technique as the GET test, standing in for a deletion between check and write.
+      empty <- Ref.of[IO, Map[String, UserAccount]](Map.empty).map(StubUsers(_))
+      app = AuthRoutes(session, stubGoogle, empty, FrontendUrl).orNotFound
+      res <- app.run(patchNickname(Some(token), "FreshNick1"))
+    yield assertEquals(res.status, Status.Unauthorized)
+
   test("POST /auth/logout expires the session cookie"):
     for
       (_, _, app) <- fixture
