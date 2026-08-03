@@ -808,6 +808,42 @@ final class PgGameStore private (xa: Transactor[IO])
         LeaderboardEntry(team, name, rating, rd, onLadder, ResultTally(wins, draws, losses))
       })
 
+  /** The account half of the same board (#249) — deliberately the SAME shape of query as `leaderboard` above, joining
+    * `users` against the rated W-D-L aggregated from `game_results` by the account's `user:` external id. A player's
+    * CLAIMED guest games are not counted here even though `/me/games` merges them: this is a public read, and folding
+    * that history in would retroactively deanonymise every anonymous game the id ever played (#236).
+    */
+  def playerLeaderboard(maxRd: Double): IO[List[PlayerLeaderboardEntry]] =
+    sql"""SELECT u.nickname, u.glicko_rating, u.glicko_rd,
+                 COALESCE(t.wins, 0), COALESCE(t.draws, 0), COALESCE(t.losses, 0)
+          FROM play.users u
+          LEFT JOIN (
+            SELECT external_id, SUM(win) AS wins, SUM(draw) AS draws, SUM(loss) AS losses
+            FROM (
+              SELECT white_external_id AS external_id,
+                     CASE WHEN result = 1  THEN 1 ELSE 0 END AS win,
+                     CASE WHEN result = 0  THEN 1 ELSE 0 END AS draw,
+                     CASE WHEN result = -1 THEN 1 ELSE 0 END AS loss
+              FROM play.game_results WHERE rated = true AND result IS NOT NULL
+              UNION ALL
+              SELECT black_external_id,
+                     CASE WHEN result = -1 THEN 1 ELSE 0 END,
+                     CASE WHEN result = 0  THEN 1 ELSE 0 END,
+                     CASE WHEN result = 1  THEN 1 ELSE 0 END
+              FROM play.game_results WHERE rated = true AND result IS NOT NULL
+            ) sides
+            GROUP BY external_id
+          ) t ON t.external_id = 'user:' || u.id::text
+          WHERE u.glicko_rd <= $maxRd AND u.is_active
+          ORDER BY u.glicko_rating DESC, u.glicko_rd ASC, u.nickname"""
+      .query[(String, Double, Double, Int, Int, Int)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map { case (nickname, rating, rd, wins, draws, losses) =>
+        PlayerLeaderboardEntry(nickname, rating, rd, ResultTally(wins, draws, losses))
+      })
+
   def resultTallyFor(externalId: String): IO[ResultTally] =
     sql"""SELECT
             COALESCE(SUM(CASE WHEN (white_external_id = $externalId AND result = 1)
@@ -892,6 +928,18 @@ final class PgGameStore private (xa: Transactor[IO])
     selectUser(id).option
       .transact(xa)
       .timeout(SaveTimeout)
+
+  /** Case-insensitive by `lower(nickname)` — the same expression V14's unique index is built on, so this lookup uses
+    * that index rather than scanning.
+    */
+  def byNickname(nickname: String): IO[Option[UserAccount]] =
+    sql"""SELECT id::text, nickname, created_at, last_login_at, is_active
+          FROM play.users WHERE lower(nickname) = lower($nickname)"""
+      .query[(String, String, Instant, Option[Instant], Boolean)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(UserAccount.apply.tupled))
 
   def ratingOf(userId: String): IO[Option[UserRating]] =
     sql"""SELECT glicko_rating, glicko_rd, glicko_vol FROM play.users WHERE id = $userId::uuid"""

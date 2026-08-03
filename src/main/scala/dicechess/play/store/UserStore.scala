@@ -73,6 +73,12 @@ trait UserStore:
   /** The per-request session check reads the live row — the JWT is never trusted for `isActive`/existence. */
   def userById(id: String): IO[Option[UserAccount]]
 
+  /** An account by its public nickname, case-insensitively — the lookup behind the public profile (#249). The nickname
+    * is the ONLY public handle an account has: `user:<uuid>` must never appear on a public wire type, and a nickname is
+    * what one player can actually type after seeing another across a board.
+    */
+  def byNickname(nickname: String): IO[Option[UserAccount]]
+
   /** An account's rating state (#247). Separate from [[userById]] because the two have different readers: every
     * authenticated request needs the account, only rating-aware surfaces need the triple. `None` for an unknown id.
     */
