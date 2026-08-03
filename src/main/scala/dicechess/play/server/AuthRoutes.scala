@@ -24,6 +24,11 @@ final case class MeResponse(id: String, nickname: String) derives Codec.AsObject
   */
 final case class NicknameChange(nickname: String) derives Codec.AsObject
 
+/** `DELETE /auth/me`'s body (#237): `confirm` must echo the account's own nickname. A typed statement of intent for the
+  * one irreversible operation in this surface — see the route for why it is not about CSRF.
+  */
+final case class DeleteAccount(confirm: String) derives Codec.AsObject
+
 /** Google sign-in (#233, ADR-0017), ported from the hardened dicechess-analytics PR #215 branch:
   *
   *   - `GET /auth/login` → 303 to Google, with a random `state` in a short-lived cookie (CSRF protection for the
@@ -119,6 +124,37 @@ object AuthRoutes:
                         case NicknameUpdate.UserNotFound =>
                           IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
                       }
+              }
+        }
+
+      // Self-service deletion (#237). GDPR-lite: registration does not ship without a way out.
+      //
+      // The body must echo the account's own nickname. Not CSRF protection — `SameSite=Lax` plus a non-simple method
+      // already means no cross-site page can send this — but a guard against a mis-wired client irreversibly deleting
+      // the wrong account: the one thing here that cannot be undone deserves an explicit statement of intent.
+      //
+      // History is deliberately NOT rewritten. `user_identities` and `user_guest_links` cascade away (V14), so the
+      // `user:<uuid>` left in `game_results`/`game_archive` stops resolving to anything — anonymisation without
+      // touching immutable records or the analytics rows already delivered. An active game is left to the room's own
+      // disconnect grace, exactly as if the player had closed the tab; there is no special case for it.
+      case req @ DELETE -> Root / "auth" / "me" =>
+        session.userFor(req).flatMap {
+          case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
+          case Some(user) =>
+            req
+              .attemptAs[DeleteAccount]
+              .value
+              .flatMap {
+                case Left(failure) => BadRequest(failure.message)
+                case Right(body)   =>
+                  if !body.confirm.trim.equalsIgnoreCase(user.nickname) then
+                    BadRequest("confirm must be your current nickname")
+                  else
+                    // The store's `false` (already gone — a racing delete) gets the same 204: the caller's goal is met
+                    // either way, and a 404 would only invite a pointless retry.
+                    store
+                      .deleteUser(user.id)
+                      .as(Response[IO](Status.NoContent).addCookie(session.expiredSessionCookie))
               }
         }
 

@@ -106,6 +106,12 @@ union at READ time (nothing in `game_results`/`game_archive` is ever rewritten).
 `opponentsFor` therefore means "the other seat is also me", which now includes an account vs its own claimed
 guest id. The claim set is owner-only: `GET /players/{guestId}/…` must never resolve a guest id to a
 nickname, or signing up would retroactively deanonymise that id's past games.
+Account deletion (#237, ADR-0017): `DELETE /auth/me` requires the body to echo the account's own nickname —
+not CSRF protection (`SameSite=Lax` + a non-simple method already covers that) but a guard against a mis-wired
+client irreversibly deleting the wrong account. History is NOT rewritten: identities and guest links cascade
+(V14) and the `user:<uuid>` left in `game_results`/`game_archive` simply stops resolving, which anonymises it
+without touching immutable records. The freed nickname becomes reusable, and re-signing-in with the same
+Google subject mints a FRESH account with no history.
 Google sign-in (#233, ADR-0017): `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` +
 `GOOGLE_REDIRECT_URI` + `PLAY_SESSION_SECRET` (all four required, plus persistence) mount the
 `/auth/*` routes; `PLAY_FRONTEND_URL` (default `https://play.jc.id.lv`) is where login/callback
