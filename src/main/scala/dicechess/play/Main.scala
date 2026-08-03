@@ -24,6 +24,7 @@ import dicechess.play.server.{
   LeaderboardRoutes,
   Lobby,
   LobbyRoutes,
+  MeRoutes,
   PlayerRoutes,
   PlayRoutes,
   SeatGuard,
@@ -264,6 +265,11 @@ object Main extends IOApp.Simple:
               AuthRoutes(s, GoogleAuth.live(gc), pg, frontendUrl)
             }
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
+          // The signed-in player's own surface (#236): guest claims plus the merged history those claims produce.
+          // Gated exactly like /auth/* — it needs the same session, and there is nothing to read without persistence.
+          val me = (pgStore, sessionSecret)
+            .mapN((pg, secret) => MeRoutes(AuthSession(pg, secret), pg, pg))
+            .getOrElse(org.http4s.HttpRoutes.empty[IO])
           EmberServerBuilder
             .default[IO]
             .withHost(host)
@@ -275,7 +281,7 @@ object Main extends IOApp.Simple:
                   authSession
                 ) <+>
                   leaderboard <+>
-                  catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+>
+                  catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+> me <+>
                   WebhookRoutes(botAuth, webhookService, webhookLimit, pgStore) <+>
                   BotRoutes(
                     botAuth,

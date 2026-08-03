@@ -110,7 +110,7 @@ object LeaderboardRoutes:
               (
                 board.resultTallyFor(externalId),
                 results.recentResultsFor(externalId, RecentGamesShown),
-                results.opponentsFor(externalId)
+                results.opponentsFor(List(externalId))
               ).flatMapN: (tally, recent, opponents) =>
                 Ok(
                   BotProfile(

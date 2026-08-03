@@ -139,16 +139,16 @@ object PlayerRoutes:
           case Right((guest, parsed, beforeAt, vsFilter, povResult)) =>
             val bounded = parsed.fold(DefaultLimit)(requested => math.max(1, math.min(requested, MaxLimit)))
             results
-              .playerGamesPage(guest.externalId, beforeAt, vsFilter, povResult, bounded)
+              .playerGamesPage(List(guest.externalId), beforeAt, vsFilter, povResult, bounded)
               .flatMap { page =>
-                Ok(PlayerGames(page.games.map(playerGame(guest.externalId, _)), page.hasMore))
+                Ok(PlayerGames(page.games.map(playerGame(Set(guest.externalId), _)), page.hasMore))
               }
 
       case GET -> Root / "players" / guestId / "opponents" =>
         Principal.guest(guestId) match
           case Left(error)  => BadRequest(error)
           case Right(guest) =>
-            results.opponentsFor(guest.externalId).flatMap(rows => Ok(PlayerOpponents(rows.map(playerOpponent))))
+            results.opponentsFor(List(guest.externalId)).flatMap(rows => Ok(PlayerOpponents(rows.map(playerOpponent))))
 
   /** Surfaces a malformed validating query param as the same `Left(message)` shape `Principal.guest` already uses,
     * instead of `OptionalQueryParamDecoderMatcher`'s silent match failure (which would otherwise 404 the whole route
@@ -166,7 +166,7 @@ object PlayerRoutes:
     * particular a bare guest id is never accepted here, by construction — there is no code path from an arbitrary
     * string to `OpponentFilter.Bot` other than the team/name split below.
     */
-  private def parseVs(vs: Option[String]): Either[String, Option[OpponentFilter]] =
+  private[server] def parseVs(vs: Option[String]): Either[String, Option[OpponentFilter]] =
     vs match
       case None          => Right(None)
       case Some("human") => Right(Some(OpponentFilter.HumanOnly))
@@ -176,7 +176,7 @@ object PlayerRoutes:
             Right(Some(OpponentFilter.Bot(Principal.Bot(team, name).externalId)))
           case _ => Left(s"vs: '$spec' must be 'human' or '<team>/<name>'")
 
-  private def parseResult(result: Option[String]): Either[String, Option[PovResultFilter]] =
+  private[server] def parseResult(result: Option[String]): Either[String, Option[PovResultFilter]] =
     result match
       case None         => Right(None)
       case Some("win")  => Right(Some(PovResultFilter.Win))
@@ -184,11 +184,13 @@ object PlayerRoutes:
       case Some("loss") => Right(Some(PovResultFilter.Loss))
       case Some(other)  => Left(s"result: '$other' must be 'win', 'draw', or 'loss'")
 
-  /** Reframe a stored white-POV row from the requesting guest's point of view — the same transform as
-    * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots.
+  /** Reframe a stored white-POV row from the requester's point of view — the same transform as
+    * `LeaderboardRoutes.recentGame`, generalised to any principal instead of only bots. `requesterIds` is a set because
+    * a signed-in account is several identities at once (its own plus every claimed guest id, #236); the White seat
+    * being one of them is what "I played White" means.
     */
-  private def playerGame(requesterExternalId: String, row: GameResultRow): PlayerGame =
-    val requesterIsWhite   = row.whiteExternalId == requesterExternalId
+  private[server] def playerGame(requesterIds: Set[String], row: GameResultRow): PlayerGame =
+    val requesterIsWhite   = requesterIds.contains(row.whiteExternalId)
     val (seat, opponentId) =
       if requesterIsWhite then (Seat.White, row.blackExternalId) else (Seat.Black, row.whiteExternalId)
     val opponent = Principal.fromBotExternalId(opponentId) match

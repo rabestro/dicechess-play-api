@@ -905,12 +905,12 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           idMiddle  <- GameId.random
           _         <- db.save(idMiddle, endedResultFixture(opponent, participant))
           middleRow <- db
-            .playerGamesPage(participant.externalId, None, None, None, limit = 100)
+            .playerGamesPage(List(participant.externalId), None, None, None, limit = 100)
             .map(_.games.find(_.gameId.value == idMiddle.value).getOrElse(fail("middle row not found")))
           _        <- IO.sleep(20.millis)
           idNewest <- GameId.random
           _        <- db.save(idNewest, endedResultFixture(participant, opponent))
-          page     <- db.playerGamesPage(participant.externalId, Some(middleRow.finishedAt), None, None, limit = 100)
+          page <- db.playerGamesPage(List(participant.externalId), Some(middleRow.finishedAt), None, None, limit = 100)
         yield
           val ids = page.games.map(_.gameId.value)
           assert(!ids.contains(idNewest.value), "newer than `before` excluded")
@@ -928,8 +928,8 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _         <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, opponent)))
           _         <- GameId.random.flatMap(db.save(_, endedResultFixture(opponent, participant)))
           _         <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, opponent)))
-          fullPage  <- db.playerGamesPage(participant.externalId, None, None, None, limit = 3)
-          shortPage <- db.playerGamesPage(participant.externalId, None, None, None, limit = 2)
+          fullPage  <- db.playerGamesPage(List(participant.externalId), None, None, None, limit = 3)
+          shortPage <- db.playerGamesPage(List(participant.externalId), None, None, None, limit = 2)
         yield
           assertEquals(fullPage.hasMore, false, "exactly 3 rows fit a limit-3 page")
           assertEquals(shortPage.hasMore, true, "3 rows do not fit a limit-2 page")
@@ -948,7 +948,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           idVsB <- GameId.random
           _     <- db.save(idVsB, endedResultFixture(botB, participant))
           page  <- db.playerGamesPage(
-            participant.externalId,
+            List(participant.externalId),
             None,
             Some(OpponentFilter.Bot(botA.externalId)),
             None,
@@ -969,7 +969,13 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _         <- db.save(idVsBot, endedResultFixture(participant, bot))
           idVsHuman <- GameId.random
           _         <- db.save(idVsHuman, endedResultFixture(human, participant))
-          page <- db.playerGamesPage(participant.externalId, None, Some(OpponentFilter.HumanOnly), None, limit = 100)
+          page      <- db.playerGamesPage(
+            List(participant.externalId),
+            None,
+            Some(OpponentFilter.HumanOnly),
+            None,
+            limit = 100
+          )
         yield assertEquals(page.games.map(_.gameId.value), List(idVsHuman.value))
       }
     }
@@ -987,7 +993,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _ <- db.save(idWinAsBlack, endedResultFixture(opponent, participant, result = GameResult.Win(Side.Black)))
           idLoss <- GameId.random
           _      <- db.save(idLoss, endedResultFixture(participant, opponent, result = GameResult.Win(Side.Black)))
-          wins   <- db.playerGamesPage(participant.externalId, None, None, Some(PovResultFilter.Win), limit = 100)
+          wins   <- db.playerGamesPage(List(participant.externalId), None, None, Some(PovResultFilter.Win), limit = 100)
         yield assertEquals(
           wins.games.map(_.gameId.value).toSet,
           Set(idWinAsWhite.value, idWinAsBlack.value),
@@ -1008,7 +1014,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(bot, participant)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, humanA)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(humanB, participant)))
-          rows <- db.opponentsFor(participant.externalId)
+          rows <- db.opponentsFor(List(participant.externalId))
           byBotKey = rows.map(r => r.botExternalId -> r.games).toMap
         yield
           assertEquals(byBotKey.get(Some(bot.externalId)), Some(2), s"both bot games grouped together: $rows")
@@ -1031,7 +1037,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
             db.save(_, endedResultFixture(bot, participant, result = GameResult.Win(Side.Black)))
           )
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, bot, result = GameResult.Draw)))
-          rows <- db.opponentsFor(participant.externalId)
+          rows <- db.opponentsFor(List(participant.externalId))
           botRow = rows.find(_.botExternalId.contains(bot.externalId)).getOrElse(fail(s"no row for the bot: $rows"))
         yield
           assertEquals(botRow.games, 3)
@@ -1047,7 +1053,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
         val soloPlayer = Principal.Guest("b3-selfplay-participant")
         for
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(soloPlayer, soloPlayer)))
-          rows <- db.opponentsFor(soloPlayer.externalId)
+          rows <- db.opponentsFor(List(soloPlayer.externalId))
         yield assertEquals(rows, Nil, s"self-play must not appear as an opponent row: $rows")
       }
     }
@@ -1062,7 +1068,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, quietBot)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(participant, busyBot)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(busyBot, participant)))
-          rows <- db.opponentsFor(participant.externalId)
+          rows <- db.opponentsFor(List(participant.externalId))
         yield assertEquals(
           rows.map(_.botExternalId),
           List(Some(busyBot.externalId), Some(quietBot.externalId)),
@@ -1073,7 +1079,9 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
 
   test("opponentsFor is empty for a participant with no games (#174)"):
     withContainers { pg =>
-      store(pg).use(db => db.opponentsFor(Principal.Guest("b3-opponents-nobody").externalId).map(assertEquals(_, Nil)))
+      store(pg).use(db =>
+        db.opponentsFor(List(Principal.Guest("b3-opponents-nobody").externalId)).map(assertEquals(_, Nil))
+      )
     }
 
   test("opponentsFor works the same when the participant is a bot: opponents itemized, humans collapsed (#182)"):
@@ -1089,7 +1097,7 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(profiledBot, otherBot, rated = true)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(humanA, profiledBot, rated = false)))
           _    <- GameId.random.flatMap(db.save(_, endedResultFixture(profiledBot, humanB, rated = false)))
-          rows <- db.opponentsFor(profiledBot.externalId)
+          rows <- db.opponentsFor(List(profiledBot.externalId))
           byBotKey = rows.map(r => r.botExternalId -> r.games).toMap
         yield
           assertEquals(byBotKey.get(Some(otherBot.externalId)), Some(1), s"the other bot itemized: $rows")
@@ -1345,6 +1353,47 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assertEquals(tally, ResultTally(1, 0, 0), "game_results keeps the orphaned user: external id")
           assertEquals(reclaim, GuestLink.Linked, "the guest link cascaded, so the id is claimable again")
           assert(!missing, "a second delete finds nothing")
+      }
+    }
+
+  // ── Merged history over several identities (#236) ────────────────────────────
+
+  test("a merged history reads games from every one of the requester's identities, self-play aside"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        // One account plus a guest id it claimed: three games, one of them account-vs-own-guest (self-play once
+        // merged, so it has no opponent to aggregate and must not appear in the opponents breakdown).
+        val account = Principal.User("0197f0a0-0000-7000-8000-00000000d236")
+        val claimed = Principal.Guest("0197f0a0-0000-7000-8000-00000000d237")
+        val bot     = Principal.Bot("merge-team", "merge-bot")
+        val ids     = List(account.externalId, claimed.externalId)
+        for
+          asAccount   <- GameId.random
+          asGuest     <- GameId.random
+          selfPlay    <- GameId.random
+          _           <- db.save(asAccount, endedResultFixture(account, bot))
+          _           <- db.save(asGuest, endedResultFixture(bot, claimed))
+          _           <- db.save(selfPlay, endedResultFixture(account, claimed))
+          merged      <- db.playerGamesPage(ids, None, None, None, limit = 100)
+          accountOnly <- db.playerGamesPage(List(account.externalId), None, None, None, limit = 100)
+          opponents   <- db.opponentsFor(ids)
+        yield
+          assertEquals(
+            merged.games.map(_.gameId.value).toSet,
+            Set(asAccount.value, asGuest.value, selfPlay.value),
+            "both identities' games appear once each, self-play included (it is still my game)"
+          )
+          assertEquals(
+            accountOnly.games.map(_.gameId.value).toSet,
+            Set(asAccount.value, selfPlay.value),
+            "without the claim, the guest's game is not mine"
+          )
+          assertEquals(
+            opponents.map(_.botExternalId),
+            List(Some(bot.externalId)),
+            "the bot is the only opponent — the self-play row has none once both seats are me"
+          )
+          assertEquals(opponents.map(_.games), List(2))
       }
     }
 
