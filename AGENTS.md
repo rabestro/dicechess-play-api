@@ -40,7 +40,7 @@ which wires opt-in persistence and ingest from env vars. Under `src/main/scala/d
   `AnonMintLimiter`, `SeatGuard`, `Cors`.
 - `store/` — `GameStore`/`PgGameStore`: doobie + Flyway, jsonb snapshots; migrations in
   `src/main/resources/db/migration/` (V1 games, V2 outbox, V3 bots, ..., V11 client_reports,
-  V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry, V14 user accounts).
+  V12 per-bot `max_concurrent_games`, V13 webhook delivery telemetry, V14 user accounts, V15 human rating state).
 - `ingest/` — `PlaysiteIngest` + `IngestDeliverer`: transactional outbox → analytics, plus a
   second deliverer instance draining browser reports from `client_reports` (#212).
 - `wire/Codecs.scala` — Circe codecs; the wire contract.
@@ -100,6 +100,13 @@ cannot be made to act as anyone else. Those fields became optional: required onl
 A tokenless `GET /games/{id}/ws` also falls back to the session and reconnects a signed-in player to the single seat
 they occupy (the fix for a lost `?seat=` URL); two seats held by the same account (friend-by-link before the share
 link is used) stays ambiguous, so the join token remains the only way in there.
+Human ratings (#247/#238, ADR-0017): V15 PREPARES the shared scale — accounts carry the same Glicko-2 triple as
+bots (seeds 1500/350/0.06) because there is ONE scale, which is what makes the two populations comparable and what
+solves cold start. Nothing computes a human rating yet: `RatingBatch` stays bot-vs-bot until #248.
+`PLAY_RATED_FOR_HUMANS` (`;`-separated `team|name`, same grammar as `PLAY_OPEN_TO_HUMANS`) is the operator-only
+roster marking which bots are ELIGIBLE for a human-vs-bot game to count. **Never expose `bots.rated_for_humans` on the bot API**:
+its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one
+would register a weak bot and farm rating off it. Both rosters are additive — a typo narrows what is enabled.
 Claimed guest history (#236, ADR-0017): `GameResultsStore.playerGamesPage`/`opponentsFor` take a LIST of
 external ids — "the requester" is one account plus every guest id it has claimed, and a merged history is a
 union at READ time (nothing in `game_results`/`game_archive` is ever rewritten). Self-play exclusion in

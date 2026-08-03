@@ -330,25 +330,35 @@ final class PgGameStore private (xa: Transactor[IO])
       .map(_ == 1)
 
   def ratingOf(team: String, name: String): IO[Option[BotRating]] =
-    sql"""SELECT glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id
+    sql"""SELECT glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id, rated_for_humans
           FROM play.bots WHERE team = $team AND name = $name"""
-      .query[(Double, Double, Double, Boolean, Option[String])]
+      .query[(Double, Double, Double, Boolean, Option[String], Boolean)]
       .option
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
+      .map(_.map(PgGameStore.toBotRating))
 
   /** `RETURNING` in the same statement: the update and the read of its result are one round trip, so there's no window
     * for a concurrent change to make the returned state stale.
     */
   def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]] =
     sql"""UPDATE play.bots SET on_ladder = $onLadder WHERE team = $team AND name = $name
-          RETURNING glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id"""
-      .query[(Double, Double, Double, Boolean, Option[String])]
+          RETURNING glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id, rated_for_humans"""
+      .query[(Double, Double, Double, Boolean, Option[String], Boolean)]
       .option
       .transact(xa)
       .timeout(SaveTimeout)
-      .map(_.map { case (rating, rd, vol, onLadder, owner) => BotRating(rating, rd, vol, onLadder, owner) })
+      .map(_.map(PgGameStore.toBotRating))
+
+  /** The operator-only counterpart of `setOnLadder` (#247) — same single-round-trip `RETURNING` shape. */
+  def setRatedForHumans(team: String, name: String, ratedForHumans: Boolean): IO[Option[BotRating]] =
+    sql"""UPDATE play.bots SET rated_for_humans = $ratedForHumans WHERE team = $team AND name = $name
+          RETURNING glicko_rating, glicko_rd, glicko_vol, on_ladder, owner_external_id, rated_for_humans"""
+      .query[(Double, Double, Double, Boolean, Option[String], Boolean)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(PgGameStore.toBotRating))
 
   /** The scheduler's whole candidate read in one query (#189): being on the ladder, the declared capacity, and the
     * catalog flag that reserves part of it all come off the same row, so there is no reason to make it three.
@@ -874,6 +884,14 @@ final class PgGameStore private (xa: Transactor[IO])
       .transact(xa)
       .timeout(SaveTimeout)
 
+  def ratingOf(userId: String): IO[Option[UserRating]] =
+    sql"""SELECT glicko_rating, glicko_rd, glicko_vol FROM play.users WHERE id = $userId::uuid"""
+      .query[(Double, Double, Double)]
+      .option
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(UserRating.apply.tupled))
+
   def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
     sql"""UPDATE play.users SET nickname = $nickname WHERE id = $userId::uuid""".update.run
       .transact(xa)
@@ -975,6 +993,13 @@ object PgGameStore:
               case GameStatus.Active   => Left("column says ended but the snapshot says active — investigate")
               case GameStatus.Ended(_) =>
                 Left(s"ended but missing a player seat (${snapshot.players.keySet}) — investigate")
+
+  /** The `bots` rating projection, in one place: the column list appears in three statements (read, two operator
+    * updates) and the tuple shape must not drift between them.
+    */
+  private def toBotRating(row: (Double, Double, Double, Boolean, Option[String], Boolean)): BotRating =
+    val (rating, rd, vol, onLadder, owner, ratedForHumans) = row
+    BotRating(rating, rd, vol, onLadder, owner, ratedForHumans)
 
   private type ResultTuple =
     (String, String, String, Option[Int], String, Boolean, String, String, Option[String], Boolean, Instant)

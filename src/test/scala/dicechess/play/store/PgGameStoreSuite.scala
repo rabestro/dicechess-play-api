@@ -1397,6 +1397,56 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
+  // ── Rating state for accounts + the curated flag (#247) ─────────────────────
+
+  test("a fresh account starts on the same Glicko seeds as a fresh bot, and the curated flag defaults to false"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          user       <- db.upsertOnLogin("google", "sub-rating-seed", None, IO.pure("SeedNick"))
+          userRating <- db.ratingOf(user.id)
+          _          <- db.register("rating-team", "seed-bot", "hash-rating-seed")
+          botRating  <- db.ratingOf("rating-team", "seed-bot")
+          missing    <- db.ratingOf(UUID.randomUUID().toString)
+        yield
+          assertEquals(userRating, Some(UserRating.initial), "1500/350/0.06 — the same seeds V4 gave bots")
+          assertEquals(
+            userRating.map(_.glicko),
+            botRating.map(_.glicko),
+            "one shared scale: an account and a bot must start from the identical pure-math state"
+          )
+          assertEquals(botRating.map(_.ratedForHumans), Some(false), "curated-for-rating is opt-in by an operator")
+          assertEquals(missing, None)
+      }
+    }
+
+  test("the curated flag is settable through the operator path and independent of the self-service flags"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          _ <- db.register("rating-team", "curated-bot", "hash-rating-curated")
+          // The two self-service flags a bot sets with its own token must not move the rating flag.
+          _         <- db.setOnLadder("rating-team", "curated-bot", onLadder = true)
+          _         <- db.openToHumans("rating-team", "curated-bot", Some("plays anyone"))
+          selfOnly  <- db.ratingOf("rating-team", "curated-bot")
+          curated   <- db.setRatedForHumans("rating-team", "curated-bot", ratedForHumans = true)
+          reread    <- db.ratingOf("rating-team", "curated-bot")
+          uncurated <- db.setRatedForHumans("rating-team", "curated-bot", ratedForHumans = false)
+          ghost     <- db.setRatedForHumans("rating-team", "no-such-bot", ratedForHumans = true)
+        yield
+          assertEquals(
+            selfOnly.map(_.ratedForHumans),
+            Some(false),
+            "on_ladder and open_to_humans are self-service — neither may imply rated_for_humans"
+          )
+          assertEquals(curated.map(_.ratedForHumans), Some(true))
+          assertEquals(reread.map(_.ratedForHumans), Some(true), "the flag is persisted, not just returned")
+          assert(curated.exists(_.onLadder), "the operator write must not clobber the bot's own ladder state")
+          assertEquals(uncurated.map(_.ratedForHumans), Some(false), "an operator can take it away again")
+          assertEquals(ghost, None, "an unregistered identity has no row to flag")
+      }
+    }
+
   private def sha256Hex(hexSeed: String): String =
     val bytes = hexSeed.grouped(2).map(p => Integer.parseInt(p, 16).toByte).toArray
     MessageDigest.getInstance("SHA-256").digest(bytes).map(b => f"${b & 0xff}%02x").mkString

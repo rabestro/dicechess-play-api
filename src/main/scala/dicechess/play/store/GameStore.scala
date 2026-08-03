@@ -180,7 +180,10 @@ final case class BotRating(
     glickoRd: Double,
     glickoVol: Double,
     onLadder: Boolean,
-    ownerExternalId: Option[String]
+    ownerExternalId: Option[String],
+    // Whether a game against a HUMAN counts for rating (#247). Operator-only, unlike `onLadder` right above it —
+    // see V15's own comment for why the rated party must never be able to set this.
+    ratedForHumans: Boolean = false
 ):
   /** The pure-math view of this state, as `Glicko2.update` consumes and produces it. */
   def glicko: dicechess.play.rating.Glicko =
@@ -190,7 +193,14 @@ object BotRating:
   /** A freshly registered bot's starting state: Glickman's suggested defaults for a new, unrated player, opted out of
     * the ladder until explicitly turned on.
     */
-  val initial: BotRating = BotRating(glickoRating = 1500, glickoRd = 350, glickoVol = 0.06, onLadder = false, None)
+  val initial: BotRating = BotRating(
+    glickoRating = 1500,
+    glickoRd = 350,
+    glickoVol = 0.06,
+    onLadder = false,
+    ownerExternalId = None,
+    ratedForHumans = false
+  )
 
 /** A registered bot's catalog opt-in state (ADR-0014): whether it is advertised to human players and its optional
   * one-line description. Returned by the open/close store methods, read back atomically so the caller sees exactly the
@@ -255,6 +265,12 @@ trait BotStore:
     * identity exists — the caller distinguishes registered bots from static/anonymous ones by this, same as `rotate`.
     */
   def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]
+
+  /** The OPERATOR's switch for "games between this bot and a human are rated" (#247). Deliberately not reachable from
+    * the `/bot` API: a bot author who could set it would register a weak bot and farm rating off it (V15 spells this
+    * out). `None` for an unregistered identity, exactly like `setOnLadder`.
+    */
+  def setRatedForHumans(team: String, name: String, ratedForHumans: Boolean): IO[Option[BotRating]]
 
   /** Every registered bot currently opted into the rating ladder, each with its declared seating capacity — the pairing
     * scheduler's candidate pool (#102), read in one query because the scheduler needs the capacity of every candidate
@@ -329,10 +345,16 @@ object BotStore:
         def ratingOf(team: String, name: String): IO[Option[BotRating]] = ratings.get.map(_.get((team, name)))
 
         def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]] =
+          updateRating(team, name)(_.copy(onLadder = onLadder))
+
+        def setRatedForHumans(team: String, name: String, ratedForHumans: Boolean): IO[Option[BotRating]] =
+          updateRating(team, name)(_.copy(ratedForHumans = ratedForHumans))
+
+        private def updateRating(team: String, name: String)(f: BotRating => BotRating): IO[Option[BotRating]] =
           ratings.modify { current =>
             current.get((team, name)) match
               case Some(r) =>
-                val updated = r.copy(onLadder = onLadder)
+                val updated = f(r)
                 (current.updated((team, name), updated), Some(updated))
               case None => (current, None)
           }

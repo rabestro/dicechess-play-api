@@ -15,6 +15,7 @@ import dicechess.play.store.{
   GuestLink,
   NicknameUpdate,
   UserAccount,
+  UserRating,
   UserStore
 }
 import dicechess.play.wire.Codecs.given
@@ -56,7 +57,9 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
               (users.updated(subject, user), user)
         }
       }
-    def userById(id: String): IO[Option[UserAccount]]                        = ref.get.map(_.values.find(_.id == id))
+    def userById(id: String): IO[Option[UserAccount]]    = ref.get.map(_.values.find(_.id == id))
+    def ratingOf(userId: String): IO[Option[UserRating]] =
+      ref.get.map(_.values.find(_.id == userId).map(_ => UserRating.initial))
     def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
     def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
     def guestsOf(userId: String): IO[List[String]]                           = IO.raiseError(AssertionError("unused"))
@@ -86,11 +89,13 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
   private def catalogFixture: IO[(GameRegistry, HttpApp[IO], UserAccount, String)] =
     val bot: Principal.Bot = Principal.Bot(CatalogTeam, CatalogBotName)
     val bots               = new BotStore:
-      def register(team: String, name: String, tokenHash: String): IO[Boolean]                     = IO.pure(false)
-      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                               = IO.pure(None)
-      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                    = IO.pure(false)
-      def ratingOf(team: String, name: String): IO[Option[BotRating]]                              = IO.pure(None)
-      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]        = IO.pure(None)
+      def register(team: String, name: String, tokenHash: String): IO[Boolean]                 = IO.pure(false)
+      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                           = IO.pure(None)
+      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                = IO.pure(false)
+      def ratingOf(team: String, name: String): IO[Option[BotRating]]                          = IO.pure(None)
+      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]    = IO.pure(None)
+      def setRatedForHumans(team: String, name: String, rated: Boolean): IO[Option[BotRating]] =
+        IO.pure(None)
       def onLadderCandidates: IO[List[BotSeatPolicy]]                                              = IO.pure(Nil)
       def setMaxConcurrentGames(team: String, name: String, limit: Int): IO[Option[BotSeatPolicy]] = IO.pure(None)
       def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]                      = IO.pure(None)

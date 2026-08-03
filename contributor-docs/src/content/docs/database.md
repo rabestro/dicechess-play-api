@@ -53,6 +53,15 @@ triple (`glicko_rating`, `glicko_rd`, `glicko_vol`, seeded at 1500 / 350 / 0.06)
 `on_ladder` flag, and the human-facing catalog opt-in (`open_to_humans`, `description`).
 Primary key is `(team, name)`.
 
+`rated_for_humans` (V15) decides whether a game between this bot and a human is **eligible** to count for rating
+(the batch that acts on it lands with the rest of the human-rating work), and it is the one flag here that is
+**not** self-service. Its neighbours `on_ladder` and `open_to_humans` are set by the
+bot's own bearer token, which is harmless: a bot choosing to play cannot corrupt anyone else's rating. This
+one can — an author able to set it would register a deliberately weak bot, open it, and farm rating off their
+own creation. So it is an operator decision, applied declaratively at boot from `PLAY_RATED_FOR_HUMANS` (see
+`CatalogRoster`) or by hand, and it defaults to false: a human-vs-bot game is casual until an operator says
+that particular bot is a fair yardstick.
+
 `max_concurrent_games` (V12) is the bot's own declaration of how many games it will hold at once
 — the counterpart of the per-turn window the server publishes. Its default of **1** is the whole
 point rather than an incidental choice: absence has to select the conservative policy, because
@@ -124,6 +133,12 @@ only public-facing field; uniqueness is case-insensitive via a functional index 
 `lower(nickname)` (no `citext` extension to install). `is_active` is a kill switch re-checked
 on every authenticated request, because the session token is deliberately never trusted for
 authorization state.
+
+Rating state (V15) lives on this row too — `glicko_rating`, `glicko_rd`, `glicko_vol`, seeded 1500 / 350 /
+0.06. The types and seeds are **identical to `bots`** on purpose: accounts and bots share ONE Glicko-2 scale,
+which is what makes "who is strongest" answerable across both and what solves cold start, since
+human-vs-human traffic is thin while bots are always available to be measured against. There is no
+`on_ladder` counterpart — a person is not scheduled into games by the server.
 
 ### `user_identities` — login methods, keyed by `(provider, subject)`
 
