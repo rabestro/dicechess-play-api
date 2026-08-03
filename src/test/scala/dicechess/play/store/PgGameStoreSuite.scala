@@ -1132,9 +1132,9 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           fakeId <- GameId.random
           _      <- db.applyRatingUpdate(
             fakeId,
-            strong,
+            RatedIdentity.of(strong),
             dicechess.play.rating.Glicko(1700.0, 80.0, 0.05),
-            weak,
+            RatedIdentity.of(weak),
             dicechess.play.rating.Glicko(1400.0, 90.0, 0.05)
           )
           // The rated record: strong beats weak once per colour, plus one draw; one casual win must not count.

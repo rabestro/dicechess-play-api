@@ -49,6 +49,17 @@ object Principal:
       case Array("bot", "team", team, name) if team.nonEmpty && name.nonEmpty => Some(Principal.Bot(team, name))
       case _                                                                  => None
 
+  /** The inverse of [[Principal.externalId]] for accounts — `user:<uuid>` and nothing else (#248). Colocated with the
+    * bot parser above and with the format itself, so the three cannot drift. Returns the bare id (not a `Principal`)
+    * because every caller wants exactly that: the key to look the account up by.
+    *
+    * The uuid shape is verified, so a malformed stored id resolves to `None` rather than reaching a `::uuid` cast.
+    */
+  def fromUserExternalId(externalId: String): Option[String] =
+    externalId.split(':') match
+      case Array("user", id) if scala.util.Try(java.util.UUID.fromString(id)).isSuccess => Some(id)
+      case _                                                                            => None
+
   /** Validates a client-supplied guest id at the identity-issuance boundary (`POST /games`, `/lobby/seeks`,
     * `/lobby/seeks/{id}/accept`) before it can ever reach `externalId`: it must be a UUID, per the invariant
     * `externalId` documents. Rejects empty and colon-containing ids in particular — either would otherwise produce a

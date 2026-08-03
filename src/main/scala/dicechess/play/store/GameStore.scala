@@ -605,18 +605,32 @@ final case class OpponentAggregateRow(
   * games; a cursor without overlap loses games to the commit-order race documented on
   * `GameResultsStore.finishedRatedSince`). Postgres only, like [[GameResultsStore]].
   */
+/** Which row a rating write lands on (#248). A rated participant is either a registered bot or an account, and the two
+  * live in different tables — but they share ONE Glicko scale, so the batch treats them uniformly and only the write
+  * needs to know them apart.
+  */
+enum RatedIdentity:
+  case Bot(team: String, name: String)
+  case User(id: String)
+
+object RatedIdentity:
+  def of(bot: Principal.Bot): RatedIdentity = RatedIdentity.Bot(bot.team, bot.name)
+
 trait RatingStore:
   /** Rated games not yet applied to any rating, oldest `finished_at` first — the head of the claim queue. */
   def unappliedRatedGames(limit: Int): IO[List[GameResultRow]]
 
-  /** Atomically write both bots' post-game Glicko state AND stamp the game as applied — one transaction, so a crash
-    * between the two can neither double-apply a game nor lose one side's update.
+  /** Atomically write both participants' post-game Glicko state AND stamp the game as applied — one transaction, so a
+    * crash between the two can neither double-apply a game nor lose one side's update.
+    *
+    * The two sides may live in DIFFERENT tables (an account vs a bot, #248). The atomicity guarantee is therefore per
+    * GAME, not per table: one transaction spanning both writes plus the stamp.
     */
   def applyRatingUpdate(
       gameId: GameId,
-      white: Principal.Bot,
+      white: RatedIdentity,
       whiteGlicko: dicechess.play.rating.Glicko,
-      black: Principal.Bot,
+      black: RatedIdentity,
       blackGlicko: dicechess.play.rating.Glicko
   ): IO[Unit]
 
