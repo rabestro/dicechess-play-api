@@ -281,11 +281,24 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
   private def sessionWs(uri: Uri, token: String): WSRequest =
     WSRequest(uri).withHeaders(Headers(Header.Raw(ci"Cookie", s"${AuthSession.SessionCookieName}=$token")))
 
-  private def statusOf(registry: GameRegistry, id: String): IO[GameStatus] =
+  /** Whether the game is over, from the outside: a room that has ended is also **evicted** from the registry
+    * (`GameRegistry.finish`), so absence is a terminal state here, not a failure — reading it as one made this a
+    * CI-only flake, since locally the poll happened to observe `Ended` before the eviction landed.
+    */
+  private def isOver(registry: GameRegistry, id: String): IO[Boolean] =
     registry.get(GameId(id)).flatMap {
-      case None       => IO.raiseError(AssertionError(s"game $id vanished"))
-      case Some(room) => room.snapshot.map(_.status)
+      case None       => IO.pure(true)
+      case Some(room) => room.snapshot.map(_.status != GameStatus.Active)
     }
+
+  /** Poll (never sleep-then-assert) until the game is over, or report `false` when the window closes — which is the
+    * assertion itself for the ambiguous-seat case. The pause keeps this from becoming a hot loop for the full window.
+    */
+  private def awaitOver(registry: GameRegistry, id: String, within: FiniteDuration): IO[Boolean] =
+    isOver(registry, id)
+      .flatMap(over => if over then IO.pure(true) else IO.sleep(50.millis).as(false))
+      .iterateUntil(identity)
+      .timeoutTo(within, IO.pure(false))
 
   test("a signed-in player reconnects to their seat with no join token — the lost-URL fix"):
     (wsServer, JdkWSClient.simple[IO]).tupled.use { case ((port, registry, user, token), ws) =>
@@ -297,10 +310,8 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
         _ <- ws
           .connectHighLevel(sessionWs(wsBase / "games" / gameId / "ws", token))
           .use(_.send(WSFrame.Text(GameCommand.Resign.asJson.noSpaces)))
-        ended <- statusOf(registry, gameId)
-          .iterateUntil(_ != GameStatus.Active)
-          .timeoutTo(10.seconds, IO.raiseError(AssertionError("the session never resolved to a playable seat")))
-      yield assert(ended != GameStatus.Active, "the resign was accepted, so the seat was resolved from the session")
+        over <- awaitOver(registry, gameId, 10.seconds)
+      yield assert(over, "the resign was accepted, so the seat was resolved from the session")
     }
 
   test("a signed-in player holding BOTH seats stays a spectator without a token"):
@@ -315,9 +326,8 @@ class AuthenticatedPlaySuite extends munit.CatsEffectSuite:
         _       <- ws
           .connectHighLevel(sessionWs(wsBase / "games" / gameId / "ws", token))
           .use(_.send(WSFrame.Text(GameCommand.Resign.asJson.noSpaces)))
-        // Poll durable state rather than sleeping on a stream: the resign must have been ignored outright.
-        status <- statusOf(registry, gameId)
-          .iterateUntil(_ != GameStatus.Active)
-          .timeoutTo(2.seconds, statusOf(registry, gameId))
-      yield assertEquals(status, GameStatus.Active, "an ambiguous session must not be able to resign either seat")
+        // Poll durable state rather than sleeping on a stream: the resign must have been ignored outright. The window
+        // is the negative half of the test — it has to be long enough that an accepted resign would have landed.
+        over <- awaitOver(registry, gameId, 2.seconds)
+      yield assert(!over, "an ambiguous session must not be able to resign either seat")
     }
