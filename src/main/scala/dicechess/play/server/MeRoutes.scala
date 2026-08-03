@@ -4,7 +4,7 @@ import cats.data.Validated.{Invalid, Valid}
 import cats.data.ValidatedNel
 import cats.effect.IO
 import dicechess.play.core.Principal
-import dicechess.play.store.{GameResultsStore, GuestLink, UserAccount, UserStore}
+import dicechess.play.store.{GameResultsStore, GuestLink, OwnerClaim, UserAccount, UserStore}
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
@@ -17,6 +17,19 @@ final case class ClaimGuest(guestId: String) derives Codec.AsObject
 
 /** The guest identities this account has claimed, oldest first. */
 final case class ClaimedGuests(guests: List[String]) derives Codec.AsObject
+
+/** One of the account's own bots (#253) — identity, rating, and the flags its owner can act on. */
+final case class MyBot(
+    team: String,
+    name: String,
+    rating: Double,
+    rd: Double,
+    onLadder: Boolean,
+    openToHumans: Boolean,
+    ratedForHumans: Boolean
+) derives Codec.AsObject
+
+final case class MyBots(bots: List[MyBot]) derives Codec.AsObject
 
 /** The signed-in player's own history (#236, ADR-0017).
   *
@@ -52,7 +65,12 @@ object MeRoutes:
 
   private val notSignedIn: Response[IO] = Response[IO](Status.Unauthorized).withEntity("Not signed in")
 
-  def apply(session: AuthSession, users: UserStore, results: GameResultsStore): HttpRoutes[IO] =
+  def apply(
+      session: AuthSession,
+      users: UserStore,
+      results: GameResultsStore,
+      bots: Option[BotAuth] = None
+  ): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case req @ POST -> Root / "auth" / "me" / "guests" =>
         withUser(session, req): user =>
@@ -100,11 +118,63 @@ object MeRoutes:
                   }
               }
 
+      // Claiming a bot needs BOTH credentials: the session says who is claiming, the bot's Bearer token proves
+      // control of it (#253). Neither alone is enough — a session without the token would let anyone claim any bot,
+      // and the token without a session has nobody to claim it for.
+      case req @ POST -> Root / "me" / "bots" / "claim" =>
+        withUser(session, req): user =>
+          bots match
+            case None       => IO.pure(Response[IO](Status.NotFound))
+            case Some(auth) =>
+              BotRoutes.asBot(auth, req).flatMap {
+                case None      => IO.pure(Response[IO](Status.Unauthorized).withEntity("bot token required"))
+                case Some(bot) =>
+                  auth
+                    .claimOwner(bot, Principal.User(user.id).externalId)
+                    .flatMap {
+                      case OwnerClaim.Claimed          => myBots(auth, user)
+                      case OwnerClaim.ClaimedByAnother =>
+                        IO.pure(Response[IO](Status.Conflict).withEntity("that bot already belongs to another account"))
+                      // A static-roster or anonymous caller: authenticated, but with no row to own.
+                      case OwnerClaim.NotRegistered =>
+                        IO.pure(Response[IO](Status.NotFound).withEntity("only a registered bot can be owned"))
+                    }
+              }
+
+      case req @ GET -> Root / "me" / "bots" =>
+        withUser(session, req): user =>
+          bots.fold(IO.pure(Response[IO](Status.NotFound)))(myBots(_, user))
+
+      // Releasing is the explicit half of a transfer: the bot becomes claimable again, so handing it over does not
+      // depend on who calls claim last. Session-only — the owner does not need the bot's token to let it go.
+      case req @ DELETE -> Root / "me" / "bots" / team / name =>
+        withUser(session, req): user =>
+          bots match
+            case None       => IO.pure(Response[IO](Status.NotFound))
+            case Some(auth) =>
+              auth.releaseOwner(team, name, Principal.User(user.id).externalId).flatMap {
+                case true => myBots(auth, user)
+                // Not yours (or not there at all) — one answer for both, so this cannot be used to probe which bots
+                // exist or who owns them.
+                case false => IO.pure(Response[IO](Status.NotFound).withEntity("you do not own that bot"))
+              }
+
       case req @ GET -> Root / "me" / "opponents" =>
         withUser(session, req): user =>
           identitiesOf(users, user).flatMap { ids =>
             results.opponentsFor(ids.toList).flatMap(rows => Ok(PlayerOpponents(rows.map(playerOpponent))))
           }
+
+  private def myBots(auth: BotAuth, user: UserAccount): IO[Response[IO]] =
+    auth.botsOwnedBy(Principal.User(user.id).externalId).flatMap { owned =>
+      Ok(
+        MyBots(
+          owned.map(bot =>
+            MyBot(bot.team, bot.name, bot.rating, bot.rd, bot.onLadder, bot.openToHumans, bot.ratedForHumans)
+          )
+        )
+      )
+    }
 
   /** Every external id that IS this account: its own, plus each claimed guest id (#236). */
   private def identitiesOf(users: UserStore, user: UserAccount): IO[Set[String]] =

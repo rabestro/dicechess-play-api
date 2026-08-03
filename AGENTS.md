@@ -111,6 +111,13 @@ atomicity is per game, not per table. Ladder auto-park stays bot-only: a human l
 endpoint. **Never expose `bots.rated_for_humans` on the bot API**:
 its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one
 would register a weak bot and farm rating off it. Both rosters are additive — a typo narrows what is enabled.
+Bot ownership (#253/#239, ADR-0017): `bots.owner_external_id` — the column V4 created and nothing wrote until now —
+is filled by `POST /me/bots/claim`, which needs **both** credentials: the session says who is claiming, the bot's own
+Bearer token proves control of it. Claiming another account's bot is a **409, never a takeover** (a leaked token would
+otherwise steal attribution and rating history); transfer is the current owner calling `DELETE /me/bots/{team}/{name}`,
+so it is explicit on both sides rather than a race. `POST /bot/register` with a session sets the owner in the same
+INSERT. Ownership stays optional — an unowned registered bot behaves exactly as before. This is also what finally arms
+`RatingBatch`'s own-bot rule: it has read `ownerExternalId` since #248 and could only ever decline.
 Human ratings on the public wire (#249): `/leaderboard?kind=bots|players|all` — the default stays **bots** so the
 SPA's existing call is unchanged (the only added field is `kind` on each row; a player row carries `team: null`).
 `?kind=all` ranks both populations in ONE list because they share one scale — a per-kind rank would imply two

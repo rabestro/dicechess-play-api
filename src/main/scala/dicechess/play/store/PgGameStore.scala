@@ -306,13 +306,49 @@ final class PgGameStore private (xa: Transactor[IO])
   // ── BotStore ────────────────────────────────────────────────────────────────
 
   /** Claim the identity atomically: the primary key makes a concurrent double-register lose cleanly. */
-  def register(team: String, name: String, tokenHash: String): IO[Boolean] =
-    sql"""INSERT INTO play.bots (team, name, token_hash)
-          VALUES ($team, $name, $tokenHash)
+  def register(team: String, name: String, tokenHash: String, owner: Option[String]): IO[Boolean] =
+    sql"""INSERT INTO play.bots (team, name, token_hash, owner_external_id)
+          VALUES ($team, $name, $tokenHash, $owner)
           ON CONFLICT (team, name) DO NOTHING""".update.run
       .transact(xa)
       .timeout(SaveTimeout)
       .map(_ == 1)
+
+  /** See [[BotStore.claimOwner]]. One statement: the `WHERE` accepts only an unowned row or one this account already
+    * owns, so a concurrent claim by another account cannot slip between a read and a write. Zero rows updated is then
+    * ambiguous on purpose-free grounds — it means either "not registered" or "someone else owns it" — so the follow-up
+    * read distinguishes them for the caller's status code rather than guessing.
+    */
+  def claimOwner(team: String, name: String, ownerExternalId: String): IO[OwnerClaim] =
+    val claim =
+      sql"""UPDATE play.bots SET owner_external_id = $ownerExternalId
+            WHERE team = $team AND name = $name
+              AND (owner_external_id IS NULL OR owner_external_id = $ownerExternalId)""".update.run
+    val exists = sql"""SELECT 1 FROM play.bots WHERE team = $team AND name = $name""".query[Int].option
+    claim
+      .flatMap {
+        case 1 => OwnerClaim.Claimed.pure[ConnectionIO]
+        case _ => exists.map(_.fold(OwnerClaim.NotRegistered)(_ => OwnerClaim.ClaimedByAnother))
+      }
+      .transact(xa)
+      .timeout(SaveTimeout)
+
+  def releaseOwner(team: String, name: String, ownerExternalId: String): IO[Boolean] =
+    sql"""UPDATE play.bots SET owner_external_id = NULL
+          WHERE team = $team AND name = $name AND owner_external_id = $ownerExternalId""".update.run
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_ == 1)
+
+  def botsOwnedBy(ownerExternalId: String): IO[List[OwnedBot]] =
+    sql"""SELECT team, name, glicko_rating, glicko_rd, on_ladder, open_to_humans, rated_for_humans
+          FROM play.bots WHERE owner_external_id = $ownerExternalId
+          ORDER BY glicko_rating DESC, team, name"""
+      .query[(String, String, Double, Double, Boolean, Boolean, Boolean)]
+      .to[List]
+      .transact(xa)
+      .timeout(SaveTimeout)
+      .map(_.map(OwnedBot.apply.tupled))
 
   def authenticate(tokenHash: String): IO[Option[Principal.Bot]] =
     sql"""SELECT team, name FROM play.bots WHERE token_hash = $tokenHash"""

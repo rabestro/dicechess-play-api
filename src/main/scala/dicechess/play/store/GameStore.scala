@@ -248,7 +248,25 @@ object BotSeatPolicy:
   */
 trait BotStore:
   /** Claim `(team, name)` with the given token hash. False when the identity is already taken. */
-  def register(team: String, name: String, tokenHash: String): IO[Boolean]
+  /** @param owner
+    *   the claiming account's `user:<uuid>` when a signed-in author registers the bot (#253) — written in the same
+    *   INSERT, so a registration by an owner needs no follow-up claim. `None` leaves the bot unowned, which stays a
+    *   first-class state: an anonymous author's bot works exactly as before.
+    */
+  def register(team: String, name: String, tokenHash: String, owner: Option[String] = None): IO[Boolean]
+
+  /** Claim an existing registered bot for an account (#253). Idempotent for the current owner; see [[OwnerClaim]] for
+    * why another account's bot is refused rather than taken over.
+    */
+  def claimOwner(team: String, name: String, ownerExternalId: String): IO[OwnerClaim]
+
+  /** Release a bot the account owns, making it claimable again — the explicit half of an ownership transfer. `false`
+    * when the caller does not own it (or it does not exist), so a wrong guess cannot un-own someone else's bot.
+    */
+  def releaseOwner(team: String, name: String, ownerExternalId: String): IO[Boolean]
+
+  /** Every bot this account owns, best rating first. */
+  def botsOwnedBy(ownerExternalId: String): IO[List[OwnedBot]]
 
   /** The registered identity a presented token's hash authenticates as, if any. */
   def authenticate(tokenHash: String): IO[Option[Principal.Bot]]
@@ -318,14 +336,14 @@ object BotStore:
       cats.effect.Ref.of[IO, Map[(String, String), Int]](Map.empty)
     ).mapN { (byHash, ratings, catalog, capacities) =>
       new BotStore:
-        def register(team: String, name: String, tokenHash: String): IO[Boolean] =
+        def register(team: String, name: String, tokenHash: String, owner: Option[String]): IO[Boolean] =
           byHash
             .modify { bots =>
               if bots.values.exists(b => b.team == team && b.name == name) then (bots, false)
               else (bots.updated(tokenHash, Principal.Bot(team, name)), true)
             }
             .flatTap { claimed =>
-              (ratings.update(_.updated((team, name), BotRating.initial)) *>
+              (ratings.update(_.updated((team, name), BotRating.initial.copy(ownerExternalId = owner))) *>
                 catalog.update(_.updated((team, name), (false, None))) *>
                 capacities.update(
                   _.updated((team, name), BotSeatPolicy.DefaultMaxConcurrentGames)
@@ -405,6 +423,41 @@ object BotStore:
               case Some((_, desc)) =>
                 (current.updated((team, name), (false, desc)), Some(BotCatalogState(openToHumans = false, desc)))
               case None => (current, None)
+          }
+
+        def claimOwner(team: String, name: String, ownerExternalId: String): IO[OwnerClaim] =
+          ratings.modify { current =>
+            current.get((team, name)) match
+              case None                                                      => (current, OwnerClaim.NotRegistered)
+              case Some(r) if r.ownerExternalId.exists(_ != ownerExternalId) => (current, OwnerClaim.ClaimedByAnother)
+              case Some(r)                                                   =>
+                (current.updated((team, name), r.copy(ownerExternalId = Some(ownerExternalId))), OwnerClaim.Claimed)
+          }
+
+        def releaseOwner(team: String, name: String, ownerExternalId: String): IO[Boolean] =
+          ratings.modify { current =>
+            current.get((team, name)) match
+              case Some(r) if r.ownerExternalId.contains(ownerExternalId) =>
+                (current.updated((team, name), r.copy(ownerExternalId = None)), true)
+              case _ => (current, false)
+          }
+
+        def botsOwnedBy(ownerExternalId: String): IO[List[OwnedBot]] =
+          (ratings.get, catalog.get).mapN { (rated, cat) =>
+            rated.toList
+              .collect {
+                case ((team, name), r) if r.ownerExternalId.contains(ownerExternalId) =>
+                  OwnedBot(
+                    team = team,
+                    name = name,
+                    rating = r.glickoRating,
+                    rd = r.glickoRd,
+                    onLadder = r.onLadder,
+                    openToHumans = cat.get((team, name)).exists(_._1),
+                    ratedForHumans = r.ratedForHumans
+                  )
+              }
+              .sortBy(b => (-b.rating, b.team, b.name))
           }
 
         def openToHumansBots: IO[List[Principal.Bot]] =
@@ -683,6 +736,28 @@ trait LeaderboardStore:
 
   /** The rated, decided W-D-L record of one participant (either seat), for the profile endpoint. */
   def resultTallyFor(externalId: String): IO[ResultTally]
+
+/** The outcome of claiming a bot for an account (#253). `ClaimedByAnother` is a refusal, not a takeover: a leaked bot
+  * token would otherwise also steal attribution and rating history, and whoever claimed it first did hold the token.
+  * Transfer is the current owner releasing it, explicitly. `NotRegistered` covers a static-roster or anonymous caller —
+  * there is no row to own, the same meaning `rotate`/`setOnLadder` already give `None`.
+  */
+enum OwnerClaim:
+  case Claimed, ClaimedByAnother, NotRegistered
+
+/** One of an account's own bots (#253) — what a "My bots" page needs in one row: identity, rating state, and the two
+  * self-service flags. Deliberately the owner's view, not the public one: `onLadder` and `openToHumans` are settings
+  * here, whereas the public catalog derives what it shows from them.
+  */
+final case class OwnedBot(
+    team: String,
+    name: String,
+    rating: Double,
+    rd: Double,
+    onLadder: Boolean,
+    openToHumans: Boolean,
+    ratedForHumans: Boolean
+)
 
 /** One human-catalog card's data (ADR-0014, E2): a bot that opened itself to human games, with the rating summary its
   * card shows. `provisional` is derived by the route from `rd`, not stored here; likewise `available` (#224) is derived

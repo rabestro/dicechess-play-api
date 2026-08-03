@@ -481,7 +481,10 @@ object BotRoutes:
       case None      => Unauthorized(bearerChallenge)
 
   /** The authenticated bot for a request, if its Bearer token is valid (static or live anonymous). */
-  private def asBot(auth: BotAuth, req: Request[IO]): IO[Option[Principal.Bot]] =
+  /** Package-visible so the owner surface can require BOTH credentials on one request (#253): `MeRoutes` needs the
+    * bot's identity from its Bearer token while the session says who is claiming it.
+    */
+  private[server] def asBot(auth: BotAuth, req: Request[IO]): IO[Option[Principal.Bot]] =
     bearer(req) match
       case None        => IO.pure(None)
       case Some(token) => auth.authenticate(token).map(_.collect { case bot: Principal.Bot => bot })
