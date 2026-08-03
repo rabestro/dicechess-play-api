@@ -2,7 +2,8 @@ package dicechess.play.server
 
 import cats.effect.IO
 import cats.effect.std.Console
-import dicechess.play.store.{NicknameUpdate, UserStore}
+import dicechess.play.rating.Glicko2
+import dicechess.play.store.{NicknameUpdate, UserAccount, UserRating, UserStore}
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
@@ -17,7 +18,15 @@ import java.util.Base64
   * exposes no accessor yet — the fuller profile shape (email, linked guests) arrives with #236, and per ADR-0017 email
   * would appear HERE only, never on any public wire type.
   */
-final case class MeResponse(id: String, nickname: String) derives Codec.AsObject
+final case class MeResponse(
+    id: String,
+    nickname: String,
+    // The owner's own rating (#249). `provisional` is the same convergence rule the public board hides on, surfaced
+    // here so a fresh account can see WHY it is not listed yet rather than concluding the feature is broken.
+    rating: Double,
+    rd: Double,
+    provisional: Boolean
+) derives Codec.AsObject
 
 /** `PATCH /auth/me`'s body (#234). One field on purpose — every future profile edit should arrive as its own reviewed
   * field, not ride an anything-goes map.
@@ -98,7 +107,7 @@ object AuthRoutes:
       case req @ GET -> Root / "auth" / "me" =>
         session.userFor(req).flatMap {
           case None       => IO.pure(Response[IO](Status.Unauthorized).withEntity("Not signed in"))
-          case Some(user) => Ok(MeResponse(id = user.id, nickname = user.nickname))
+          case Some(user) => meResponse(store, user, user.nickname)
         }
 
       // Rename (#234). Format rules live in Nicknames.validate; the store enforces only uniqueness. `UserNotFound`
@@ -118,7 +127,7 @@ object AuthRoutes:
                     case Left(reason) => BadRequest(reason)
                     case Right(name)  =>
                       store.updateNickname(user.id, name).flatMap {
-                        case NicknameUpdate.Updated => Ok(MeResponse(id = user.id, nickname = name))
+                        case NicknameUpdate.Updated => meResponse(store, user, name)
                         case NicknameUpdate.Taken   =>
                           IO.pure(Response[IO](Status.Conflict).withEntity("nickname already taken"))
                         case NicknameUpdate.UserNotFound =>
@@ -160,3 +169,20 @@ object AuthRoutes:
 
       case POST -> Root / "auth" / "logout" =>
         Ok("Signed out").map(_.addCookie(session.expiredSessionCookie))
+
+  /** `/auth/me`'s body. A rating row always exists for a live account (V15 defaults), so a missing read falls back to
+    * the seeds rather than failing the request — the account is real either way.
+    */
+  private def meResponse(store: UserStore, user: UserAccount, nickname: String): IO[Response[IO]] =
+    store.ratingOf(user.id).flatMap { rating =>
+      val state = rating.getOrElse(UserRating.initial)
+      Ok(
+        MeResponse(
+          id = user.id,
+          nickname = nickname,
+          rating = state.glickoRating,
+          rd = state.glickoRd,
+          provisional = state.glickoRd > Glicko2.ProvisionalDeviationThreshold
+        )
+      )
+    }

@@ -111,6 +111,13 @@ atomicity is per game, not per table. Ladder auto-park stays bot-only: a human l
 endpoint. **Never expose `bots.rated_for_humans` on the bot API**:
 its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one
 would register a weak bot and farm rating off it. Both rosters are additive — a typo narrows what is enabled.
+Human ratings on the public wire (#249): `/leaderboard?kind=bots|players|all` — the default stays **bots** so the
+SPA's existing call is unchanged (the only added field is `kind` on each row; a player row carries `team: null`).
+`?kind=all` ranks both populations in ONE list because they share one scale — a per-kind rank would imply two
+currencies. `GET /players/by-nickname/{nick}` is the account profile, keyed by the only public handle a person has;
+it mirrors `GET /bots/{team}/{name}`. **The public profile counts `user:` games ONLY, never the account's claimed
+guest ids** — merging them there would retroactively deanonymise that history, which is the promise #236 made; the
+owner-only `/me/games` is where the merged view lives. A deactivated account 404s exactly like a missing one.
 Claimed guest history (#236, ADR-0017): `GameResultsStore.playerGamesPage`/`opponentsFor` take a LIST of
 external ids — "the requester" is one account plus every guest id it has claimed, and a merged history is a
 union at READ time (nothing in `game_results`/`game_archive` is ever rewritten). Self-play exclusion in

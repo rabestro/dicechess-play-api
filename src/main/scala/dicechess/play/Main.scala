@@ -252,7 +252,7 @@ object Main extends IOApp.Simple:
           // The leaderboard/profile API reads bots + game_results — DB-only seams, so without persistence the
           // routes are simply not mounted (404), same spirit as the rating batch above.
           val leaderboard =
-            pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg))
+            pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg, users = Some(pg)))
           // Same DB-only gating: the human catalog reads the bots table's rating + description columns (ADR-0014).
           val catalog = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg =>
             CatalogRoutes(pg, botStore, webhookService, registry, wakeLimit, playBotLimit, authSession)

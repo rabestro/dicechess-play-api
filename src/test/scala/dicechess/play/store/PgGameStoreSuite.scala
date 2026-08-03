@@ -6,6 +6,7 @@ import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
 import dicechess.play.core.*
 import dicechess.play.game.EngineOps
+import dicechess.play.rating.Glicko2
 import dicechess.play.server.GameRegistry
 import doobie.hikari.HikariTransactor
 import doobie.implicits.*
@@ -1444,6 +1445,50 @@ class PgGameStoreSuite extends CatsEffectSuite with TestContainerForAll:
           assert(curated.exists(_.onLadder), "the operator write must not clobber the bot's own ladder state")
           assertEquals(uncurated.map(_.ratedForHumans), Some(false), "an operator can take it away again")
           assertEquals(ghost, None, "an unregistered identity has no row to flag")
+      }
+    }
+
+  test("the player leaderboard hides provisional and inactive accounts, and counts rated games only"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          converged   <- db.upsertOnLogin("google", "sub-board-conv", None, IO.pure("BoardConverged"))
+          provisional <- db.upsertOnLogin("google", "sub-board-prov", None, IO.pure("BoardProvisional"))
+          opponent    <- db.upsertOnLogin("google", "sub-board-opp", None, IO.pure("BoardOpponent"))
+          ratedId     <- GameId.random
+          casualId    <- GameId.random
+          _           <- db.save(
+            ratedId,
+            endedResultFixture(Principal.User(converged.id), Principal.User(opponent.id), rated = true)
+          )
+          _ <- db.save(
+            casualId,
+            endedResultFixture(Principal.User(converged.id), Principal.User(opponent.id), rated = false)
+          )
+          // Only a played game shrinks the deviation, so drive it through the same write the batch uses.
+          _ <- db.applyRatingUpdate(
+            gameId = ratedId,
+            white = RatedIdentity.User(converged.id),
+            whiteGlicko = dicechess.play.rating.Glicko(1650.0, 90.0, 0.06),
+            black = RatedIdentity.User(opponent.id),
+            blackGlicko = dicechess.play.rating.Glicko(1450.0, 95.0, 0.06)
+          )
+          board <- db.playerLeaderboard(maxRd = Glicko2.ProvisionalDeviationThreshold)
+        yield
+          val listed =
+            board.filter(row => Set("BoardConverged", "BoardProvisional", "BoardOpponent").contains(row.nickname))
+          assertEquals(
+            listed.map(_.nickname),
+            List("BoardConverged", "BoardOpponent"),
+            s"a still-provisional account (rd 350) must be absent: ${board.map(_.nickname)}"
+          )
+          assertEquals(listed.map(_.rating), List(1650.0, 1450.0), "best rating first")
+          assertEquals(
+            listed.find(_.nickname == "BoardConverged").map(_.tally),
+            Some(ResultTally(1, 0, 0)),
+            "the casual game must not appear in the rated W-D-L"
+          )
+          assert(provisional.id.nonEmpty)
       }
     }
 

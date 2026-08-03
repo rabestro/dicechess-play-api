@@ -37,10 +37,16 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     def closeToHumans(team: String, name: String): IO[Option[BotCatalogState]] = IO.pure(None)
     def openToHumansBots: IO[List[Principal.Bot]]                              = IO.pure(Nil)
 
-  private def stubBoard(entries: List[LeaderboardEntry], tallies: Map[String, ResultTally]): LeaderboardStore =
+  private def stubBoard(
+      entries: List[LeaderboardEntry],
+      tallies: Map[String, ResultTally],
+      players: List[PlayerLeaderboardEntry]
+  ): LeaderboardStore =
     new LeaderboardStore:
-      def leaderboard(maxRd: Double): IO[List[LeaderboardEntry]] = IO.pure(entries.filter(_.rd <= maxRd))
-      def resultTallyFor(externalId: String): IO[ResultTally]    =
+      def leaderboard(maxRd: Double): IO[List[LeaderboardEntry]]             = IO.pure(entries.filter(_.rd <= maxRd))
+      def playerLeaderboard(maxRd: Double): IO[List[PlayerLeaderboardEntry]] =
+        IO.pure(players.filter(_.rd <= maxRd))
+      def resultTallyFor(externalId: String): IO[ResultTally] =
         IO.pure(tallies.getOrElse(externalId, ResultTally.Empty))
 
   private def stubResults(
@@ -60,14 +66,37 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     def opponentsFor(externalIds: List[String]): IO[List[OpponentAggregateRow]] =
       IO.pure(externalIds.flatMap(opponents.getOrElse(_, Nil)))
 
+  /** Accounts, for the human half of the board and the public profile (#249). Only the two reads those surfaces make
+    * are implemented; anything else would be a test reaching where it should not.
+    */
+  private def stubUsers(accounts: List[UserAccount], ratings: Map[String, UserRating]): UserStore = new UserStore:
+    def upsertOnLogin(p: String, s: String, e: Option[String], n: IO[String]): IO[UserAccount] =
+      IO.raiseError(AssertionError("unused"))
+    def userById(id: String): IO[Option[UserAccount]]         = IO.pure(accounts.find(_.id == id))
+    def byNickname(nickname: String): IO[Option[UserAccount]] =
+      IO.pure(accounts.find(_.nickname.equalsIgnoreCase(nickname)))
+    def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(ratings.get(userId))
+    def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
+    def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
+    def guestsOf(userId: String): IO[List[String]]                           = IO.raiseError(AssertionError("unused"))
+    def deleteUser(userId: String): IO[Boolean]                              = IO.raiseError(AssertionError("unused"))
+
   private def app(
       bots: Map[(String, String), BotRating] = Map.empty,
       entries: List[LeaderboardEntry] = Nil,
       tallies: Map[String, ResultTally] = Map.empty,
       recent: Map[String, List[GameResultRow]] = Map.empty,
-      opponents: Map[String, List[OpponentAggregateRow]] = Map.empty
+      opponents: Map[String, List[OpponentAggregateRow]] = Map.empty,
+      players: List[PlayerLeaderboardEntry] = Nil,
+      accounts: List[UserAccount] = Nil,
+      playerRatings: Map[String, UserRating] = Map.empty
   ): HttpApp[IO] =
-    LeaderboardRoutes(stubBots(bots), stubBoard(entries, tallies), stubResults(recent, opponents)).orNotFound
+    LeaderboardRoutes(
+      stubBots(bots),
+      stubBoard(entries, tallies, players),
+      stubResults(recent, opponents),
+      users = Some(stubUsers(accounts, playerRatings))
+    ).orNotFound
 
   private val at = Instant.parse("2026-07-16T12:00:00Z")
 
@@ -89,10 +118,12 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
     )
     val service  = app(entries = entries)
     val expected = parse(
+      // `kind` is the one field #249 added. Everything else is byte-identical, and `/leaderboard` with no `?kind=`
+      // still answers bots only — the SPA's existing call must keep working.
       """{"leaders":[
-           {"rank":1,"team":"acme","name":"alice","rating":1720.5,"rd":85.2,"onLadder":true,
+           {"rank":1,"kind":"bot","team":"acme","name":"alice","rating":1720.5,"rd":85.2,"onLadder":true,
             "games":42,"wins":30,"draws":2,"losses":10},
-           {"rank":2,"team":"acme","name":"bob","rating":1480.0,"rd":100.0,"onLadder":false,
+           {"rank":2,"kind":"bot","team":"acme","name":"bob","rating":1480.0,"rd":100.0,"onLadder":false,
             "games":42,"wins":10,"draws":2,"losses":30}
          ]}"""
     ).toOption.get
@@ -160,3 +191,69 @@ class LeaderboardRoutesSuite extends munit.CatsEffectSuite:
 
   test("GET /bots/{team}/{name} is 404 for an unregistered identity"):
     app().run(Request[IO](Method.GET, uri"/bots/ghost/nobody")).map(resp => assertEquals(resp.status, Status.NotFound))
+
+  // ── Human ratings on the public surfaces (#249) ──────────────────────────────
+
+  private val playerEntries = List(
+    PlayerLeaderboardEntry("SwiftRook7", rating = 1600.0, rd = 90.0, tally = ResultTally(9, 1, 5)),
+    PlayerLeaderboardEntry("Provisional1", rating = 1900.0, rd = 300.0, tally = ResultTally(1, 0, 0))
+  )
+
+  test("?kind=players lists accounts with no team, and ?kind=all ranks both populations on the one shared scale"):
+    val botEntries = List(
+      LeaderboardEntry("acme", "alice", 1720.5, 85.2, onLadder = true, ResultTally(30, 2, 10)),
+      LeaderboardEntry("acme", "bob", 1480.0, 100.0, onLadder = false, ResultTally(10, 2, 30))
+    )
+    val service = app(entries = botEntries, players = playerEntries)
+    for
+      players <- service.run(Request[IO](Method.GET, uri"/leaderboard?kind=players")).flatMap(_.as[Leaderboard])
+      all     <- service.run(Request[IO](Method.GET, uri"/leaderboard?kind=all")).flatMap(_.as[Leaderboard])
+      bad     <- service.run(Request[IO](Method.GET, uri"/leaderboard?kind=humans"))
+    yield
+      assertEquals(players.leaders.map(_.name), List("SwiftRook7"), "a provisional account is hidden, like a bot")
+      assertEquals(players.leaders.map(_.kind), List("player"))
+      assertEquals(players.leaders.flatMap(_.team), Nil, "a person has no team")
+      assert(!players.leaders.exists(_.onLadder), "there is no ladder for people")
+      // 1720.5 (alice) > 1600 (the account) > 1480 (bob): interleaved, because it is ONE scale.
+      assertEquals(all.leaders.map(_.name), List("alice", "SwiftRook7", "bob"))
+      assertEquals(all.leaders.map(_.rank), List(1, 2, 3), "rank is assigned across both populations, not per kind")
+      assertEquals(bad.status, Status.BadRequest, "an unrecognised kind must not silently read as an empty board")
+
+  test("GET /players/by-nickname/{nickname} mirrors the bot profile and leaks no private field"):
+    val account = UserAccount("0197f0a0-0000-7000-8000-000000000249", "SwiftRook7", at, Some(at), isActive = true)
+    val me      = Principal.User(account.id).externalId
+    val service = app(
+      tallies = Map(me -> ResultTally(9, 1, 5)),
+      recent = Map(me -> List(row("g-p1", me, alice.externalId, result = Some(1)))),
+      opponents = Map(me -> List(OpponentAggregateRow(Some(alice.externalId), 3, 2, 0, 1, at))),
+      accounts = List(account),
+      playerRatings = Map(account.id -> UserRating(1600.0, 90.0, 0.06))
+    )
+    for
+      resp    <- service.run(Request[IO](Method.GET, uri"/players/by-nickname/swiftrook7"))
+      body    <- resp.as[Json]
+      profile <- service
+        .run(Request[IO](Method.GET, uri"/players/by-nickname/SwiftRook7"))
+        .flatMap(_.as[PlayerProfile])
+      missing <- service.run(Request[IO](Method.GET, uri"/players/by-nickname/NoSuchPlayer"))
+    yield
+      assertEquals(resp.status, Status.Ok, "the lookup is case-insensitive, like the uniqueness rule behind it")
+      assertEquals(profile.nickname, "SwiftRook7")
+      assertEquals(profile.rating, 1600.0)
+      assertEquals(profile.provisional, false)
+      assertEquals((profile.games, profile.wins, profile.draws, profile.losses), (15, 9, 1, 5))
+      assertEquals(profile.recent.map(_.result), List("win"))
+      assertEquals(profile.opponents.flatMap(_.botName), List("alice"))
+      // The privacy promise is about what is ABSENT, so assert on the keys, not just the happy path.
+      val keys = body.hcursor.keys.map(_.toList).getOrElse(Nil)
+      assert(!keys.contains("id"), s"the account uuid must never reach a public wire type: $keys")
+      assert(!keys.contains("email"), s"email is owner-only: $keys")
+      assert(!keys.contains("guests"), s"the claimed-guest set is owner-only (#236): $keys")
+      assert(!body.noSpaces.contains(account.id), "not even embedded in another field")
+      assertEquals(missing.status, Status.NotFound)
+
+  test("a deactivated account is indistinguishable from a missing one"):
+    val blocked = UserAccount("0197f0a0-0000-7000-8000-00000000024b", "GoneNick", at, Some(at), isActive = false)
+    app(accounts = List(blocked))
+      .run(Request[IO](Method.GET, uri"/players/by-nickname/GoneNick"))
+      .map(resp => assertEquals(resp.status, Status.NotFound, "the API must not confirm a blocked nickname exists"))

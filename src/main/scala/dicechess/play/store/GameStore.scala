@@ -659,6 +659,11 @@ final case class LeaderboardEntry(
     tally: ResultTally
 )
 
+/** One account's leaderboard row (#249) — the human counterpart of [[LeaderboardEntry]]. `nickname` is the only public
+  * handle: the account's uuid stays server-side, per ADR-0017.
+  */
+final case class PlayerLeaderboardEntry(nickname: String, rating: Double, rd: Double, tally: ResultTally)
+
 /** Read seam for the public leaderboard/profile API (D.2, #103) — Postgres only, like [[GameResultsStore]]: the queries
   * join `bots` with aggregates over `game_results`, neither of which exists in the in-memory mode (the leaderboard
   * endpoints are simply not mounted without persistence).
@@ -669,6 +674,12 @@ trait LeaderboardStore:
     * policy (#119): counted internally, invisible publicly until the deviation settles.
     */
   def leaderboard(maxRd: Double): IO[List[LeaderboardEntry]]
+
+  /** Every ACCOUNT whose rating has converged (`glicko_rd <= maxRd`), best rating first, with its rated W-D-L record
+    * (#249). The human half of the one shared scale — same threshold, same policy: a provisional player is counted
+    * internally and invisible publicly until the deviation settles.
+    */
+  def playerLeaderboard(maxRd: Double): IO[List[PlayerLeaderboardEntry]]
 
   /** The rated, decided W-D-L record of one participant (either seat), for the profile endpoint. */
   def resultTallyFor(externalId: String): IO[ResultTally]
