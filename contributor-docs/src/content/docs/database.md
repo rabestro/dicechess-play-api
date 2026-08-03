@@ -53,8 +53,9 @@ triple (`glicko_rating`, `glicko_rd`, `glicko_vol`, seeded at 1500 / 350 / 0.06)
 `on_ladder` flag, and the human-facing catalog opt-in (`open_to_humans`, `description`).
 Primary key is `(team, name)`.
 
-`rated_for_humans` (V15) decides whether a game between this bot and a human counts for rating, and it is the
-one flag here that is **not** self-service. Its neighbours `on_ladder` and `open_to_humans` are set by the
+`rated_for_humans` (V15) decides whether a game between this bot and a human is **eligible** to count for rating
+(the batch that acts on it lands with the rest of the human-rating work), and it is the one flag here that is
+**not** self-service. Its neighbours `on_ladder` and `open_to_humans` are set by the
 bot's own bearer token, which is harmless: a bot choosing to play cannot corrupt anyone else's rating. This
 one can — an author able to set it would register a deliberately weak bot, open it, and farm rating off their
 own creation. So it is an operator decision, applied declaratively at boot from `PLAY_RATED_FOR_HUMANS` (see

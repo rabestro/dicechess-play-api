@@ -60,7 +60,7 @@ in their queues undelivered. Boot warns on stderr, and nothing else complains.
 | `RETENTION_DAYS` | Optional, default `30`. |
 | `RETENTION_BATCH_SIZE` | Optional, default `1000`. |
 | `PLAY_BOT_TOKENS` | Statically configured bots, as `team\|name\|token` CSV. |
-| `PLAY_RATED_FOR_HUMANS` | Operator-only roster (`;`-separated `team\|name`) of bots whose games against a human count for rating (#247). Additive; never settable from the bot API. |
+| `PLAY_RATED_FOR_HUMANS` | Operator-only roster (`;`-separated `team\|name`) marking bots as **eligible** for a human-vs-bot game to count for rating (#247). Eligibility only — the rating batch acts on it from #248. Additive; never settable from the bot API. |
 | `PLAY_CORS_ORIGINS` | Allowed origins; empty allows any (credential-less). A non-empty list also enables credentialed CORS — required once sign-in is on. |
 | `APP_VERSION` | Surfaced at `GET /version`. Set by the CD workflow from the git tag. |
 

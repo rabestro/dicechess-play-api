@@ -45,8 +45,9 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
               (users.updated(s"$provider:$subject", user), user)
         }
       }
-    def userById(id: String): IO[Option[UserAccount]]                        = ref.get.map(_.values.find(_.id == id))
-    def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(Some(UserRating.initial))
+    def userById(id: String): IO[Option[UserAccount]]    = ref.get.map(_.values.find(_.id == id))
+    def ratingOf(userId: String): IO[Option[UserRating]] =
+      ref.get.map(_.values.find(_.id == userId).map(_ => UserRating.initial))
     def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
       ref.modify { users =>
         users.find(_._2.id == userId) match

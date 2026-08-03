@@ -109,8 +109,9 @@ object Main extends IOApp.Simple:
       // Admin/env catalog roster (ADR-0014): open configured bots to human games at startup — the path for a bot that
       // can't self-flag via POST /bot/open-to-humans (e.g. a lost token). Persistence-only, like the catalog it feeds.
       _ <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyFromEnv(pg).void)
-      // The curated-for-rating roster (#247): which bots make a human-vs-bot game rated. Operator-only by design —
-      // see V15 and CatalogRoster for why this must never be reachable from the bot API.
+      // The curated-for-rating roster (#247): which bots are ELIGIBLE for a human-vs-bot game to count for rating.
+      // Eligibility only — the batch that acts on it arrives in #248. Operator-only by design: see V15 and
+      // CatalogRoster for why this must never be reachable from the bot API.
       _         <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyRatedFromEnv(pg).void)
       botEvents <- BotEvents.create
       // Declared per-bot capacity (#189). Both accept paths take the same `Direct` allowance — the full declaration,

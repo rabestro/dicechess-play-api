@@ -9,8 +9,9 @@ import dicechess.play.store.{BotCatalogState, BotStore}
   * static bot roster. Two independent rosters, deliberately two env vars rather than one grammar with a flag column —
   * they answer different questions and one is far more consequential than the other:
   *   - `PLAY_OPEN_TO_HUMANS` (ADR-0014) — may a visitor start a game against this bot;
-  *   - `PLAY_RATED_FOR_HUMANS` (#247) — does such a game count for rating. This one exists ONLY here because it must
-  *     not be self-service: a bot author who could set it would register a weak bot and farm rating off it (see V15).
+  *   - `PLAY_RATED_FOR_HUMANS` (#247) — is such a game ELIGIBLE to count for rating (the batch that would act on it
+  *     lands in #248). This roster exists ONLY here because the flag must not be self-service: a bot author who could
+  *     set it would register a weak bot and farm rating off it (see V15).
   *
   * The catalog roster exists because a registered bot normally opts in itself via `POST /bot/open-to-humans`, and a bot
   * whose registration token was not kept has no way to — so the single author flags it declaratively instead.
@@ -33,7 +34,7 @@ object CatalogRoster:
   /** What happened to one entry when applied. */
   enum Result:
     case Opened(entry: Entry, state: BotCatalogState)
-    case Rated(entry: Entry)   // marked curated for rating (#247)
+    case Rated(entry: Entry)
     case Skipped(entry: Entry) // named an unregistered identity — no row to flag
 
   /** Parse the roster spec. Blank and malformed entries (missing team or name) are ignored, so a stray separator or a
@@ -69,7 +70,7 @@ object CatalogRoster:
     parse(spec).traverse { entry =>
       store.setRatedForHumans(entry.team, entry.name, ratedForHumans = true).flatMap {
         case Some(_) =>
-          IO.println(s"[play][rating] ${entry.team}/${entry.name} is curated: human games against it are rated")
+          IO.println(s"[play][rating] ${entry.team}/${entry.name} is eligible: human games against it may be rated")
             .as(Result.Rated(entry))
         case None =>
           Console[IO]

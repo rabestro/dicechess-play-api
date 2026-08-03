@@ -100,10 +100,11 @@ cannot be made to act as anyone else. Those fields became optional: required onl
 A tokenless `GET /games/{id}/ws` also falls back to the session and reconnects a signed-in player to the single seat
 they occupy (the fix for a lost `?seat=` URL); two seats held by the same account (friend-by-link before the share
 link is used) stays ambiguous, so the join token remains the only way in there.
-Human ratings (#247/#238, ADR-0017): accounts carry the SAME Glicko-2 triple as bots (V15, seeds 1500/350/0.06)
-because there is ONE shared scale — that is what makes the two populations comparable and what solves cold start.
+Human ratings (#247/#238, ADR-0017): V15 PREPARES the shared scale — accounts carry the same Glicko-2 triple as
+bots (seeds 1500/350/0.06) because there is ONE scale, which is what makes the two populations comparable and what
+solves cold start. Nothing computes a human rating yet: `RatingBatch` stays bot-vs-bot until #248.
 `PLAY_RATED_FOR_HUMANS` (`;`-separated `team|name`, same grammar as `PLAY_OPEN_TO_HUMANS`) is the operator-only
-roster marking which bots make a human-vs-bot game rated. **Never expose `bots.rated_for_humans` on the bot API**:
+roster marking which bots are ELIGIBLE for a human-vs-bot game to count. **Never expose `bots.rated_for_humans` on the bot API**:
 its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one
 would register a weak bot and farm rating off it. Both rosters are additive — a typo narrows what is enabled.
 Claimed guest history (#236, ADR-0017): `GameResultsStore.playerGamesPage`/`opponentsFor` take a LIST of

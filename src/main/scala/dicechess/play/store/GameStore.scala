@@ -193,8 +193,14 @@ object BotRating:
   /** A freshly registered bot's starting state: Glickman's suggested defaults for a new, unrated player, opted out of
     * the ladder until explicitly turned on.
     */
-  val initial: BotRating =
-    BotRating(glickoRating = 1500, glickoRd = 350, glickoVol = 0.06, onLadder = false, None, ratedForHumans = false)
+  val initial: BotRating = BotRating(
+    glickoRating = 1500,
+    glickoRd = 350,
+    glickoVol = 0.06,
+    onLadder = false,
+    ownerExternalId = None,
+    ratedForHumans = false
+  )
 
 /** A registered bot's catalog opt-in state (ADR-0014): whether it is advertised to human players and its optional
   * one-line description. Returned by the open/close store methods, read back atomically so the caller sees exactly the

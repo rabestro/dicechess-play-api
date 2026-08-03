@@ -60,6 +60,20 @@ class CatalogRosterSuite extends munit.CatsEffectSuite:
       assertEquals(curated.map(_.ratedForHumans), Some(true))
       assertEquals(plain.map(_.ratedForHumans), Some(false), "a bot absent from the roster stays uncurated")
 
+  test("the two rosters are independent: marking a bot rated never opens it to humans"):
+    for
+      store <- BotStore.inMemory
+      _     <- store.register("t", "rated-only", "hash-rated-only")
+      _     <- CatalogRoster.applyRated(store, "t|rated-only")
+      after <- store.ratingOf("t", "rated-only")
+      pool  <- store.openToHumansBots
+    yield
+      assertEquals(after.map(_.ratedForHumans), Some(true))
+      assert(
+        !pool.contains(Principal.Bot("t", "rated-only")),
+        s"eligibility for rating must not advertise the bot in the human catalog, got $pool"
+      )
+
   test("the two rosters are independent: opening a bot to humans never makes its games rated"):
     for
       store <- BotStore.inMemory
