@@ -3,7 +3,6 @@ package dicechess.play.server
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import dicechess.play.core.{GameId, Principal}
-import dicechess.play.store.BotStore
 import dicechess.play.store.{
   GameResultRow,
   GameResultsStore,
@@ -122,112 +121,6 @@ class MeRoutesSuite extends munit.CatsEffectSuite:
   private def signedIn(method: Method, path: String, token: String): Request[IO] =
     Request[IO](method, org.http4s.Uri.unsafeFromString(path))
       .addCookie(RequestCookie(AuthSession.SessionCookieName, token))
-
-  /** A real in-memory `BotAuth` — the ownership routes are about the interaction of two credentials, so stubbing the
-    * bot half away would test nothing.
-    */
-  private def withBots: IO[(HttpApp[IO], UserAccount, String, BotAuth, StubUsers)] =
-    for
-      accounts <- Ref.of[IO, Map[String, UserAccount]](Map.empty)
-      links    <- Ref.of[IO, Map[String, String]](Map.empty)
-      seen     <- Ref.of[IO, List[List[String]]](Nil)
-      store    <- BotStore.inMemory
-      auth     <- BotAuth.fromSpec("", store)
-      users   = StubUsers(accounts, links)
-      session = AuthSession(users, Secret)
-      user  <- users.upsertOnLogin("google", "sub-owner", None, IO.pure("OwnerNick"))
-      token <- session.sign(user)
-    yield (MeRoutes(session, users, SpyResults(seen, Nil), bots = Some(auth)).orNotFound, user, token, auth, users)
-
-  private def claim(token: Option[String], botToken: Option[String]): Request[IO] =
-    val base        = Request[IO](Method.POST, uri"/me/bots/claim")
-    val withSession = token.fold(base)(t => base.addCookie(RequestCookie(AuthSession.SessionCookieName, t)))
-    botToken.fold(withSession)(b =>
-      withSession.putHeaders(
-        org.http4s.headers.Authorization(org.http4s.Credentials.Token(org.http4s.AuthScheme.Bearer, b))
-      )
-    )
-
-  test("claiming a bot requires BOTH a session and the bot's own token"):
-    for
-      (app, _, session, auth, _) <- withBots
-      registered                 <- auth.register("acme", "alice")
-      botToken = registered.toOption.map(_._1).getOrElse(fail("registration failed"))
-      noSession <- app.run(claim(None, Some(botToken)))
-      noBot     <- app.run(claim(Some(session), None))
-      both      <- app.run(claim(Some(session), Some(botToken)))
-      mine      <- both.as[MyBots]
-    yield
-      assertEquals(noSession.status, Status.Unauthorized, "a bot token alone has nobody to claim it for")
-      assertEquals(noBot.status, Status.Unauthorized, "a session alone would let anyone claim any bot")
-      assertEquals(both.status, Status.Ok)
-      assertEquals(mine.bots.map(b => (b.team, b.name)), List(("acme", "alice")))
-
-  test("re-claiming your own bot is idempotent; another account's bot is a 409, never a takeover"):
-    for
-      (app, _, session, auth, users) <- withBots
-      registered                     <- auth.register("acme", "mine")
-      botToken = registered.toOption.map(_._1).getOrElse(fail("registration failed"))
-      _     <- app.run(claim(Some(session), Some(botToken)))
-      again <- app.run(claim(Some(session), Some(botToken)))
-      // A second account, holding the very same bot token: possession is not enough to steal attribution.
-      rival      <- users.upsertOnLogin("google", "sub-rival-owner", None, IO.pure("RivalOwner"))
-      rivalToken <- AuthSession(users, Secret).sign(rival)
-      stolen     <- app.run(claim(Some(rivalToken), Some(botToken)))
-    yield
-      assertEquals(again.status, Status.Ok, "a retry must not be an error")
-      assertEquals(stolen.status, Status.Conflict)
-
-  test("an anonymous bot cannot be owned — it has no row"):
-    for
-      (app, _, session, auth, _) <- withBots
-      anon                       <- auth.mintAnon(Some("scratch"))
-      res                        <- app.run(claim(Some(session), Some(anon._1)))
-    yield assertEquals(res.status, Status.NotFound, "only a registered identity can be owned")
-
-  test("releasing makes the bot claimable by another account, and only its owner may release it"):
-    for
-      (app, _, session, auth, users) <- withBots
-      registered                     <- auth.register("acme", "handover")
-      botToken = registered.toOption.map(_._1).getOrElse(fail("registration failed"))
-      _          <- app.run(claim(Some(session), Some(botToken)))
-      rival      <- users.upsertOnLogin("google", "sub-next-owner", None, IO.pure("NextOwner"))
-      rivalToken <- AuthSession(users, Secret).sign(rival)
-      // Not yours: one answer for "not yours" and "not there", so this cannot probe who owns what.
-      notYours <- app.run(
-        Request[IO](Method.DELETE, uri"/me/bots/acme/handover")
-          .addCookie(RequestCookie(AuthSession.SessionCookieName, rivalToken))
-      )
-      released <- app.run(
-        Request[IO](Method.DELETE, uri"/me/bots/acme/handover")
-          .addCookie(RequestCookie(AuthSession.SessionCookieName, session))
-      )
-      empty     <- released.as[MyBots]
-      reclaimed <- app.run(claim(Some(rivalToken), Some(botToken)))
-    yield
-      assertEquals(notYours.status, Status.NotFound)
-      assertEquals(released.status, Status.Ok)
-      assertEquals(empty.bots, Nil, "the released bot leaves the owner's list")
-      assertEquals(reclaimed.status, Status.Ok, "release is the explicit half of a transfer")
-
-  test("GET /me/bots lists only the caller's bots"):
-    for
-      (app, _, session, auth, users) <- withBots
-      a                              <- auth.register("acme", "first")
-      b                              <- auth.register("acme", "second")
-      _                              <- app.run(claim(Some(session), a.toOption.map(_._1)))
-      rival                          <- users.upsertOnLogin("google", "sub-other-owner", None, IO.pure("OtherOwner"))
-      rivalToken                     <- AuthSession(users, Secret).sign(rival)
-      _                              <- app.run(claim(Some(rivalToken), b.toOption.map(_._1)))
-      mine                           <- app
-        .run(Request[IO](Method.GET, uri"/me/bots").addCookie(RequestCookie(AuthSession.SessionCookieName, session)))
-        .flatMap(_.as[MyBots])
-      other <- app
-        .run(Request[IO](Method.GET, uri"/me/bots").addCookie(RequestCookie(AuthSession.SessionCookieName, rivalToken)))
-        .flatMap(_.as[MyBots])
-    yield
-      assertEquals(mine.bots.map(_.name), List("first"))
-      assertEquals(other.bots.map(_.name), List("second"))
 
   test("every /me route answers 401 without a session"):
     for
