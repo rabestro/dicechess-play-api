@@ -101,6 +101,7 @@ Indexes:
 | `open_to_humans` | `boolean` | no | `false` | — |
 | `description` | `text` | yes | — | — |
 | `max_concurrent_games` | `integer` | no | `1` | — |
+| `rated_for_humans` | `boolean` | no | `false` | — |
 
 Check constraints:
 
@@ -242,6 +243,9 @@ Indexes:
 | `created_at` | `timestamp with time zone` | no | `now()` | — |
 | `last_login_at` | `timestamp with time zone` | yes | — | — |
 | `is_active` | `boolean` | no | `true` | — |
+| `glicko_rating` | `double precision` | no | `1500` | — |
+| `glicko_rd` | `double precision` | no | `350` | — |
+| `glicko_vol` | `double precision` | no | `0.06` | — |
 
 Indexes:
 

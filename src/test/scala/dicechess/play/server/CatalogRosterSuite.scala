@@ -46,3 +46,31 @@ class CatalogRosterSuite extends munit.CatsEffectSuite:
       assert(pool.contains(Principal.Bot("t", "alpha")), s"alpha must be opened, got $pool")
       assert(pool.contains(Principal.Bot("t", "beta")), s"beta must be opened, got $pool")
       assert(!pool.contains(Principal.Bot("t", "ghost")), s"ghost must be skipped, got $pool")
+
+  test("applyRated marks exactly the listed registered bots as curated, and skips an unregistered one"):
+    for
+      store   <- BotStore.inMemory
+      _       <- store.register("t", "curated", "hash-curated")
+      _       <- store.register("t", "plain", "hash-plain")
+      results <- CatalogRoster.applyRated(store, "t|curated;t|ghost")
+      curated <- store.ratingOf("t", "curated")
+      plain   <- store.ratingOf("t", "plain")
+    yield
+      assertEquals(results, List(Result.Rated(Entry("t", "curated", None)), Result.Skipped(Entry("t", "ghost", None))))
+      assertEquals(curated.map(_.ratedForHumans), Some(true))
+      assertEquals(plain.map(_.ratedForHumans), Some(false), "a bot absent from the roster stays uncurated")
+
+  test("the two rosters are independent: opening a bot to humans never makes its games rated"):
+    for
+      store <- BotStore.inMemory
+      _     <- store.register("t", "open", "hash-open")
+      _     <- CatalogRoster.apply(store, "t|open|Plays anyone")
+      after <- store.ratingOf("t", "open")
+      pool  <- store.openToHumansBots
+    yield
+      assert(pool.contains(Principal.Bot("t", "open")))
+      assertEquals(
+        after.map(_.ratedForHumans),
+        Some(false),
+        "open_to_humans is self-service; rated_for_humans must never ride along with it"
+      )

@@ -45,11 +45,13 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
     */
   private def stubBots(open: Set[(String, String)], declared: Map[(String, String), Int]): BotStore =
     new BotStore:
-      def register(team: String, name: String, tokenHash: String): IO[Boolean]                     = IO.pure(false)
-      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                               = IO.pure(None)
-      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                    = IO.pure(false)
-      def ratingOf(team: String, name: String): IO[Option[BotRating]]                              = IO.pure(None)
-      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]        = IO.pure(None)
+      def register(team: String, name: String, tokenHash: String): IO[Boolean]                 = IO.pure(false)
+      def authenticate(tokenHash: String): IO[Option[Principal.Bot]]                           = IO.pure(None)
+      def rotate(team: String, name: String, newTokenHash: String): IO[Boolean]                = IO.pure(false)
+      def ratingOf(team: String, name: String): IO[Option[BotRating]]                          = IO.pure(None)
+      def setOnLadder(team: String, name: String, onLadder: Boolean): IO[Option[BotRating]]    = IO.pure(None)
+      def setRatedForHumans(team: String, name: String, rated: Boolean): IO[Option[BotRating]] =
+        IO.pure(None)
       def onLadderCandidates: IO[List[BotSeatPolicy]]                                              = IO.pure(Nil)
       def setMaxConcurrentGames(team: String, name: String, limit: Int): IO[Option[BotSeatPolicy]] = IO.pure(None)
       def seatPolicyOf(team: String, name: String): IO[Option[BotSeatPolicy]]                      =

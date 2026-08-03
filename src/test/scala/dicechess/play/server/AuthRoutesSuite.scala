@@ -2,7 +2,7 @@ package dicechess.play.server
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import dicechess.play.store.{GuestLink, NicknameUpdate, UserAccount, UserStore}
+import dicechess.play.store.{GuestLink, NicknameUpdate, UserAccount, UserRating, UserStore}
 import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.headers.Location
 import org.http4s.implicits.*
@@ -46,6 +46,7 @@ class AuthRoutesSuite extends munit.CatsEffectSuite:
         }
       }
     def userById(id: String): IO[Option[UserAccount]]                        = ref.get.map(_.values.find(_.id == id))
+    def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(Some(UserRating.initial))
     def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] =
       ref.modify { users =>
         users.find(_._2.id == userId) match
