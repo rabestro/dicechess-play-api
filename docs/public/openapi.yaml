@@ -789,14 +789,19 @@ components:
     PlayBotRequest:
       type: object
       properties:
-        guestId: { type: string, format: uuid }
+        guestId:
+          type: string
+          format: uuid
+          description: >-
+            Anonymous fallback. Required only when the request carries no account session cookie; with a session the
+            player is seated from it and this field is ignored.
         team: { type: string }
         name: { type: string }
         timeControl: { $ref: '#/components/schemas/TimeControl' }
         preferredColor:
           allOf: [{ $ref: '#/components/schemas/Side' }]
           description: Omitted = random seat.
-      required: [guestId, team, name, timeControl]
+      required: [team, name, timeControl]
     PlayBotMatch:
       type: object
       properties:

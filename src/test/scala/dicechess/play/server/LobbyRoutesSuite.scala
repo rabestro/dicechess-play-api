@@ -28,14 +28,14 @@ class LobbyRoutesSuite extends munit.CatsEffectSuite:
     app.flatMap: service =>
       for
         empty <- service
-          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek("")))
+          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(Some(""))))
           .map(_.status)
         // A value containing `:` would otherwise produce an ambiguous, colon-joined external_id.
         colonJoined <- service
-          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek("guest:not-a-uuid")))
+          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(Some("guest:not-a-uuid"))))
           .map(_.status)
         valid <- service
-          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(ValidCreator)))
+          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(Some(ValidCreator))))
           .map(_.status)
       yield
         assertEquals(empty, Status.BadRequest)
@@ -45,7 +45,7 @@ class LobbyRoutesSuite extends munit.CatsEffectSuite:
   test("POST /lobby/seeks without a time control gets a clock, not Unlimited (rabestro/dicechess-play#99)"):
     app.flatMap: service =>
       for
-        _    <- service.run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(ValidCreator)))
+        _    <- service.run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(Some(ValidCreator))))
         open <- service.run(Request[IO](Method.GET, uri"/lobby/seeks")).flatMap(_.as[List[Seek]])
       yield
         // A clockless seek in the public lobby is the bug this default exists to prevent: nothing ever ends
@@ -58,7 +58,7 @@ class LobbyRoutesSuite extends munit.CatsEffectSuite:
       for
         _ <- service.run(
           Request[IO](Method.POST, uri"/lobby/seeks")
-            .withEntity(CreateSeek(ValidCreator, Some(TimeControl.Unlimited)))
+            .withEntity(CreateSeek(Some(ValidCreator), Some(TimeControl.Unlimited)))
         )
         open <- service.run(Request[IO](Method.GET, uri"/lobby/seeks")).flatMap(_.as[List[Seek]])
       yield assertEquals(open.map(_.timeControl), List(TimeControl.Unlimited: TimeControl))
@@ -67,18 +67,18 @@ class LobbyRoutesSuite extends munit.CatsEffectSuite:
     app.flatMap: service =>
       for
         created <- service
-          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(ValidCreator)))
+          .run(Request[IO](Method.POST, uri"/lobby/seeks").withEntity(CreateSeek(Some(ValidCreator))))
           .flatMap(_.as[CreatedSeek])
         garbage <- service
           .run(
             Request[IO](Method.POST, uri"/lobby/seeks" / created.seekId / "accept")
-              .withEntity(AcceptSeek("not-a-uuid"))
+              .withEntity(AcceptSeek(Some("not-a-uuid")))
           )
           .map(_.status)
         accepted <- service
           .run(
             Request[IO](Method.POST, uri"/lobby/seeks" / created.seekId / "accept")
-              .withEntity(AcceptSeek(ValidAccepter))
+              .withEntity(AcceptSeek(Some(ValidAccepter)))
           )
           .map(_.status)
       yield

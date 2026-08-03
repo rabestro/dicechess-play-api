@@ -304,7 +304,7 @@ class CatalogRoutesSuite extends munit.CatsEffectSuite:
       timeControl: TimeControl = TimeControl.Fischer(300, 5),
       preferredColor: Option[Side] = None
   ): Request[IO] =
-    request(Method.POST, "/lobby/play-bot").withEntity(PlayBot(guestId, team, name, timeControl, preferredColor))
+    request(Method.POST, "/lobby/play-bot").withEntity(PlayBot(Some(guestId), team, name, timeControl, preferredColor))
 
   test("POST /lobby/play-bot seats the guest on its preferred color and the bot on the other"):
     val guestB = "22222222-2222-2222-2222-222222222222"

@@ -44,13 +44,14 @@ final case class BotCatalog(bots: List[CatalogBot]) derives Codec.AsObject
   */
 final case class Wake(alive: Boolean, busy: Boolean = false) derives Codec.AsObject
 
-/** `POST /lobby/play-bot` body (ADR-0014, E4): start a guest-vs-bot game from the catalog. `guestId` is the SPA's
-  * stable per-browser identity (a UUID — same convention `POST /lobby/seeks` uses for `creator`). `timeControl` is
-  * mandatory: a catalog game is never unlimited. `preferredColor` absent means a random seat (the default);
-  * `Some(side)` seats the guest there and the bot on the other side.
+/** `POST /lobby/play-bot` body (ADR-0014, E4): start a human-vs-bot game from the catalog. `guestId` is the anonymous
+  * fallback (#235): a signed-in caller is seated from the session and the field is ignored; without a session it is
+  * required (the SPA's stable per-browser UUID — same convention `POST /lobby/seeks` uses for `creator`). `timeControl`
+  * is mandatory: a catalog game is never unlimited. `preferredColor` absent means a random seat (the default);
+  * `Some(side)` seats the human there and the bot on the other side.
   */
 final case class PlayBot(
-    guestId: String,
+    guestId: Option[String] = None,
     team: String,
     name: String,
     timeControl: TimeControl,
@@ -73,7 +74,8 @@ object CatalogRoutes:
       webhooks: Option[Webhooks],
       registry: GameRegistry,
       wakeLimiter: AnonMintLimiter,
-      playBotLimiter: AnonMintLimiter
+      playBotLimiter: AnonMintLimiter,
+      session: Option[AuthSession] = None
   ): HttpRoutes[IO] =
     // Built once, not per request: it is a pure view over the two collaborators already threaded here.
     val guard = SeatGuard(bots, registry)
@@ -114,7 +116,7 @@ object CatalogRoutes:
               }
 
       case req @ POST -> Root / "lobby" / "play-bot" =>
-        playBot(req, bots, registry, guard, playBotLimiter)
+        playBot(req, bots, registry, guard, playBotLimiter, session)
 
   /** Derive the catalog card from a stored listing, flagging (not hiding) a not-yet-converged rating — the same RD
     * threshold the leaderboard uses to hide provisional bots. `available` (#224) is one in-memory registry lookup
@@ -146,7 +148,8 @@ object CatalogRoutes:
       bots: BotStore,
       registry: GameRegistry,
       guard: SeatGuard,
-      limiter: AnonMintLimiter
+      limiter: AnonMintLimiter,
+      session: Option[AuthSession]
   ): IO[Response[IO]] =
     limiter
       .attempt(BotRoutes.clientIp(req))
@@ -161,12 +164,14 @@ object CatalogRoutes:
             .flatMap:
               case Left(failure) => BadRequest(failure.message)
               case Right(body)   =>
-                Principal.guest(body.guestId) match
-                  case Left(err)    => BadRequest(s"guestId: $err")
-                  case Right(guest) =>
-                    if body.timeControl == TimeControl.Unlimited then
-                      BadRequest("a catalog game must have a time control")
-                    else startAgainstBot(guest, body, bots, registry, guard)
+                AuthSession
+                  .actingPrincipal(session, req, body.guestId, "guestId")
+                  .flatMap:
+                    case Left(err)     => BadRequest(s"guestId: $err")
+                    case Right(player) =>
+                      if body.timeControl == TimeControl.Unlimited then
+                        BadRequest("a catalog game must have a time control")
+                      else startAgainstBot(player, body, bots, registry, guard)
 
   /** Guest identity and time control are already validated; from here: the 1-active-game gate, catalog membership, the
     * bot's own declared capacity, seat assignment, and the actual `registry.create`.
@@ -175,13 +180,13 @@ object CatalogRoutes:
     * whether some unrelated identity happens to be busy.
     */
   private def startAgainstBot(
-      guest: Principal.Guest,
+      player: Principal,
       body: PlayBot,
       bots: BotStore,
       registry: GameRegistry,
       guard: SeatGuard
   ): IO[Response[IO]] =
-    registry.activeGamesFor(guest).flatMap {
+    registry.activeGamesFor(player).flatMap {
       case active if active > 0 => Conflict("you already have an active game — finish it before starting another")
       case _                    =>
         val target: Principal.Bot = Principal.Bot(body.team, body.name)
@@ -192,41 +197,41 @@ object CatalogRoutes:
             // must say so, or a visitor is left staring at a position nobody will answer.
             guard.admits(target, SeatGuard.Purpose.Direct).flatMap {
               case false => Conflict("that bot is busy — it is at its concurrent-game limit; try another or retry soon")
-              case true  => seatGame(guest, body, target, registry)
+              case true  => seatGame(player, body, target, registry)
             }
         }
     }
 
-  /** Assign seats and create the room; the guest gets back its own seat token. */
+  /** Assign seats and create the room; the human gets back its own seat token. */
   private def seatGame(
-      guest: Principal.Guest,
+      player: Principal,
       body: PlayBot,
       target: Principal.Bot,
       registry: GameRegistry
   ): IO[Response[IO]] =
-    seatAssignment(body.preferredColor, guest, target).flatMap { (white, black, guestSeat) =>
+    seatAssignment(body.preferredColor, player, target).flatMap { (white, black, playerSeat) =>
       registry
         .create(white, black, body.timeControl, requestedRated = false)
         .flatMap:
           case Left(error)           => BadRequest(error)
           case Right((gameId, room)) =>
-            room.joinTokens.get(guestSeat) match
-              case Some(token) => Created(SeekMatch(gameId.value, token, guestSeat))
+            room.joinTokens.get(playerSeat) match
+              case Some(token) => Created(SeekMatch(gameId.value, token, playerSeat))
               case None        => InternalServerError("missing seat token")
     }
 
-  /** `(white, black, guestSeat)`: the guest's chosen side if given, otherwise a coin flip — the ADR's "random by
+  /** `(white, black, playerSeat)`: the human's chosen side if given, otherwise a coin flip — the ADR's "random by
     * default" policy.
     */
   private def seatAssignment(
       preferredColor: Option[Side],
-      guest: Principal.Guest,
+      player: Principal,
       bot: Principal.Bot
   ): IO[(Principal, Principal, Seat)] =
     preferredColor match
-      case Some(Side.White) => IO.pure((guest, bot, Seat.White))
-      case Some(Side.Black) => IO.pure((bot, guest, Seat.Black))
+      case Some(Side.White) => IO.pure((player, bot, Seat.White))
+      case Some(Side.Black) => IO.pure((bot, player, Seat.Black))
       case None             =>
-        IO(SecureRandom().nextBoolean()).map(guestIsWhite =>
-          if guestIsWhite then (guest, bot, Seat.White) else (bot, guest, Seat.Black)
+        IO(SecureRandom().nextBoolean()).map(playerIsWhite =>
+          if playerIsWhite then (player, bot, Seat.White) else (bot, player, Seat.Black)
         )

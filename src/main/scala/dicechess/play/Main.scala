@@ -126,7 +126,10 @@ object Main extends IOApp.Simple:
       googleConfig  <- GoogleAuth.configFromEnv
       sessionSecret <- AuthSession.secretFromEnv
       frontendUrl   <- AuthSession.frontendUrlFromEnv
-      _             <- warnLegacyLadderVars
+      // One session verifier shared by the /auth routes AND the game-start/WS routes (#235): with persistence and a
+      // secret, a signed-in caller is seated as Principal.User wherever a guest id used to be trusted from the body.
+      authSession = (pgStore, sessionSecret).mapN((pg, secret) => AuthSession(pg, secret))
+      _ <- warnLegacyLadderVars
       // The ladder scheduler is opt-in by env (LADDER_INTERVAL_SECONDS) — same "absence disables" idiom as
       // persistence/ingest above. Unset, the ladder never starts games on its own even if bots are on_ladder.
       ladderLoop <- LadderScheduler.configFromEnv match
@@ -239,7 +242,7 @@ object Main extends IOApp.Simple:
             pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => LeaderboardRoutes(botStore, pg, pg))
           // Same DB-only gating: the human catalog reads the bots table's rating + description columns (ADR-0014).
           val catalog = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg =>
-            CatalogRoutes(pg, botStore, webhookService, registry, wakeLimit, playBotLimit)
+            CatalogRoutes(pg, botStore, webhookService, registry, wakeLimit, playBotLimit, authSession)
           )
           // A visitor's own finished games (#151) — same DB-only-seam idiom: no game_results projection without a
           // database, so the route is simply not mounted.
@@ -256,9 +259,9 @@ object Main extends IOApp.Simple:
           // Google sign-in (#233, ADR-0017): needs persistence (users live in Postgres) AND the full auth config —
           // Google client + session secret. Anything less and the routes are simply not mounted (404), the same
           // absence-disables idiom as everything above; GoogleAuth.configFromEnv warns on a PARTIAL Google config.
-          val auth = (pgStore, googleConfig, sessionSecret)
-            .mapN { (pg, gc, secret) =>
-              AuthRoutes(AuthSession(pg, secret), GoogleAuth.live(gc), pg, frontendUrl)
+          val auth = (pgStore, googleConfig, authSession)
+            .mapN { (pg, gc, s) =>
+              AuthRoutes(s, GoogleAuth.live(gc), pg, frontendUrl)
             }
             .getOrElse(org.http4s.HttpRoutes.empty[IO])
           EmberServerBuilder
@@ -267,7 +270,11 @@ object Main extends IOApp.Simple:
             .withPort(port)
             .withHttpWebSocketApp(wsb =>
               cors(
-                (HealthRoutes(version) <+> PlayRoutes(registry, wsb) <+> LobbyRoutes(lobby) <+> leaderboard <+>
+                (HealthRoutes(version) <+> PlayRoutes(registry, wsb, authSession) <+> LobbyRoutes(
+                  lobby,
+                  authSession
+                ) <+>
+                  leaderboard <+>
                   catalog <+> playerGames <+> strength <+> history <+> ingest <+> auth <+>
                   WebhookRoutes(botAuth, webhookService, webhookLimit, pgStore) <+>
                   BotRoutes(

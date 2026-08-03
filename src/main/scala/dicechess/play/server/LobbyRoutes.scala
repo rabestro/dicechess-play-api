@@ -1,7 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.IO
-import dicechess.play.core.{Principal, Seat, TimeControl}
+import dicechess.play.core.{Seat, TimeControl}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.HttpRoutes
@@ -9,15 +9,19 @@ import org.http4s.circe.CirceEntityCodec.given
 import org.http4s.dsl.io.*
 
 /** Create an open seek. `creator`'s eventual seat (White or Black) is decided at accept time, not here — see
-  * `Lobby.accept`.
+  * `Lobby.accept`. `creator` is the anonymous fallback (#235): a signed-in caller is seated from the session and the
+  * field is ignored; without a session it is required.
   */
-final case class CreateSeek(creator: String, timeControl: Option[TimeControl] = None) derives Codec.AsObject
+final case class CreateSeek(creator: Option[String] = None, timeControl: Option[TimeControl] = None)
+    derives Codec.AsObject
 
 /** The created seek's public id plus the creator's capability secret (poll status / cancel with it). */
 final case class CreatedSeek(seekId: String, secret: String) derives Codec.AsObject
 
-/** Accept an open seek. `accepter`'s seat (White or Black) is randomly assigned — see `Lobby.accept`. */
-final case class AcceptSeek(accepter: String) derives Codec.AsObject
+/** Accept an open seek. `accepter`'s seat (White or Black) is randomly assigned — see `Lobby.accept`. Same session-wins
+  * rule as `CreateSeek.creator` (#235).
+  */
+final case class AcceptSeek(accepter: Option[String] = None) derives Codec.AsObject
 
 /** A creator's status poll: `matched` false while open; once matched it carries the game id, the creator's seat token,
   * and the seat that token names (randomly assigned at accept time — see `Lobby.accept`).
@@ -41,7 +45,7 @@ object LobbyRoutes:
 
   private object SecretParam extends OptionalQueryParamDecoderMatcher[String]("secret")
 
-  def apply(lobby: Lobby): HttpRoutes[IO] =
+  def apply(lobby: Lobby, session: Option[AuthSession] = None): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case GET -> Root / "lobby" / "seeks" =>
         lobby.list.flatMap(Ok(_))
@@ -53,15 +57,17 @@ object LobbyRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              Principal.guest(body.creator) match
-                case Left(err)      => BadRequest(s"creator: $err")
-                case Right(creator) =>
-                  lobby
-                    .create(creator, body.timeControl.getOrElse(TimeControl.Default))
-                    .flatMap:
-                      case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
-                      // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
-                      case Left(Lobby.CreateRejected.TooManyOpenSeeks) => TooManyRequests("too many open seeks")
+              AuthSession
+                .actingPrincipal(session, req, body.creator, "creator")
+                .flatMap:
+                  case Left(err)      => BadRequest(s"creator: $err")
+                  case Right(creator) =>
+                    lobby
+                      .create(creator, body.timeControl.getOrElse(TimeControl.Default))
+                      .flatMap:
+                        case Right((seek, secret)) => Created(CreatedSeek(seek.id, secret))
+                        // Guests are uncapped today; the branch exists for the type (the cap applies to bot creators).
+                        case Left(Lobby.CreateRejected.TooManyOpenSeeks) => TooManyRequests("too many open seeks")
 
       case GET -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>
         secret match
@@ -82,19 +88,21 @@ object LobbyRoutes:
           .flatMap:
             case Left(failure) => BadRequest(failure.message)
             case Right(body)   =>
-              Principal.guest(body.accepter) match
-                case Left(err)       => BadRequest(s"accepter: $err")
-                case Right(accepter) =>
-                  lobby
-                    .accept(id, accepter)
-                    .flatMap:
-                      case Right(m)                          => Created(SeekMatch(m.gameId, m.token, m.seat))
-                      case Left(Lobby.Rejected.NotFound)     => NotFound()
-                      case Left(Lobby.Rejected.AlreadyTaken) => Conflict()
-                      case Left(Lobby.Rejected.OwnSeek)      => BadRequest("cannot accept your own seek")
-                      // The seek stays open — the bot that posted it is simply full right now (#189).
-                      case Left(Lobby.Rejected.Busy)          => Conflict("that bot is at its concurrent-game limit")
-                      case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
+              AuthSession
+                .actingPrincipal(session, req, body.accepter, "accepter")
+                .flatMap:
+                  case Left(err)       => BadRequest(s"accepter: $err")
+                  case Right(accepter) =>
+                    lobby
+                      .accept(id, accepter)
+                      .flatMap:
+                        case Right(m)                          => Created(SeekMatch(m.gameId, m.token, m.seat))
+                        case Left(Lobby.Rejected.NotFound)     => NotFound()
+                        case Left(Lobby.Rejected.AlreadyTaken) => Conflict()
+                        case Left(Lobby.Rejected.OwnSeek)      => BadRequest("cannot accept your own seek")
+                        // The seek stays open — the bot that posted it is simply full right now (#189).
+                        case Left(Lobby.Rejected.Busy)          => Conflict("that bot is at its concurrent-game limit")
+                        case Left(Lobby.Rejected.Failed(error)) => BadRequest(error)
 
       case DELETE -> Root / "lobby" / "seeks" / id :? SecretParam(secret) =>
         secret match
