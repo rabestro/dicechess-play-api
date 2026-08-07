@@ -6,6 +6,11 @@
 #
 # Branch type is the PRIMARY signal — it states what the change IS. Paths are only a safety net for
 # a PR whose branch was named off-convention.
+#
+# This file is read from the BASE branch, not from the pull request: `labeler.yaml` runs on
+# `pull_request_target`, which is what stops a fork from executing its own config. So an edit here
+# cannot label its own PR — it takes effect on PRs opened (or pushed to) after it merges, and any
+# already-open PR is re-labelled on its next push.
 
 # ── Branch type → label. Total over the types `enforce-pr-policy.yaml` accepts ───────────────────
 # (task|feat|feature|bug|refactor|chore|docs|ci|test|perf). `chore` is deliberately unmapped: it is
