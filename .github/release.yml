@@ -1,5 +1,12 @@
 # Categorizes auto-generated release notes (gh release create --generate-notes)
 # by the standardized PR labels applied by .github/labeler.yml.
+#
+# ORDER IS PRIORITY: a PR carries several labels (a feature usually also touches tests and docs),
+# and GitHub files it under the FIRST category whose labels match. So the categories that describe
+# what the change IS must precede the ones that describe what it happened to touch.
+#
+# Every label the labeler can apply needs a category here, or the PR silently lands in
+# "Other Changes" — that is how a test-only PR disappeared from v0.16.0's feature list.
 changelog:
   categories:
     - title: 🚀 New Features
@@ -8,6 +15,8 @@ changelog:
       labels: [bug]
     - title: 🛠 Refactoring & Performance
       labels: [refactoring, performance]
+    - title: 🧪 Tests
+      labels: [testing]
     - title: 📚 Documentation
       labels: [documentation]
     - title: ⚙️ CI/CD
