@@ -260,7 +260,7 @@ object Main extends IOApp.Simple:
           )
           // A visitor's own finished games (#151) — same DB-only-seam idiom: no game_results projection without a
           // database, so the route is simply not mounted.
-          val playerGames = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => PlayerRoutes(pg))
+          val playerGames = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => PlayerRoutes(pg, pg))
           // Same DB-only gating again (#181): `strengthCache` exists either way, but with no persistence there is no
           // rating batch to ever populate it, so mounting the route would just mean an eternal 503 instead of a 404.
           val strength = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(_ => StrengthRoutes(botStore, strengthCache))

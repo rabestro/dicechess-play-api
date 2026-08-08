@@ -4,7 +4,14 @@ import cats.data.Validated.{Invalid, Valid}
 import cats.data.ValidatedNel
 import cats.effect.IO
 import dicechess.play.core.{Principal, PublicPlayer, Seat}
-import dicechess.play.store.{GameResultRow, GameResultsStore, OpponentAggregateRow, OpponentFilter, PovResultFilter}
+import dicechess.play.store.{
+  GameResultRow,
+  GameResultsStore,
+  OpponentAggregateRow,
+  OpponentFilter,
+  PovResultFilter,
+  UserStore
+}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
@@ -123,7 +130,7 @@ object PlayerRoutes:
   private object VsParam     extends OptionalQueryParamDecoderMatcher[String]("vs")
   private object ResultParam extends OptionalQueryParamDecoderMatcher[String]("result")
 
-  def apply(results: GameResultsStore): HttpRoutes[IO] =
+  def apply(results: GameResultsStore, users: UserStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case GET -> Root / "players" / guestId / "games" :? LimitParam(limit) +& BeforeParam(before) +& VsParam(vs) +&
           ResultParam(result) =>
@@ -141,7 +148,17 @@ object PlayerRoutes:
             results
               .playerGamesPage(List(guest.externalId), beforeAt, vsFilter, povResult, bounded)
               .flatMap { page =>
-                Ok(PlayerGames(page.games.map(playerGame(Set(guest.externalId), _)), page.hasMore))
+                // One lookup for the whole page rather than one per row.
+                val opponentIds = page.games.flatMap(row => List(row.whiteExternalId, row.blackExternalId))
+                users
+                  .nicknamesByExternalId(opponentIds)
+                  .flatMap: nicknames =>
+                    Ok(
+                      PlayerGames(
+                        page.games.map(playerGame(Set(guest.externalId), _, nicknames)),
+                        page.hasMore
+                      )
+                    )
               }
 
       case GET -> Root / "players" / guestId / "opponents" =>
@@ -189,14 +206,18 @@ object PlayerRoutes:
     * a signed-in account is several identities at once (its own plus every claimed guest id, #236); the White seat
     * being one of them is what "I played White" means.
     */
-  private[server] def playerGame(requesterIds: Set[String], row: GameResultRow): PlayerGame =
+  private[server] def playerGame(
+      requesterIds: Set[String],
+      row: GameResultRow,
+      nicknames: Map[String, String]
+  ): PlayerGame =
     val requesterIsWhite   = requesterIds.contains(row.whiteExternalId)
     val (seat, opponentId) =
       if requesterIsWhite then (Seat.White, row.blackExternalId) else (Seat.Black, row.whiteExternalId)
-    val opponent = Principal.fromBotExternalId(opponentId) match
-      case Some(bot) => PublicPlayer.of(bot)
-      case None      => AnonymousHuman // any non-bot renders as the anonymous human face
-    val result = row.result match
+    // A registered opponent shows its nickname; a guest opponent stays anonymous, because `nicknames` has no guest
+    // path (see `UserStore.nicknamesByExternalId`). An empty map reproduces the pre-#194 anonymous behaviour exactly.
+    val opponent = PublicPlayer.ofExternalId(opponentId, nicknames)
+    val result   = row.result match
       case Some(0)                       => "draw"
       case Some(1) if requesterIsWhite   => "win"
       case Some(-1) if !requesterIsWhite => "win"
