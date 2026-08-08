@@ -6,7 +6,7 @@ import com.dimafeng.testcontainers.PostgreSQLContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
 import dicechess.play.core.*
 import dicechess.play.game.EngineOps
-import dicechess.play.store.{GameSnapshot, PgGameStore, TurnRecord}
+import dicechess.play.store.{GameSnapshot, GuestLink, PgGameStore, TurnRecord}
 import doobie.hikari.HikariTransactor
 import doobie.implicits.*
 import doobie.util.ExecutionContexts
@@ -30,7 +30,7 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
   private def store(pg: PostgreSQLContainer) =
     PgGameStore.resource(PgGameStore.Config(pg.jdbcUrl, pg.username, pg.password))
 
-  private def app(pg: PgGameStore): HttpApp[IO] = HistoryRoutes(pg).orNotFound
+  private def app(pg: PgGameStore): HttpApp[IO] = HistoryRoutes(pg, pg).orNotFound
 
   private def get(app: HttpApp[IO], id: String): IO[org.http4s.Response[IO]] =
     app.run(Request[IO](Method.GET, Uri.unsafeFromString(s"/games/$id/history")))
@@ -111,6 +111,68 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
     withContainers { pg =>
       store(pg).use { db =>
         get(app(db), "not-a-uuid").map(resp => assertEquals(resp.status, Status.NotFound))
+      }
+    }
+
+  /** The seat faces on a replay (#194 step 4). Two cases, and the second is the one that matters: a guest id that an
+    * account has CLAIMED must still render anonymous here, or signing up would retroactively put a name on every
+    * anonymous game that browser ever played — the promise #236 made.
+    */
+  test("a replay names a registered player"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          account <- db.upsertOnLogin("google", "hr-sub-named", None, IO.pure("HistoryNick"))
+          id      <- GameId.random
+          _    <- db.save(id, snapshotFixture(Principal.User(account.id), Principal.Bot("hr-team", "hr-bot"), ended()))
+          resp <- get(app(db), id.value)
+          json <- resp.as[io.circe.Json]
+        yield
+          assertEquals(resp.status, Status.Ok)
+          val white = json.hcursor.downField("players").downField("white")
+          assertEquals(white.get[String]("kind").toOption, Some("Human"))
+          assertEquals(white.get[Option[String]]("name").toOption, Some(Some("HistoryNick")))
+      }
+    }
+
+  test("a replay keeps a CLAIMED guest anonymous — signing up must not rename past anonymous games"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        val guestId = java.util.UUID.randomUUID().toString
+        for
+          account <- db.upsertOnLogin("google", "hr-sub-claimer", None, IO.pure("ClaimerNick"))
+          link    <- db.linkGuest(account.id, guestId)
+          id      <- GameId.random
+          _       <- db.save(id, snapshotFixture(Principal.Guest(guestId), Principal.Bot("hr-team", "hr-bot"), ended()))
+          resp    <- get(app(db), id.value)
+          json    <- resp.as[io.circe.Json]
+        yield
+          assertEquals(link, GuestLink.Linked, "precondition: the guest id is claimed by the account")
+          assertEquals(resp.status, Status.Ok)
+          val white = json.hcursor.downField("players").downField("white")
+          assertEquals(white.get[String]("kind").toOption, Some("Human"))
+          assertEquals(
+            white.get[Option[String]]("name").toOption,
+            Some(None),
+            "a claimed guest id must not resolve to its owner's nickname"
+          )
+      }
+    }
+
+  test("a replay leaves a deactivated account anonymous, as the rest of the public surface does"):
+    withContainers { pg =>
+      store(pg).use { db =>
+        for
+          account <- db.upsertOnLogin("google", "hr-sub-gone", None, IO.pure("GoneNick"))
+          id      <- GameId.random
+          _    <- db.save(id, snapshotFixture(Principal.User(account.id), Principal.Bot("hr-team", "hr-bot"), ended()))
+          _    <- db.deleteUser(account.id)
+          resp <- get(app(db), id.value)
+          json <- resp.as[io.circe.Json]
+        yield
+          assertEquals(resp.status, Status.Ok)
+          val white = json.hcursor.downField("players").downField("white")
+          assertEquals(white.get[Option[String]]("name").toOption, Some(None))
       }
     }
 

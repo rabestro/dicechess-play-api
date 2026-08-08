@@ -266,7 +266,7 @@ object Main extends IOApp.Simple:
           val strength = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(_ => StrengthRoutes(botStore, strengthCache))
           // The durable replay endpoint (#178) reads game_archive — DB-only seam again, same idiom as every route
           // above.
-          val history = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => HistoryRoutes(pg))
+          val history = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => HistoryRoutes(pg, pg))
           // Browser report intake (#212) writes client_reports — DB-only seam once more: without persistence there
           // is no queue to accept into, so the SPA's POST gets a 404 and its outbox simply retries later.
           val ingest = pgStore.fold(org.http4s.HttpRoutes.empty[IO])(pg => IngestRoutes(pg, ingestLimit))

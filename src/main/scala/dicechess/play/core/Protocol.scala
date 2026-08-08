@@ -78,14 +78,42 @@ enum PlayerKind:
   case Human, Bot
 
 /** The public face of a participant: enough for a board, lobby, or spectator to say WHO plays, never leaking ids. Bots
-  * show their team-qualified display name; guests and users stay anonymous (their ids are private).
+  * show their team-qualified display name; a registered player shows their nickname (#194 step 4); a guest stays
+  * anonymous.
+  *
+  * `name` is therefore a display string in all three cases and NEVER an id — `user:<uuid>` must not appear here (#249).
+  * A guest's `None` is a promise, not an omission: it is what keeps anonymous play anonymous even after that browser's
+  * owner signs up and claims the history.
   */
 final case class PublicPlayer(kind: PlayerKind, name: Option[String])
 
 object PublicPlayer:
+
+  /** The anonymous human face — every human whose nickname is unknown or deliberately withheld. */
+  val anonymousHuman: PublicPlayer = PublicPlayer(PlayerKind.Human, None)
+
+  /** The face of a participant with no name resolution available. Guests AND accounts come out anonymous here, which is
+    * correct for a guest and merely incomplete for an account: use [[withNames]] where a `UserStore` is in reach.
+    */
   def of(principal: Principal): PublicPlayer = principal match
     case Principal.Bot(team, name) => PublicPlayer(PlayerKind.Bot, Some(s"$team $name"))
-    case _                         => PublicPlayer(PlayerKind.Human, None)
+    case _                         => anonymousHuman
+
+  /** A registered player's face. Takes the nickname rather than looking it up, so this stays a pure wire type with no
+    * store dependency — the caller batches the lookup and passes what it found.
+    */
+  def user(nickname: String): PublicPlayer = PublicPlayer(PlayerKind.Human, Some(nickname))
+
+  /** The face of an external id, given a nickname map from `UserStore.nicknamesByExternalId`.
+    *
+    * The one funnel every read path should use, so the guest rule lives in a single place: a bot renders by name, an id
+    * present in the map renders as that nickname, and everything else — guests, unknown, deleted or deactivated
+    * accounts — renders anonymous. An id missing from the map can only ever cost a nickname, never anonymity.
+    */
+  def ofExternalId(externalId: String, nicknames: Map[String, String]): PublicPlayer =
+    Principal.fromBotExternalId(externalId) match
+      case Some(bot) => of(bot)
+      case None      => nicknames.get(externalId).fold(anonymousHuman)(user)
 
 /** Both seats' public faces, as carried on the game state. */
 final case class Players(white: PublicPlayer, black: PublicPlayer)

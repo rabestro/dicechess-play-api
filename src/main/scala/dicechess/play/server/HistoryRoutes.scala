@@ -3,7 +3,7 @@ package dicechess.play.server
 import cats.effect.IO
 import cats.syntax.all.*
 import dicechess.play.core.*
-import dicechess.play.store.{ArchivedGame, GameArchive, GameArchiveStore, TurnRecord}
+import dicechess.play.store.{ArchivedGame, GameArchive, GameArchiveStore, TurnRecord, UserStore}
 import dicechess.play.wire.Codecs.given
 import io.circe.Codec
 import org.http4s.circe.CirceEntityCodec.given
@@ -62,7 +62,7 @@ object HistoryRoutes:
 
   private val RevealedMaxAge: FiniteDuration = 365.days
 
-  def apply(archive: GameArchiveStore): HttpRoutes[IO] =
+  def apply(archive: GameArchiveStore, users: UserStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
       case GET -> Root / "games" / id / "history" =>
         // `game_archive.game_id` is a `uuid` column, so a non-UUID path segment would otherwise reach the store's
@@ -82,33 +82,39 @@ object HistoryRoutes:
                     // and archive).
                     case Left(failure) => InternalServerError(s"corrupt archive row for $id: ${failure.getMessage}")
                     case Right(record) =>
-                      val body = GameHistory(
-                        gameId = id,
-                        players =
-                          Players(publicPlayerOf(record.whiteExternalId), publicPlayerOf(record.blackExternalId)),
-                        rated = record.rated,
-                        timeControl = record.timeControl,
-                        result = record.result,
-                        termination = record.termination,
-                        finishedAt = finishedAt,
-                        initialDfen = record.initialDfen,
-                        turns = record.turns.map(historyTurn),
-                        fairness = HistoryFairness(
-                          commit = record.commit,
-                          seed = Some(record.serverSeed),
-                          clientSeeds = Some(ClientSeeds(record.clientSeedWhite, record.clientSeedBlack))
+                      // One lookup for the two seats. A replay is a public page, so this resolves ACCOUNT ids only —
+                      // `nicknamesByExternalId` has no guest path, which is what keeps a claimed guest id nameless here
+                      // even though its owner has an account (#236).
+                      val faces = users
+                        .nicknamesByExternalId(List(record.whiteExternalId, record.blackExternalId))
+                      faces.flatMap { nicknames =>
+                        val body = GameHistory(
+                          gameId = id,
+                          players = Players(
+                            PublicPlayer.ofExternalId(record.whiteExternalId, nicknames),
+                            PublicPlayer.ofExternalId(record.blackExternalId, nicknames)
+                          ),
+                          rated = record.rated,
+                          timeControl = record.timeControl,
+                          result = record.result,
+                          termination = record.termination,
+                          finishedAt = finishedAt,
+                          initialDfen = record.initialDfen,
+                          turns = record.turns.map(historyTurn),
+                          fairness = HistoryFairness(
+                            commit = record.commit,
+                            seed = Some(record.serverSeed),
+                            clientSeeds = Some(ClientSeeds(record.clientSeedWhite, record.clientSeedBlack))
+                          )
                         )
-                      )
-                      val cacheControl =
-                        `Cache-Control`(
-                          CacheDirective.public,
-                          CacheDirective.`max-age`(RevealedMaxAge),
-                          CacheDirective("immutable")
-                        )
-                      Ok(body).map(_.putHeaders(cacheControl))
-
-  private def publicPlayerOf(externalId: String): PublicPlayer =
-    Principal.fromBotExternalId(externalId).fold(AnonymousHuman)(PublicPlayer.of)
+                        val cacheControl =
+                          `Cache-Control`(
+                            CacheDirective.public,
+                            CacheDirective.`max-age`(RevealedMaxAge),
+                            CacheDirective("immutable")
+                          )
+                        Ok(body).map(_.putHeaders(cacheControl))
+                      }
 
   private def historyTurn(t: TurnRecord): HistoryTurn =
     HistoryTurn(t.turnNumber, seatOf(t.activeColor), t.dice, t.moves, t.fenAfter)

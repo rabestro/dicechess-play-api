@@ -977,6 +977,29 @@ final class PgGameStore private (xa: Transactor[IO])
       .timeout(SaveTimeout)
       .map(_.map(UserAccount.apply.tupled))
 
+  /** Account external ids to nicknames, for the public seat/opponent faces (#194 step 4).
+    *
+    * Only `user:` ids are looked at — a `guest:` id is dropped before the query is even built, because resolving one to
+    * the nickname of the account that claimed it would deanonymise that id's whole past (see the trait's contract).
+    *
+    * Parsing goes through `Principal.fromUserExternalId`, which owns the format and verifies the uuid shape — these ids
+    * come out of `game_results`, so the list can hold anything a client ever wrote, and a malformed one must yield "no
+    * name" rather than reach a `::uuid` cast and fail the transaction, taking a whole history page with it.
+    *
+    * `is_active` filters deactivated accounts, which this public surface treats as absent everywhere else too.
+    */
+  override def nicknamesByExternalId(externalIds: List[String]): IO[Map[String, String]] =
+    val userIds = externalIds.flatMap(Principal.fromUserExternalId).distinct
+    NonEmptyList
+      .fromList(userIds)
+      .fold(IO.pure(Map.empty[String, String])): ids =>
+        (fr"SELECT id::text, nickname FROM play.users WHERE is_active AND" ++ fragments.in(fr"id::text", ids))
+          .query[(String, String)]
+          .to[List]
+          .transact(xa)
+          .timeout(SaveTimeout)
+          .map(_.map((id, nickname) => Principal.User(id).externalId -> nickname).toMap)
+
   def ratingOf(userId: String): IO[Option[UserRating]] =
     sql"""SELECT glicko_rating, glicko_rd, glicko_vol FROM play.users WHERE id = $userId::uuid"""
       .query[(Double, Double, Double)]

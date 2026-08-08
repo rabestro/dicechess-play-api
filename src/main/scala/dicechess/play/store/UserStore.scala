@@ -3,6 +3,7 @@ package dicechess.play.store
 import cats.effect.IO
 
 import java.time.Instant
+import scala.annotation.unused
 
 /** A registered player (#231/#232, ADR-0017). `id` is a UUID minted by this server at first login — it is the stable
   * half of `Principal.User(id).externalId` and therefore must never be derived from anything a login provider controls
@@ -83,6 +84,21 @@ trait UserStore:
     * authenticated request needs the account, only rating-aware surfaces need the triple. `None` for an unknown id.
     */
   def ratingOf(userId: String): IO[Option[UserRating]]
+
+  /** Display names for ACCOUNT external ids (`user:<uuid>`), so a registered opponent shows a nickname instead of
+    * "Anonymous" on seats, seek offers, replays and history (#194 step 4). Batched because every caller resolves a
+    * whole page of games at once.
+    *
+    * **There is deliberately no guest path, and this must never grow one.** Resolving a `guest:<uuid>` to the nickname
+    * of the account that claimed it would retroactively deanonymise every anonymous game that id ever played — the
+    * promise #236 made, and the reason `GET /players/{guestId}/…` stays nameless. Ids that are not live accounts —
+    * guests, bots, deleted or deactivated accounts — are simply absent from the map, which every caller renders as the
+    * anonymous human face.
+    *
+    * The default answers "no names", so a store without accounts degrades to the pre-#194 anonymous behaviour rather
+    * than to a leak: a wrong answer here should cost a nickname, never someone's anonymity.
+    */
+  def nicknamesByExternalId(@unused externalIds: List[String]): IO[Map[String, String]] = IO.pure(Map.empty)
 
   /** Rename, enforcing the case-insensitive uniqueness the V14 index defines. Format validation (length, alphabet,
     * reserved words) is the route's job — this store only knows what the database can enforce.
