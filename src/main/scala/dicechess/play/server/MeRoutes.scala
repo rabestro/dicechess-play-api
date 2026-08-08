@@ -98,7 +98,13 @@ object MeRoutes:
                 results
                   .playerGamesPage(ids.toList, beforeAt, vsFilter, povResult, bounded)
                   .flatMap { page =>
-                    Ok(PlayerGames(page.games.map(PlayerRoutes.playerGame(ids, _)), page.hasMore))
+                    // One lookup for the page. The requester's own seats are in `ids` and never rendered as the
+                    // opponent, so this only ever names the OTHER side — and only when it is an account.
+                    val seen = page.games.flatMap(row => List(row.whiteExternalId, row.blackExternalId))
+                    users
+                      .nicknamesByExternalId(seen)
+                      .flatMap: nicknames =>
+                        Ok(PlayerGames(page.games.map(PlayerRoutes.playerGame(ids, _, nicknames)), page.hasMore))
                   }
               }
 

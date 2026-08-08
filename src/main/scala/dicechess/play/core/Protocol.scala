@@ -107,14 +107,24 @@ object PublicPlayer:
 
   /** The face of an external id, given a nickname map from `UserStore.nicknamesByExternalId`.
     *
-    * The one funnel every read path should use, so the guest rule lives in a single place: a bot renders by name, an id
-    * present in the map renders as that nickname, and everything else — guests, unknown, deleted or deactivated
-    * accounts — renders anonymous. An id missing from the map can only ever cost a nickname, never anonymity.
+    * The one funnel every read path should use, so the guest rule lives in a single place: a bot renders by name, an
+    * ACCOUNT id present in the map renders as that nickname, and everything else — guests, unknown, deleted or
+    * deactivated accounts — renders anonymous. An id missing from the map can only ever cost a nickname, never
+    * anonymity.
+    *
+    * Note the map is consulted **only** for ids that parse as `user:<uuid>`. That is not redundant with the store's own
+    * filtering: it makes a `guest:` key unrenderable here no matter who assembled the map, so this function enforces
+    * the rule rather than merely inheriting it from a well-behaved caller. Cheap, and the thing being protected is
+    * someone's anonymity.
     */
   def ofExternalId(externalId: String, nicknames: Map[String, String]): PublicPlayer =
     Principal.fromBotExternalId(externalId) match
       case Some(bot) => of(bot)
-      case None      => nicknames.get(externalId).fold(anonymousHuman)(user)
+      case None      =>
+        Principal
+          .fromUserExternalId(externalId)
+          .flatMap(_ => nicknames.get(externalId))
+          .fold(anonymousHuman)(user)
 
 /** Both seats' public faces, as carried on the game state. */
 final case class Players(white: PublicPlayer, black: PublicPlayer)

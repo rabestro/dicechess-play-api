@@ -62,11 +62,29 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
     def opponentsFor(externalIds: List[String]): IO[List[OpponentAggregateRow]] =
       IO.pure(externalIds.flatMap(opponents.getOrElse(_, Nil)))
 
+  /** A `UserStore` that resolves the given account ids to nicknames and nothing else. `nicknamesByExternalId` is the
+    * only method these routes touch; the rest exist to satisfy the trait and fail loudly if a route ever grows a
+    * dependency on them without a test noticing.
+    */
+  private def stubUsers(nicknames: Map[String, String]): UserStore = new UserStore:
+    override def nicknamesByExternalId(externalIds: List[String]): IO[Map[String, String]] =
+      IO.pure(nicknames.view.filterKeys(externalIds.contains).toMap)
+    def upsertOnLogin(p: String, s: String, e: Option[String], n: IO[String]): IO[UserAccount] =
+      IO.raiseError(AssertionError("unused"))
+    def userById(id: String): IO[Option[UserAccount]]                        = IO.pure(None)
+    def byNickname(nickname: String): IO[Option[UserAccount]]                = IO.pure(None)
+    def ratingOf(userId: String): IO[Option[UserRating]]                     = IO.pure(None)
+    def updateNickname(userId: String, nickname: String): IO[NicknameUpdate] = IO.raiseError(AssertionError("unused"))
+    def linkGuest(userId: String, guestId: String): IO[GuestLink]            = IO.raiseError(AssertionError("unused"))
+    def guestsOf(userId: String): IO[List[String]]                           = IO.pure(Nil)
+    def deleteUser(userId: String): IO[Boolean]                              = IO.raiseError(AssertionError("unused"))
+
   private def app(
       recent: Map[String, List[GameResultRow]] = Map.empty,
-      opponents: Map[String, List[OpponentAggregateRow]] = Map.empty
+      opponents: Map[String, List[OpponentAggregateRow]] = Map.empty,
+      nicknames: Map[String, String] = Map.empty
   ): HttpApp[IO] =
-    PlayerRoutes(stubResults(recent, opponents)).orNotFound
+    PlayerRoutes(stubResults(recent, opponents), stubUsers(nicknames)).orNotFound
 
   private val at = Instant.parse("2026-07-16T12:00:00Z")
 
@@ -262,3 +280,35 @@ class PlayerRoutesSuite extends munit.CatsEffectSuite:
       .flatMap: resp =>
         assertEquals(resp.status, Status.Ok)
         resp.as[Json].map(body => assertEquals(body, parse("""{"opponents":[]}""").toOption.get))
+
+  test("a games page names a registered opponent"):
+    val guest   = "guest:0192f000-0000-7000-8000-000000000001"
+    val account = "user:0192f000-0000-7000-8000-0000000000aa"
+    val app0    = app(
+      recent = Map(guest -> List(row("g1", white = guest, black = account, result = Some(1)))),
+      nicknames = Map(account -> "QuietRook")
+    )
+    app0
+      .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/${guest.drop("guest:".length)}/games")))
+      .flatMap(_.as[io.circe.Json])
+      .map: json =>
+        val opponent = json.hcursor.downField("games").downArray.downField("opponent")
+        assertEquals(opponent.get[String]("kind").toOption, Some("Human"))
+        assertEquals(opponent.get[Option[String]]("name").toOption, Some(Some("QuietRook")))
+
+  test("a games page leaves a guest opponent anonymous even when accounts are resolvable"):
+    val me    = "guest:0192f000-0000-7000-8000-000000000001"
+    val other = "guest:0192f000-0000-7000-8000-000000000002"
+    // The map deliberately contains a name for the OTHER guest's id: the store can never produce that, and this pins
+    // that the route does not invent one either.
+    val app0 = app(
+      recent = Map(me -> List(row("g2", white = me, black = other, result = Some(1)))),
+      nicknames = Map(other -> "ShouldNeverAppear")
+    )
+    app0
+      .run(Request[IO](Method.GET, Uri.unsafeFromString(s"/players/${me.drop("guest:".length)}/games")))
+      .flatMap(_.as[io.circe.Json])
+      .map: json =>
+        val opponent = json.hcursor.downField("games").downArray.downField("opponent")
+        assertEquals(opponent.get[String]("kind").toOption, Some("Human"))
+        assertEquals(opponent.get[Option[String]]("name").toOption, Some(None))
