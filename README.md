@@ -202,6 +202,7 @@ The API is published at `play-api.jc.id.lv` with a Cloudflare Tunnel — automat
    # PLAY_BOT_TOKENS=team|name|token
    # PLAY_OPEN_TO_HUMANS=gcp|expectimax-onnx-3|ONNX expectimax v3, with book   # ;-separated; opens bots to the human catalog
    # PLAY_RATED_FOR_HUMANS=gcp|expectimax-onnx-3   # ;-separated; operator-only — marks these bots eligible for rated human games
+   # PLAY_RETIRED_BOTS=lab|old-bot   # ;-separated; takes these bots off the ladder AND out of the human catalog at boot
    ```
 4. `docker compose pull && docker compose up -d`, then `curl https://play-api.jc.id.lv/health`.
 5. **Client:** set `VITE_PLAY_API_URL=https://play-api.jc.id.lv` in the Cloudflare Pages project (Production) and redeploy; the client derives `wss://…` for the game socket.

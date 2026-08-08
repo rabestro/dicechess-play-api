@@ -107,7 +107,13 @@ two, and **eligibility is decided in the batch, not at game creation**: `game_re
 room was told. The rules, each with its own skip reason: a guest seat is never rated (resetting a guest identity
 would make rating free); an account vs a bot counts only if that bot is operator-curated
 (`bots.rated_for_humans` via `PLAY_RATED_FOR_HUMANS`, `;`-separated `team|name`), never on the bot's own say-so;
-an account vs a bot it OWNS never counts. `applyRatingUpdate` therefore spans two TABLES in one transaction —
+an account vs a bot it OWNS never counts. Retiring a bot is the third operator roster, `PLAY_RETIRED_BOTS` (same
+`;`-separated `team|name` grammar): it takes the listed bots off the ladder AND out of the human catalog, and it is the
+only roster that CLEARS rather than sets. It exists because the server stores only a token's SHA-256, so a bot whose
+registration token was lost cannot call `/bot/ladder/leave` for itself and was previously un-retirable — it stayed
+listed and kept being paired regardless of whether anything was still answering. It is applied after the additive
+rosters (so a name in both is retired, and `Main.warnRosterConflicts` says so at boot) and is a one-shot boot action,
+not a ban: a bot that still holds its token may rejoin. `applyRatingUpdate` therefore spans two TABLES in one transaction —
 atomicity is per game, not per table. Ladder auto-park stays bot-only: a human losing on time is not a dead
 endpoint. **Never expose `bots.rated_for_humans` on the bot API**:
 its neighbours `on_ladder`/`open_to_humans` are self-service and harmless, but an author who could set THIS one

@@ -88,3 +88,80 @@ class CatalogRosterSuite extends munit.CatsEffectSuite:
         Some(false),
         "open_to_humans is self-service; rated_for_humans must never ride along with it"
       )
+
+  // The retirement roster. Both flags default to false (V4, V8), so every test below puts the bot IN service
+  // first: retiring a freshly registered bot would pass against a no-op implementation and prove nothing.
+
+  test("applyRetired takes an in-service bot off the ladder AND out of the catalog"):
+    for
+      store <- BotStore.inMemory
+      _     <- store.register("t", "serving", "hash-serving")
+      // In service on both axes — this is what makes the assertions below load-bearing.
+      _       <- store.setOnLadder("t", "serving", onLadder = true)
+      _       <- store.openToHumans("t", "serving", Some("Still playing"))
+      before  <- store.ratingOf("t", "serving")
+      pre     <- store.openToHumansBots
+      results <- CatalogRoster.applyRetired(store, "t|serving")
+      after   <- store.ratingOf("t", "serving")
+      pool    <- store.openToHumansBots
+    yield
+      assertEquals(before.map(_.onLadder), Some(true), "setup must actually put the bot on the ladder")
+      assert(pre.contains(Principal.Bot("t", "serving")), s"setup must actually open the bot, got $pre")
+
+      assertEquals(results, List(Result.Retired(Entry("t", "serving", None))))
+      assertEquals(after.map(_.onLadder), Some(false), "retirement must take the bot off the ladder")
+      assert(!pool.contains(Principal.Bot("t", "serving")), s"retirement must close the bot to humans, got $pool")
+
+  test("applyRetired skips a name that is not a registered bot"):
+    for
+      store   <- BotStore.inMemory
+      results <- CatalogRoster.applyRetired(store, "t|ghost")
+    yield assertEquals(results, List(Result.Skipped(Entry("t", "ghost", None))))
+
+  test("applyRetired leaves a bot absent from the roster in service"):
+    for
+      store <- BotStore.inMemory
+      _     <- store.register("t", "retired", "hash-retired")
+      _     <- store.register("t", "keeps-playing", "hash-keeps-playing")
+      _     <- store.setOnLadder("t", "retired", onLadder = true)
+      _     <- store.setOnLadder("t", "keeps-playing", onLadder = true)
+      _     <- store.openToHumans("t", "keeps-playing", None)
+      _     <- CatalogRoster.applyRetired(store, "t|retired")
+      gone  <- store.ratingOf("t", "retired")
+      stays <- store.ratingOf("t", "keeps-playing")
+      pool  <- store.openToHumansBots
+    yield
+      assertEquals(gone.map(_.onLadder), Some(false))
+      assertEquals(stays.map(_.onLadder), Some(true), "the roster must only ever touch the names it lists")
+      assert(pool.contains(Principal.Bot("t", "keeps-playing")), s"an unlisted bot stays in the catalog, got $pool")
+
+  test("applyRetired does not discard operator curation for rating"):
+    // Taking a bot out of service is not a judgement on whether its games would have counted. Clearing this too
+    // would silently drop `PLAY_RATED_FOR_HUMANS` curation that only an operator can restore, and it buys nothing:
+    // a bot that is off the ladder and closed to humans plays no games to rate.
+    for
+      store <- BotStore.inMemory
+      _     <- store.register("t", "curated", "hash-curated")
+      _     <- CatalogRoster.applyRated(store, "t|curated")
+      _     <- CatalogRoster.applyRetired(store, "t|curated")
+      after <- store.ratingOf("t", "curated")
+    yield assertEquals(after.map(_.ratedForHumans), Some(true))
+
+  test("conflicts reports a bot listed as retired and additively, and nothing when the lists are disjoint"):
+    assertEquals(
+      CatalogRoster.conflicts(openSpec = "t|both|Desc", ratedSpec = "", retiredSpec = "t|both"),
+      List(Entry("t", "both", Some("Desc")))
+    )
+    assertEquals(
+      CatalogRoster.conflicts(openSpec = "", ratedSpec = "t|both", retiredSpec = "t|both"),
+      List(Entry("t", "both", None))
+    )
+    // Named in both additive rosters and retired: still one line to fix, not two.
+    assertEquals(
+      CatalogRoster.conflicts(openSpec = "t|both", ratedSpec = "t|both", retiredSpec = "t|both"),
+      List(Entry("t", "both", None))
+    )
+    assertEquals(CatalogRoster.conflicts("t|open", "t|rated", "t|retired"), Nil)
+    assertEquals(CatalogRoster.conflicts("", "", ""), Nil)
+    // Same name, different team is a different bot.
+    assertEquals(CatalogRoster.conflicts("other|same", "", "t|same"), Nil)

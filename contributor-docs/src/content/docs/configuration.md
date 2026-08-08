@@ -61,6 +61,7 @@ in their queues undelivered. Boot warns on stderr, and nothing else complains.
 | `RETENTION_BATCH_SIZE` | Optional, default `1000`. |
 | `PLAY_BOT_TOKENS` | Statically configured bots, as `team\|name\|token` CSV. |
 | `PLAY_RATED_FOR_HUMANS` | Operator-only roster (`;`-separated `team\|name`) marking bots as **eligible** for a human-vs-bot game to count for rating (#247). Eligibility only — the rating batch acts on it from #248. Additive; never settable from the bot API. |
+| `PLAY_RETIRED_BOTS` | Retirement roster (`;`-separated `team\|name`): takes each listed bot off the ladder **and** out of the human catalog at boot. The only roster that clears flags rather than setting them, and the only way to retire a bot whose registration token was lost — the server keeps just a SHA-256, so such a bot cannot call `/bot/ladder/leave` for itself and would otherwise stay listed and paired forever. Applied after the two additive rosters, so a name in both is retired and warned about at boot. Not a ban: a bot that still holds its token can rejoin afterwards. |
 | `PLAY_CORS_ORIGINS` | Allowed origins; empty allows any (credential-less). A non-empty list also enables credentialed CORS — required once sign-in is on. |
 | `APP_VERSION` | Surfaced at `GET /version`. Set by the CD workflow from the git tag. |
 

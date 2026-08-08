@@ -113,7 +113,13 @@ object Main extends IOApp.Simple:
       // The curated-for-rating roster (#247): which bots are ELIGIBLE for a human-vs-bot game to count for rating.
       // Eligibility only — the batch that acts on it arrives in #248. Operator-only by design: see V15 and
       // CatalogRoster for why this must never be reachable from the bot API.
-      _         <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyRatedFromEnv(pg).void)
+      _ <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyRatedFromEnv(pg).void)
+      // The retirement roster: take a bot off the ladder and out of the catalog. Applied AFTER the two additive
+      // rosters so it wins on a name listed in both, and preceded by the overlap warning because that is an
+      // operator mistake rather than a way to express anything. This is the only path that can retire a bot whose
+      // registration token was lost — see CatalogRoster for why it clears while its siblings only ever set.
+      _         <- warnRosterConflicts
+      _         <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyRetiredFromEnv(pg).void)
       botEvents <- BotEvents.create
       // Declared per-bot capacity (#189). Both accept paths take the same `Direct` allowance — the full declaration,
       // not the ladder's reserved share: a bot accepting a challenge or holding an open seek chose that game itself,
@@ -347,3 +353,24 @@ object Main extends IOApp.Simple:
         )
         .whenA(sys.env.contains(obsolete))
     }
+
+  /** A bot named by both an additive roster and `PLAY_RETIRED_BOTS` is not a way to express anything: retirement is
+    * applied last, so it simply wins, and the additive entry does nothing but re-open the same argument on every
+    * restart. Same reasoning as [[warnLegacyLadderVars]] — an env var that is set and not doing what its presence
+    * suggests gets a loud line at boot instead of being inferred from behaviour later.
+    */
+  private def warnRosterConflicts: IO[Unit] =
+    CatalogRoster
+      .conflicts(
+        openSpec = sys.env.getOrElse("PLAY_OPEN_TO_HUMANS", ""),
+        ratedSpec = sys.env.getOrElse("PLAY_RATED_FOR_HUMANS", ""),
+        retiredSpec = sys.env.getOrElse("PLAY_RETIRED_BOTS", "")
+      )
+      .traverse_ { entry =>
+        cats.effect.std
+          .Console[IO]
+          .errorln(
+            s"[play][catalog] ${entry.team}/${entry.name} is listed as retired AND in an additive roster; " +
+              "retirement is applied last and WINS — remove it from the other list."
+          )
+      }
