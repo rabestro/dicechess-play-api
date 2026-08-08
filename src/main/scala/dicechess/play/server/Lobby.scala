@@ -23,7 +23,8 @@ final class Lobby private (
     ttl: FiniteDuration,
     botTtl: FiniteDuration,
     maxOpenSeeksPerBot: Int,
-    admitBoth: (Principal, Principal) => IO[Boolean]
+    admitBoth: (Principal, Principal) => IO[Boolean],
+    resolveNicknames: List[String] => IO[Map[String, String]]
 ):
   import Lobby.*
 
@@ -32,14 +33,17 @@ final class Lobby private (
     * open seeks are capped (`Left` when spent); guests keep the uncapped 15s-poll semantics.
     */
   def create(creator: Principal, timeControl: TimeControl): IO[Either[CreateRejected, (Seek, String)]] =
-    (nextId.getAndUpdate(_ + 1), randomSecret, IO.monotonic).flatMapN: (n, secret, now) =>
-      val face = PublicPlayer.of(creator)
-      val seek = Seek(s"seek-$n", timeControl, face.kind, face.name)
-      seeks.modify: current =>
-        val openByCreator = current.values.count(e => e.creator == creator && e.state == EntryState.Open)
-        if face.kind == PlayerKind.Bot && openByCreator >= maxOpenSeeksPerBot then
-          (current, Left(CreateRejected.TooManyOpenSeeks))
-        else (current.updated(seek.id, Entry(seek, creator, secret, EntryState.Open, now)), Right((seek, secret)))
+    (nextId.getAndUpdate(_ + 1), randomSecret, IO.monotonic, resolveNicknames(List(creator.externalId)))
+      .flatMapN: (n, secret, now, names) =>
+        // A registered creator's nickname, so a human browsing the lobby can see WHO is offering rather than only
+        // "Anonymous". Resolved once here — a seek lives 15 seconds between polls, so there is nothing to go stale.
+        val face = PublicPlayer.ofExternalId(creator.externalId, names)
+        val seek = Seek(s"seek-$n", timeControl, face.kind, face.name)
+        seeks.modify: current =>
+          val openByCreator = current.values.count(e => e.creator == creator && e.state == EntryState.Open)
+          if face.kind == PlayerKind.Bot && openByCreator >= maxOpenSeeksPerBot then
+            (current, Left(CreateRejected.TooManyOpenSeeks))
+          else (current.updated(seek.id, Entry(seek, creator, secret, EntryState.Open, now)), Right((seek, secret)))
 
   /** Only seeks still `Open` — claimed/matched ones are hidden from the public list. */
   def list: IO[List[Seek]] =
@@ -202,10 +206,15 @@ object Lobby:
       ttl: FiniteDuration = DefaultTtl,
       botTtl: FiniteDuration = DefaultBotTtl,
       maxOpenSeeksPerBot: Int = DefaultMaxOpenSeeksPerBot,
-      admitBoth: (Principal, Principal) => IO[Boolean] = AdmitAny
+      admitBoth: (Principal, Principal) => IO[Boolean] = AdmitAny,
+      // Display names for seek creators — `UserStore.nicknamesByExternalId` in production. Same shape and same default
+      // as `GameRegistry.create`: no accounts means every human offers anonymously, as before #194.
+      resolveNicknames: List[String] => IO[Map[String, String]] = _ => IO.pure(Map.empty)
   ): IO[Lobby] =
     (Ref.of[IO, Map[String, Entry]](Map.empty), Ref.of[IO, Long](0L))
-      .mapN((seeks, nextId) => new Lobby(seeks, registry, nextId, ttl, botTtl, maxOpenSeeksPerBot, admitBoth))
+      .mapN((seeks, nextId) =>
+        new Lobby(seeks, registry, nextId, ttl, botTtl, maxOpenSeeksPerBot, admitBoth, resolveNicknames)
+      )
 
   private def randomSecret: IO[String] = IO:
     val bytes = new Array[Byte](16)

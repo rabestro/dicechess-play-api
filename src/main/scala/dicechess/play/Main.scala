@@ -103,10 +103,16 @@ object Main extends IOApp.Simple:
   private def serve(resources: (GameStore, BotStore, Option[PgGameStore], Client[IO], IO[Unit])): IO[Unit] =
     val (store, botStore, pgStore, httpClient, deliverer) = resources
     for
-      registry <- GameRegistry.create(store = store)
-      resumed  <- registry.resume
-      _        <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
-      botAuth  <- BotAuth.fromEnv(botStore)
+      registry <- GameRegistry.create(
+        store = store,
+        // Accounts live in Postgres, so seat nicknames are resolvable only when persistence is configured; without it
+        // every human renders anonymous, which is the pre-#194 behaviour.
+        resolveNicknames =
+          pgStore.fold[List[String] => IO[Map[String, String]]](_ => IO.pure(Map.empty))(_.nicknamesByExternalId)
+      )
+      resumed <- registry.resume
+      _       <- IO.println(s"[play] resumed $resumed live game(s)").whenA(resumed > 0)
+      botAuth <- BotAuth.fromEnv(botStore)
       // Admin/env catalog roster (ADR-0014): open configured bots to human games at startup — the path for a bot that
       // can't self-flag via POST /bot/open-to-humans (e.g. a lost token). Persistence-only, like the catalog it feeds.
       _ <- pgStore.fold(IO.unit)(pg => CatalogRoster.applyFromEnv(pg).void)
@@ -125,8 +131,13 @@ object Main extends IOApp.Simple:
       // Registration is rarer than anon minting by nature (one durable identity per team, not one per test session),
       // so it gets its own, much stricter per-IP budget.
       registerLimit <- AnonMintLimiter.create(limit = RegisterLimitPerHour)
-      lobby         <- Lobby.create(registry, admitBoth = admitBoth)
-      cors          <- Cors.fromEnv
+      lobby         <- Lobby.create(
+        registry,
+        admitBoth = admitBoth,
+        resolveNicknames =
+          pgStore.fold[List[String] => IO[Map[String, String]]](_ => IO.pure(Map.empty))(_.nicknamesByExternalId)
+      )
+      cors <- Cors.fromEnv
       // Google sign-in config (#233, ADR-0017). Read here, applied where the routes mount below: the feature needs
       // BOTH halves (Google client + session secret) and persistence — anything less leaves the auth surface unmounted.
       googleConfig  <- GoogleAuth.configFromEnv

@@ -89,3 +89,39 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
         }
       }
     }
+
+  /** Seat faces on the live wire (#194 step 4). The registry resolves them once at creation, which is why no caller of
+    * `create` had to change — and why a rename mid-game keeps the old label (see `Session.displayNames`).
+    */
+  test("a live game names a registered seat and leaves a guest anonymous"):
+    val account = Principal.User("0192f000-0000-7000-8000-0000000000aa")
+    val guest   = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+    GameRegistry
+      .create(resolveNicknames =
+        ids => IO.pure(Map(account.externalId -> "QuietRook").filter((k, _) => ids.contains(k)))
+      )
+      .flatMap: registry =>
+        registry
+          .create(account, guest)
+          .flatMap:
+            case Left(error)      => IO(fail(s"room creation failed: $error"))
+            case Right((_, room)) =>
+              room.snapshot.map: state =>
+                assertEquals(state.players.map(_.white.name), Some(Some("QuietRook")))
+                assertEquals(state.players.map(_.black.name), Some(None), "a guest seat must stay anonymous")
+
+  test("a live game is anonymous on both seats when no names can be resolved"):
+    val account = Principal.User("0192f000-0000-7000-8000-0000000000aa")
+    val guest   = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+    // The default resolver — in-memory mode, and the pre-#194 behaviour.
+    GameRegistry
+      .create()
+      .flatMap: registry =>
+        registry
+          .create(account, guest)
+          .flatMap:
+            case Left(error)      => IO(fail(s"room creation failed: $error"))
+            case Right((_, room)) =>
+              room.snapshot.map: state =>
+                assertEquals(state.players.map(_.white.name), Some(None))
+                assertEquals(state.players.map(_.black.name), Some(None))

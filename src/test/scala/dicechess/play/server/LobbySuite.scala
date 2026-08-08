@@ -217,3 +217,19 @@ class LobbySuite extends munit.CatsEffectSuite:
       assertEquals(busy, Left(Lobby.Rejected.Busy): Either[Lobby.Rejected, Lobby.Match])
       assertEquals(unknown, Left(Lobby.Rejected.NotFound): Either[Lobby.Rejected, Lobby.Match])
       assertEquals(ownSeek, Left(Lobby.Rejected.OwnSeek): Either[Lobby.Rejected, Lobby.Match])
+
+  test("a seek carries the registered creator's nickname, and none for a guest"):
+    val account = Principal.User("0192f000-0000-7000-8000-0000000000aa")
+    val guest   = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+    for
+      reg <- GameRegistry.create()
+      l   <- Lobby.create(
+        reg,
+        resolveNicknames = ids => IO.pure(Map(account.externalId -> "QuietRook").filter((k, _) => ids.contains(k)))
+      )
+      named <- l.create(account, TimeControl.Unlimited)
+      anon  <- l.create(guest, TimeControl.Unlimited)
+    yield
+      assertEquals(named.map(_._1.name), Right(Some("QuietRook")))
+      // A guest offering a game stays anonymous in the public list, same as everywhere else.
+      assertEquals(anon.map(_._1.name), Right(None))
