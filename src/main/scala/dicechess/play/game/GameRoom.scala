@@ -551,6 +551,12 @@ object GameRoom:
       state: GameState,
       version: Long,
       players: Map[Seat, Principal],
+      // Display names for the seats, keyed by external id — resolved ONCE when the room is created and carried
+      // verbatim afterwards, exactly like `rated`/`ladder`. A room emits a snapshot on every move, so this must never
+      // become a lookup: `publicAt` is called far too often for that. The cost of freezing it is that a rename
+      // mid-game keeps the old label until the next room, which is the better trade — a board whose opponent label
+      // changes under you mid-game is worse than one that is a few minutes stale.
+      displayNames: Map[String, String],
       dice: DiceSource,
       ply: Long,
       pending: Boolean,
@@ -619,15 +625,24 @@ object GameRoom:
         revealed,
         seeds,
         Option.when(pending && legalTurns.sizeIs <= maxInlinePaths)(legalTree),
-        // The public faces of the seats: who a board or spectator is looking at (bots by name, humans anonymous).
+        // The public faces of the seats: bots by name, registered players by nickname, guests anonymous. The guest
+        // rule lives in `PublicPlayer.ofExternalId`, not here.
         (players.get(Seat.White), players.get(Seat.Black))
-          .mapN((w, b) => Players(PublicPlayer.of(w), PublicPlayer.of(b)))
+          .mapN((w, b) =>
+            Players(
+              PublicPlayer.ofExternalId(w.externalId, displayNames),
+              PublicPlayer.ofExternalId(b.externalId, displayNames)
+            )
+          )
       )
 
   /** Create a room, or describe why the initial position is invalid — errors as values. */
   def create(
       players: Map[Seat, Principal],
       dice: DiceSource,
+      // Seat display names by external id, resolved by the caller before the room exists (see `Session.displayNames`).
+      // Empty means every human renders anonymous, which is the pre-#194 behaviour and what in-memory mode gets.
+      displayNames: Map[String, String] = Map.empty,
       initialDfen: String = EngineOps.InitialDfen,
       fanOutBuffer: Int = DefaultFanOutBuffer,
       idleCheck: FiniteDuration = DefaultIdleCheck,
@@ -651,6 +666,7 @@ object GameRoom:
             state0,
             0L,
             players,
+            displayNames,
             dice,
             0L,
             pending = false,
@@ -686,6 +702,9 @@ object GameRoom:
   def restore(
       snapshot: GameSnapshot,
       dice: DiceSource,
+      // Resolved by the caller from the snapshot's own principals — a snapshot does not persist display names, so
+      // without this a game resumed after a restart would show anonymous opponents for the rest of its life.
+      displayNames: Map[String, String] = Map.empty,
       fanOutBuffer: Int = DefaultFanOutBuffer,
       idleCheck: FiniteDuration = DefaultIdleCheck,
       disconnectGrace: FiniteDuration = DefaultDisconnectGrace,
@@ -704,6 +723,7 @@ object GameRoom:
             state0,
             snapshot.version,
             snapshot.players,
+            displayNames,
             dice,
             snapshot.ply,
             snapshot.pending,

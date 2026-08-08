@@ -1,6 +1,7 @@
 package dicechess.play.server
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
 import dicechess.play.core.*
 import dicechess.play.store.{GameSnapshot, GameStore}
 
@@ -89,3 +90,96 @@ class GameRegistrySuite extends munit.CatsEffectSuite:
         }
       }
     }
+
+  /** Seat faces on the live wire (#194 step 4). The registry resolves them once at creation, which is why no caller of
+    * `create` had to change — and why a rename mid-game keeps the old label (see `Session.displayNames`).
+    */
+  test("a live game names a registered seat and leaves a guest anonymous"):
+    val account = Principal.User("0192f000-0000-7000-8000-0000000000aa")
+    val guest   = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+    GameRegistry
+      .create(resolveNicknames =
+        ids => IO.pure(Map(account.externalId -> "QuietRook").filter((k, _) => ids.contains(k)))
+      )
+      .flatMap: registry =>
+        registry
+          .create(account, guest)
+          .flatMap:
+            case Left(error)      => IO(fail(s"room creation failed: $error"))
+            case Right((_, room)) =>
+              room.snapshot.map: state =>
+                assertEquals(state.players.map(_.white.name), Some(Some("QuietRook")))
+                assertEquals(state.players.map(_.black.name), Some(None), "a guest seat must stay anonymous")
+
+  test("a live game is anonymous on both seats when no names can be resolved"):
+    val account = Principal.User("0192f000-0000-7000-8000-0000000000aa")
+    val guest   = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+    // The default resolver — in-memory mode, and the pre-#194 behaviour.
+    GameRegistry
+      .create()
+      .flatMap: registry =>
+        registry
+          .create(account, guest)
+          .flatMap:
+            case Left(error)      => IO(fail(s"room creation failed: $error"))
+            case Right((_, room)) =>
+              room.snapshot.map: state =>
+                assertEquals(state.players.map(_.white.name), Some(None))
+                assertEquals(state.players.map(_.black.name), Some(None))
+
+  /** `resume` must resolve seat names for ALL revived games in ONE call. It used to ask per game — an N+1 at boot, and
+    * the exact thing `createRoom` avoids by resolving before the room exists.
+    */
+  test("resume resolves every revived game's seat names in a single lookup"):
+    val accountA = Principal.User("0192f000-0000-7000-8000-00000000000a")
+    val accountB = Principal.User("0192f000-0000-7000-8000-00000000000b")
+    val guest    = Principal.Guest("0192f000-0000-7000-8000-000000000001")
+
+    def snapshot(white: Principal, black: Principal): GameSnapshot =
+      GameSnapshot(
+        version = 1L,
+        dfen = dicechess.play.game.EngineOps.InitialDfen,
+        players = Map(Seat.White -> white, Seat.Black -> black),
+        seatTokens = Map(Seat.White -> "tw", Seat.Black -> "tb"),
+        serverSeed = "ab12cd34",
+        clientSeeds = Map.empty,
+        started = false,
+        ply = 0L,
+        pending = false,
+        status = GameStatus.Active,
+        timeControl = TimeControl.Unlimited,
+        remainingMs = Map.empty,
+        lastRoll = Nil,
+        turns = Vector.empty,
+        createdAtEpochMs = None,
+        rated = Some(false)
+      )
+
+    for
+      calls <- Ref.of[IO, Int](0)
+      ids   <- Ref.of[IO, List[String]](Nil)
+      idA   <- GameId.random
+      idB   <- GameId.random
+      store = new GameStore:
+        def save(id: GameId, s: GameSnapshot): IO[Unit]  = IO.unit
+        def loadActive: IO[List[(GameId, GameSnapshot)]] =
+          IO.pure(List(idA -> snapshot(accountA, guest), idB -> snapshot(accountB, guest)))
+      registry <- GameRegistry.create(
+        store = store,
+        resolveNicknames = requested =>
+          calls.update(_ + 1) *> ids.update(_ ++ requested) *>
+            IO.pure(Map(accountA.externalId -> "RookA", accountB.externalId -> "RookB"))
+      )
+      revived <- registry.resume
+      seen    <- calls.get
+      asked   <- ids.get
+      roomA   <- registry.get(idA)
+      stateA  <- roomA.traverse(_.snapshot)
+    yield
+      assertEquals(revived, 2)
+      assertEquals(seen, 1, "one lookup for every resumed game, not one per game")
+      // Both games' seats in the same request, de-duplicated (the shared guest appears once).
+      assertEquals(asked.distinct.size, asked.size, "the id list must already be distinct")
+      assert(asked.contains(accountA.externalId) && asked.contains(accountB.externalId))
+      assertEquals(stateA.flatMap(_.players.map(_.white.name)), Some(Some("RookA")))
+      assertEquals(stateA.flatMap(_.players.map(_.black.name)), Some(None), "the guest seat stays anonymous")

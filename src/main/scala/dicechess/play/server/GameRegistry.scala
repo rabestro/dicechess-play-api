@@ -17,7 +17,8 @@ final class GameRegistry private (
     rooms: Ref[IO, Map[GameId, GameRoom]],
     byPlayer: Ref[IO, Map[Principal, Set[GameId]]],
     disconnectGrace: FiniteDuration,
-    store: GameStore
+    store: GameStore,
+    resolveNicknames: List[String] => IO[Map[String, String]]
 ):
 
   def get(id: GameId): IO[Option[GameRoom]] = rooms.get.map(_.get(id))
@@ -88,9 +89,14 @@ final class GameRegistry private (
       ladder: Boolean
   ): IO[Either[String, (GameId, GameRoom)]] =
     for
-      made <- GameRoom.create(
+      // Resolved here rather than inside the room: a room emits a snapshot on every move, so the seat faces must be
+      // decided once and carried. Doing it in the registry also means no caller of `create` has to know about it —
+      // direct games, lobby accepts, catalog games, bot challenges and ladder pairings all get named seats for free.
+      names <- resolveNicknames(players.values.map(_.externalId).toList)
+      made  <- GameRoom.create(
         players,
         dice,
+        displayNames = names,
         disconnectGrace = disconnectGrace,
         timeControl = timeControl,
         rated = rated,
@@ -104,24 +110,32 @@ final class GameRegistry private (
     * that fails to restore is logged and skipped — one corrupt row must not take the server down.
     */
   def resume: IO[Int] =
-    store.loadActive.flatMap { snapshots =>
-      snapshots
-        .traverse { case (id, snapshot) =>
+    store.loadActive.flatMap: snapshots =>
+      // A snapshot does not persist display names, so they are resolved again on boot — otherwise a restart would leave
+      // every live game's opponents anonymous for the rest of its life. ONE query covering every resumed game's seats,
+      // not one per game: the same reason `createRoom` resolves before the room exists instead of letting the room look
+      // names up. The shared map is safe because a name is keyed by external id, not by game.
+      val seatIds = snapshots.flatMap((_, snapshot) => snapshot.players.values.map(_.externalId)).distinct
+      for
+        names    <- resolveNicknames(seatIds)
+        restored <- snapshots.traverse: (id, snapshot) =>
           DiceSource
             .fromHexSeed(snapshot.serverSeed)
-            .flatTraverse(dice =>
-              GameRoom.restore(snapshot, dice, disconnectGrace = disconnectGrace, persist = store.save(id, _))
-            )
+            .flatTraverse: dice =>
+              GameRoom.restore(
+                snapshot,
+                dice,
+                displayNames = names,
+                disconnectGrace = disconnectGrace,
+                persist = store.save(id, _)
+              )
             .map(id -> _)
-        }
-        .flatMap { restored =>
-          val failures  = restored.collect { case (id, Left(error)) => id -> error }
-          val successes = restored.collect { case (id, Right(room)) => (id, room) }
-          failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error")) *>
-            successes.traverse_((id, room) => register(id, room)) *>
-            successes.traverse_((_, room) => room.start).as(successes.size)
-        }
-    }
+        failures  = restored.collect { case (id, Left(error)) => id -> error }
+        successes = restored.collect { case (id, Right(room)) => (id, room) }
+        _ <- failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error"))
+        _ <- successes.traverse_((id, room) => register(id, room))
+        _ <- successes.traverse_((_, room) => room.start)
+      yield successes.size
 
   private def register(id: GameId, room: GameRoom): IO[Unit] =
     room.seating.flatMap: seats =>
@@ -142,12 +156,18 @@ final class GameRegistry private (
 
 object GameRegistry:
 
+  /** `resolveNicknames` turns external ids into display names for the seats — `UserStore.nicknamesByExternalId` in
+    * production. Passed as a function rather than the whole store (the `upsertOnLogin`/`freshNickname` precedent) so
+    * the registry gains no dependency on the accounts trait, and so the default is honestly "no names": in-memory mode
+    * has no accounts, and every human renders anonymous exactly as before #194.
+    */
   def create(
       disconnectGrace: FiniteDuration = GameRoom.DefaultDisconnectGrace,
-      store: GameStore = GameStore.noop
+      store: GameStore = GameStore.noop,
+      resolveNicknames: List[String] => IO[Map[String, String]] = _ => IO.pure(Map.empty)
   ): IO[GameRegistry] =
     (Ref.of[IO, Map[GameId, GameRoom]](Map.empty), Ref.of[IO, Map[Principal, Set[GameId]]](Map.empty))
-      .mapN(GameRegistry(_, _, disconnectGrace, store))
+      .mapN(GameRegistry(_, _, disconnectGrace, store, resolveNicknames))
 
   /** Whether a game between these participants should count toward rating, given the caller's request. Anonymous
     * participants — bot accounts on the `anon` team (`POST /bot/anon`), and human guests (there is no registered-human
