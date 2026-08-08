@@ -36,6 +36,36 @@ class CorsSuite extends munit.CatsEffectSuite:
           "preflight is missing Access-Control-Allow-Methods"
         )
 
+  /** The regression behind a production outage: with `PLAY_CORS_ORIGINS` set, every browser POST that carries
+    * `content-type: application/json` is preflighted, and the preflight came back with NO `Access-Control-*` headers at
+    * all — so the browser blocked starting a game, creating a seek, and recording a finished game, while plain GETs
+    * kept working and made the API look healthy. The credential-less policy above was covered; this branch was not.
+    */
+  test("an OPTIONS preflight is answered with the CORS headers under an allow-list too"):
+    val preflight = Request[IO](Method.OPTIONS, uri"/lobby/play-bot")
+      .putHeaders(
+        origin("https://play.jc.id.lv"),
+        Header.Raw(ci"Access-Control-Request-Method", "POST"),
+        Header.Raw(ci"Access-Control-Request-Headers", "content-type")
+      )
+    app("https://play.jc.id.lv")
+      .run(preflight)
+      .map: resp =>
+        assertEquals(allowOrigin(resp.headers), Some("https://play.jc.id.lv"))
+        assert(
+          resp.headers.get(ci"Access-Control-Allow-Methods").isDefined,
+          "preflight is missing Access-Control-Allow-Methods"
+        )
+        assert(
+          resp.headers.get(ci"Access-Control-Allow-Headers").isDefined,
+          "preflight is missing Access-Control-Allow-Headers"
+        )
+        assertEquals(
+          resp.headers.get(ci"Access-Control-Allow-Credentials").map(_.head.value),
+          Some("true"),
+          "a credentialed policy must say so on the preflight, not only on the actual response"
+        )
+
   test("an allow-list echoes a configured origin and omits the header for others"):
     val restricted = app("https://play.jc.id.lv,http://localhost:5173")
     for

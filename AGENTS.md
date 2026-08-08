@@ -284,6 +284,17 @@ switches CORS into credentialed mode; the empty allow-all default stays credenti
   The name follows the feature (the ladder), not the component that hosts the check. Renamed from
   `LADDER_TIMEOUT_PARK_PAIRS` by #190 — see the rename gotcha above for why an unrenamed old value
   is not silently equivalent.
+- **Credentialed CORS cannot use wildcards, and the failure is invisible on GETs.** With
+  `PLAY_CORS_ORIGINS` set, `Cors.policy` must enumerate methods and request headers:
+  `withAllowMethodsAll`/`withAllowHeadersAll` alongside `withAllowCredentials(true)` makes http4s
+  answer every **preflight** with NO `Access-Control-*` headers at all, because `*` is illegal next
+  to `Access-Control-Allow-Credentials`. Simple GETs keep their headers, so `/health`, `/version`,
+  `/leaderboard` and `/lobby/bots` all look fine while the browser blocks every POST that carries
+  `content-type: application/json` — starting a game, creating or accepting a seek, and recording a
+  finished game. This shipped in v0.16.0 and took production down silently; `CorsSuite` now pins the
+  preflight for the credentialed branch, not just the allow-all one. When a browser path gains a new
+  method or request header, add it to `CredentialedMethods`/`CredentialedHeaders` or its preflight
+  will be refused.
 - README status banner, the "in-memory for now" callout, and the roadmap placement of the seek
   lobby are stale — durability and the lobby shipped. Trust the code and `docs/bot-api.md`.
 - The house bot that opposes quickstart users is deployed outside this repo (via
