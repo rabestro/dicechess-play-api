@@ -93,7 +93,8 @@ object PublicPlayer:
   val anonymousHuman: PublicPlayer = PublicPlayer(PlayerKind.Human, None)
 
   /** The face of a participant with no name resolution available. Guests AND accounts come out anonymous here, which is
-    * correct for a guest and merely incomplete for an account: use [[withNames]] where a `UserStore` is in reach.
+    * correct for a guest and merely incomplete for an account — use [[ofExternalId]] instead wherever a nickname map
+    * from `UserStore.nicknamesByExternalId` can be batched first.
     */
   def of(principal: Principal): PublicPlayer = principal match
     case Principal.Bot(team, name) => PublicPlayer(PlayerKind.Bot, Some(s"$team $name"))

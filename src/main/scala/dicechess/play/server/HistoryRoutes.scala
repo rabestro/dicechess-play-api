@@ -55,12 +55,21 @@ final case class GameHistory(
   * writes (#177). Mounted only when persistence is configured, like `PlayerRoutes`/`LeaderboardRoutes`: without a
   * database there is no `game_archive` to read.
   *
-  * '''Caching.''' Every record here is a finished game and can never change again — cached as
-  * `public, max-age=1y, immutable`.
+  * '''Caching.''' The GAME is immutable — turns, dice, seeds and result can never change again — but the seat faces are
+  * not: they resolve the players' CURRENT nicknames, so the response as a whole is no longer eternal. It is therefore
+  * `public, max-age=5m` and deliberately NOT `immutable`.
+  *
+  * The binding constraint is account deletion, not rename staleness. `deleteUser` is a hard DELETE, and that is exactly
+  * how #237 anonymises history: the `user:<uuid>` left in the archive stops resolving to anyone. A `public, immutable,
+  * max-age=1y` response carrying a nickname would let a shared cache keep serving that name for a year after the
+  * account was deleted, which makes the anonymisation promise false in practice — and production sits behind a CDN, so
+  * this is not hypothetical. Five minutes still absorbs the burst a freshly shared replay link produces, while bounding
+  * how long a deleted player's name can outlive the deletion.
   */
 object HistoryRoutes:
 
-  private val RevealedMaxAge: FiniteDuration = 365.days
+  /** Short on purpose — see the caching note in the object's own doc: the seat faces are live-resolved. */
+  private val RevealedMaxAge: FiniteDuration = 5.minutes
 
   def apply(archive: GameArchiveStore, users: UserStore): HttpRoutes[IO] =
     HttpRoutes.of[IO]:
@@ -108,11 +117,7 @@ object HistoryRoutes:
                           )
                         )
                         val cacheControl =
-                          `Cache-Control`(
-                            CacheDirective.public,
-                            CacheDirective.`max-age`(RevealedMaxAge),
-                            CacheDirective("immutable")
-                          )
+                          `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(RevealedMaxAge))
                         Ok(body).map(_.putHeaders(cacheControl))
                       }
 

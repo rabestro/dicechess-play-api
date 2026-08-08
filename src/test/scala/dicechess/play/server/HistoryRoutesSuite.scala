@@ -58,7 +58,7 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
   private def ended(result: GameResult = GameResult.Win(Side.White), termination: Termination = Termination.Resign) =
     GameStatus.Ended(GameOver(result, termination))
 
-  test("a finished game reveals its fairness block immediately, cached as immutable"):
+  test("a finished game reveals its fairness block immediately, cached but not as immutable"):
     withContainers { pg =>
       store(pg).use { db =>
         val white = Principal.Guest("hr-unpaired-white")
@@ -94,7 +94,9 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
           assertEquals(
             resp.headers.get[`Cache-Control`],
             Some(
-              `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(365.days), CacheDirective("immutable"))
+              // NOT `immutable`, and minutes rather than a year: the seat faces resolve live nicknames, so a deleted
+              // account's name must not be servable by a cache long after #237 anonymised its history.
+              `Cache-Control`(CacheDirective.public, CacheDirective.`max-age`(5.minutes))
             )
           )
       }
@@ -159,7 +161,27 @@ class HistoryRoutesSuite extends CatsEffectSuite with TestContainerForAll:
       }
     }
 
-  test("a replay leaves a deactivated account anonymous, as the rest of the public surface does"):
+  test("a replay leaves an account with is_active = false anonymous"):
+    withContainers { pg =>
+      (store(pg), rawXa(pg)).tupled.use { (db, xa) =>
+        for
+          account <- db.upsertOnLogin("google", "hr-sub-inactive", None, IO.pure("InactiveNick"))
+          id      <- GameId.random
+          _ <- db.save(id, snapshotFixture(Principal.User(account.id), Principal.Bot("hr-team", "hr-bot"), ended()))
+          // Deactivation, not deletion: the row stays, so this is what exercises the `WHERE is_active` clause that the
+          // deleted-account test below cannot reach. No store method does this — nothing in the product deactivates an
+          // account yet — hence the direct UPDATE over the same raw connection the backfill-gap test uses.
+          _    <- sql"UPDATE play.users SET is_active = false WHERE id = ${account.id}::uuid".update.run.transact(xa)
+          resp <- get(app(db), id.value)
+          json <- resp.as[io.circe.Json]
+        yield
+          assertEquals(resp.status, Status.Ok)
+          val white = json.hcursor.downField("players").downField("white")
+          assertEquals(white.get[Option[String]]("name").toOption, Some(None))
+      }
+    }
+
+  test("a replay leaves a deleted account anonymous, as the rest of the public surface does"):
     withContainers { pg =>
       store(pg).use { db =>
         for
