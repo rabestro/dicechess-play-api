@@ -15,6 +15,14 @@ class CorsSuite extends munit.CatsEffectSuite:
   private def allowOrigin(headers: Headers): Option[String] =
     headers.get(ci"Access-Control-Allow-Origin").map(_.head.value)
 
+  /** A comma-separated CORS list header as a lower-cased set — the middleware chooses the casing and the order, and
+    * neither is part of what a browser checks.
+    */
+  private def headerValues(headers: Headers, name: CIString): Set[String] =
+    headers
+      .get(name)
+      .fold(Set.empty[String])(_.head.value.split(',').iterator.map(_.trim.toLowerCase).filter(_.nonEmpty).toSet)
+
   test("a normal GET from any origin gets Access-Control-Allow-Origin: * by default"):
     app("")
       .run(Request[IO](Method.GET, uri"/health").putHeaders(origin("https://play.jc.id.lv")))
@@ -51,14 +59,21 @@ class CorsSuite extends munit.CatsEffectSuite:
     app("https://play.jc.id.lv")
       .run(preflight)
       .map: resp =>
+        // Assert the CONTENT, not merely the presence: a preflight that answered
+        // `Access-Control-Allow-Methods: GET` would satisfy "the header exists" and still leave every
+        // POST blocked, which is the outage this test exists to catch.
+        assert(
+          resp.status == Status.Ok || resp.status == Status.NoContent,
+          s"unexpected preflight status ${resp.status}"
+        )
         assertEquals(allowOrigin(resp.headers), Some("https://play.jc.id.lv"))
         assert(
-          resp.headers.get(ci"Access-Control-Allow-Methods").isDefined,
-          "preflight is missing Access-Control-Allow-Methods"
+          headerValues(resp.headers, ci"Access-Control-Allow-Methods").contains("post"),
+          s"preflight does not allow POST: ${resp.headers.get(ci"Access-Control-Allow-Methods")}"
         )
         assert(
-          resp.headers.get(ci"Access-Control-Allow-Headers").isDefined,
-          "preflight is missing Access-Control-Allow-Headers"
+          headerValues(resp.headers, ci"Access-Control-Allow-Headers").contains("content-type"),
+          s"preflight does not allow content-type: ${resp.headers.get(ci"Access-Control-Allow-Headers")}"
         )
         assertEquals(
           resp.headers.get(ci"Access-Control-Allow-Credentials").map(_.head.value),
