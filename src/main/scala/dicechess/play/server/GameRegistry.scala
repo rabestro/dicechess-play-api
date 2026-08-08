@@ -110,34 +110,32 @@ final class GameRegistry private (
     * that fails to restore is logged and skipped — one corrupt row must not take the server down.
     */
   def resume: IO[Int] =
-    store.loadActive.flatMap { snapshots =>
-      snapshots
-        .traverse { case (id, snapshot) =>
-          // A snapshot does not persist display names, so they are resolved again per resumed game — otherwise a
-          // restart would leave every live game's opponents anonymous for the rest of its life.
-          resolveNicknames(snapshot.players.values.map(_.externalId).toList).flatMap { names =>
-            DiceSource
-              .fromHexSeed(snapshot.serverSeed)
-              .flatTraverse(dice =>
-                GameRoom.restore(
-                  snapshot,
-                  dice,
-                  displayNames = names,
-                  disconnectGrace = disconnectGrace,
-                  persist = store.save(id, _)
-                )
+    store.loadActive.flatMap: snapshots =>
+      // A snapshot does not persist display names, so they are resolved again on boot — otherwise a restart would leave
+      // every live game's opponents anonymous for the rest of its life. ONE query covering every resumed game's seats,
+      // not one per game: the same reason `createRoom` resolves before the room exists instead of letting the room look
+      // names up. The shared map is safe because a name is keyed by external id, not by game.
+      val seatIds = snapshots.flatMap((_, snapshot) => snapshot.players.values.map(_.externalId)).distinct
+      for
+        names    <- resolveNicknames(seatIds)
+        restored <- snapshots.traverse: (id, snapshot) =>
+          DiceSource
+            .fromHexSeed(snapshot.serverSeed)
+            .flatTraverse: dice =>
+              GameRoom.restore(
+                snapshot,
+                dice,
+                displayNames = names,
+                disconnectGrace = disconnectGrace,
+                persist = store.save(id, _)
               )
-              .map(id -> _)
-          }
-        }
-        .flatMap { restored =>
-          val failures  = restored.collect { case (id, Left(error)) => id -> error }
-          val successes = restored.collect { case (id, Right(room)) => (id, room) }
-          failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error")) *>
-            successes.traverse_((id, room) => register(id, room)) *>
-            successes.traverse_((_, room) => room.start).as(successes.size)
-        }
-    }
+            .map(id -> _)
+        failures  = restored.collect { case (id, Left(error)) => id -> error }
+        successes = restored.collect { case (id, Right(room)) => (id, room) }
+        _ <- failures.traverse_((id, error) => Console[IO].errorln(s"[play][resume] game ${id.value} skipped: $error"))
+        _ <- successes.traverse_((id, room) => register(id, room))
+        _ <- successes.traverse_((_, room) => room.start)
+      yield successes.size
 
   private def register(id: GameId, room: GameRoom): IO[Unit] =
     room.seating.flatMap: seats =>
